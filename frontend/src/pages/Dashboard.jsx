@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Plus, Globe, ArrowRight, LogOut, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { Plus, Globe, ArrowRight, LogOut, Loader2, CheckCircle2, AlertCircle, Code2 } from "lucide-react";
 import { toast } from "sonner";
 import api, { formatError } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -61,6 +61,9 @@ export default function Dashboard() {
         <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
           <Logo className="text-lg" />
           <div className="flex items-center gap-3">
+            <Link to="/app/code" data-testid="nav-workspace" className="inline-flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-full hover:bg-accent transition-colors">
+              <Code2 className="w-4 h-4" /> Workspace
+            </Link>
             <ThemeToggle />
             <span className="text-sm text-muted-foreground hidden sm:block">{user?.email}</span>
             <button onClick={() => { logout(); nav("/"); }} data-testid="logout-btn" className="grid place-items-center w-9 h-9 rounded-full border border-border hover:bg-accent transition-colors" aria-label="Log out">

@@ -36,6 +36,20 @@ Build a complete agentic system (per the AREVEI Product Direction doc) that work
 - Notifications/activity feed, model picker, theme toggle. ✅
 - Verified E2E by testing agent: backend 20/20; all AI features produce real LLM output.
 
+## AI Coding Platform (Phase 1+2 — added 2026-06)
+Daytona-backed Lovable/Bolt/v0-style coding workspace, reachable via the "Workspace" nav (2nd sidebar item + Dashboard link).
+- **Daytona sandboxes**: per-project persistent cloud workspace; auto-provision + scaffold a Vite+React app; `ensure_started` auto-starts stopped/paused/archived sandboxes and recovers errored ones; "Sync" button to wake manually. (`daytona_service.py`) ✅ verified
+- **Streaming coding agent**: OpenAI tool-calling loop (list_files/read_file/write_file/run_command) that edits the REAL sandbox filesystem and streams events → Codex-style summary per turn; persistent chat history per project. Model switching per task: GPT-4o / GPT-4o-mini (OpenAI), Claude 3.5 Sonnet / DeepSeek V3 / Qwen2.5 Coder (OpenRouter, incl. cheap models). (`coding_agent.py`, `coding.py`) ✅ verified via curl
+- **Professional IDE**: Monaco editor; Code / Preview / Terminal as a single common block (one view at a time); file tree on the far right, togglable; Run button boots the dev server and shows the live Daytona preview URL in an iframe; real interactive terminal (arbitrary commands). ✅ compiles; backend flows verified
+- Env creds stored for GitHub App, Vercel OAuth (deferred to next phase).
+
+### Coding Platform Backlog (next)
+- GitHub import (clone repo into sandbox) + push/PR via the stored GitHub App creds.
+- Vercel one-click deploy (OAuth) + auto-attach deployed URL to the marketing Brain.
+- v0-style quick-generate mode (prompt → full scaffold in one shot).
+- WebSocket PTY terminal + streaming command logs (currently request/response exec).
+- Not yet screenshot-verified in-browser (screenshot tool captures pre-auth redirect for protected routes); backend verified end-to-end.
+
 ## Backlog / Remaining
 - **P1**: Run long blog generations as background jobs (avoid ingress timeout on manual Run).
 - **P1**: Surface non-emergent provider failures to the user instead of silent fallback to default model.

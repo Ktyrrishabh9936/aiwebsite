@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { NavLink, Outlet, useParams, useNavigate, Link } from "react-router-dom";
 import {
   LayoutDashboard, Brain as BrainIcon, MessageSquare, ListChecks, FileText, Code2,
-  Bell, LogOut, ChevronLeft, Loader2,
+  Bell, LogOut, ChevronLeft, Loader2, Boxes,
 } from "lucide-react";
 import { toast } from "sonner";
 import api from "../lib/api";
@@ -14,6 +14,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popove
 
 const nav = [
   { to: "", label: "Overview", icon: LayoutDashboard, end: true },
+  { to: "/app/code", label: "Workspace", icon: Boxes, abs: true },
   { to: "brain", label: "Brain", icon: BrainIcon },
   { to: "manager", label: "Manager", icon: MessageSquare },
   { to: "tasks", label: "Tasks", icon: ListChecks },

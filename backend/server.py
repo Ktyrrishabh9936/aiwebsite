@@ -17,6 +17,7 @@ from bson import ObjectId
 
 from models import Workspace, Task, Blog, Notification, BLOG_IMAGE_POOL, now_iso
 from auth import build_auth_router, get_current_user, seed_admin
+from coding import build_coding_router
 import agents
 import llm_service
 
@@ -472,6 +473,7 @@ async def scheduler_loop():
 
 
 app.include_router(build_auth_router(db))
+app.include_router(build_coding_router(db))
 app.include_router(api)
 
 app.add_middleware(
@@ -488,6 +490,7 @@ async def startup():
     await db.users.create_index("email", unique=True)
     await db.workspaces.create_index("public_key")
     await db.blogs.create_index("slug", unique=True)
+    await db.code_projects.create_index("user_id")
     await seed_admin(db)
     asyncio.create_task(scheduler_loop())
     logger.info("Arevei backend ready")
