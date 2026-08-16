@@ -1,0 +1,60 @@
+{
+  "summary": "Full E2E completed. Backend 20/20 tests pass; frontend flows fully verified. All AI features exercised end-to-end with REAL LLM output (brain build for stripe.com produced 6 domains with real content, roadmap = 12 months + 15 tasks, blog editor loads a 24-block published blog, manager chat streamed the correct answer '43' to arithmetic probe -> confirms real LLM, not fallback). One real bug found: Embed widget.js and possibly public URLs use FastAPI request.base_url which resolves to insecure http://ai-manager-auto.cluster-12.preview.emergentcf.cloud, breaking the Live Preview iframe with Mixed Content errors on production HTTPS. Skills loaded: ai-testing-core, ai-testing-llm.",
+  "ai_feature_verdicts": [
+    "brain_build (primary) - pass - evidence: POST /api/workspaces {website_url: stripe.com} -> brain_status=ready within ~40s; 6 domains present (business_profile, brand_identity, audience, goals_constraints, evidence, decision_memory); business_profile.company_name populated. Verified via TestWorkspaceBrain::test_brain_domains + UI shows all 6 brain-domain cards. Skill: ai-testing-llm.",
+    "roadmap_and_tasks - pass - evidence: POST /api/workspaces/{id}/roadmap returned roadmap of length 12 and strategy_summary; 15 tasks visible in Tasks page; TestRoadmap passed. Skill: ai-testing-llm.",
+    "manager_chat_stream - pass - evidence: POST /api/workspaces/{id}/chat with 'What is 17 + 26? Reply with just the number.' streamed reply containing '43' both via curl-driven pytest AND via real UI chat_input. Confirms real LLM, not silent fallback. Skill: ai-testing-llm.",
+    "blog_generation - pass - evidence: POST /api/workspaces/{id}/blogs/generate returned blog with 24+ blocks, mix of paragraph/heading/list/quote; TestBlog passed; UI editor loads title, allows Add block, Preview toggle, Save, Publish. Skill: ai-testing-llm.",
+    "public_blog_render - pass - evidence: /blog/{slug} rendered h1 title + 40 block DOM elements. Skill: ai-testing-llm.",
+    "embed_widget - fail (Mixed Content) - see backend_issues.critical",
+    "scheduler_auto_run - pass (observed) - Tasks page shows an already-published blog created by scheduler + notifications entry; auto_count logic in server.py forces 3 first content tasks to run within ~2 min."
+  ],
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "/api/embed/widget.js and GET /api/public/blog/{slug} (workspace_url field)", "issue": "Widget JS is generated with api = str(request.base_url) which resolves to the internal cluster hostname http://ai-manager-auto.cluster-12.preview.emergentcf.cloud on the K8s ingress. When the widget is embedded on ANY HTTPS site (including the app's own Embed page live preview iframe), the browser blocks the fetch with 'Mixed Content: ... blocked; the content must be served over HTTPS.' The Live Preview shows 'Unable to load blogs.' Fix: use env var (REACT_APP_BACKEND_URL / PUBLIC_APP_URL) or read X-Forwarded-Proto / X-Forwarded-Host headers, or hardcode https:// scheme.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "/api/auth/register", "issue": "No minimum password validation (accepts any string including empty via Pydantic default) — recommend adding min length 6."},
+      {"endpoint": "GET /api/public/blog/{slug}", "issue": "PublicBlog.jsx uses `blog.workspace_url` for the 'Visit site' link but backend returns `workspace_name` + `public_key` only, so link never renders. Include the actual workspace website_url in the public blog response."},
+      {"endpoint": "POST /api/workspaces/{id}/chat", "issue": "Uses text/plain streaming without any auth check on Authorization header format edge cases - but no security issue observed; just a note that failed chat surfaces as plain '[error: ...]' text appended to stream (200 OK) instead of a stream error, which is acceptable but hides real errors."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Embed - Live preview iframe", "issue": "Mixed Content error blocks widget.js from loading blogs; iframe shows 'Unable to load blogs.' Root cause is backend widget.js api URL (see backend critical).", "affected_selectors": ["[data-testid=\"embed-preview\"]"]}
+    ],
+    "design_issues": [
+      {"screen": "PublicBlog.jsx", "issues": ["References undefined `workspace_url` field for 'Visit site' link (dead code path)"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Fix widget.js hostname: replace str(request.base_url) with an env-driven PUBLIC_APP_URL (or read X-Forwarded-Proto + X-Forwarded-Host) so the embed script uses HTTPS + the public preview hostname, not the internal insecure cluster URL. This unblocks embed live preview and any HTTPS external site using the widget.",
+    "Add website_url to the public blog response (or drop the dead workspace_url reference in PublicBlog.jsx).",
+    "(minor) Enforce min password length in RegisterInput."
+  ],
+  "critical_code_review_comments": [
+    "server.py widget_js uses request.base_url which reflects internal ingress host; must use forwarded headers or PUBLIC_APP_URL env",
+    "llm_service.generate_text has a graceful fallback to DEFAULT_MODEL on any exception – this could silently mask provider outages; consider surfacing the error to a task/notification instead of quietly retrying so users know the selected non-emergent model is failing",
+    "auth.py seed_admin correctly updates password when it changes (good). Cookie is set with SameSite=none + secure — appropriate for cross-origin.",
+    "server.py execute_task blocks on LLM calls inside the request handler for POST /tasks/{id}/run – on preview ingress with 100s cap this could 504 for long blog generations; consider running in background with polling",
+    "scheduler_loop polls every 30s and only claims one task per tick – multiple pending tasks may build up; consider claiming a small batch"
+  ],
+  "updated_files": [
+    "/app/backend/tests/__init__.py",
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": {"backend": "100% (20/20)", "frontend": "~95% (all core flows work; embed live preview blocked by backend Mixed Content bug)"},
+  "test_credentials": "admin@arevei.ai / arevei123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Session-scoped stripe.com workspace already existed from previous curl-based verification; tests used it. Additional test blog created with title starting 'TEST'. Register test creates users test_{uuid}@example.com — safe to leave.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend fully green. Only remaining bug is Mixed Content in /api/embed/widget.js — the api URL emitted uses request.base_url which produces http://ai-manager-auto.cluster-12.preview.emergentcf.cloud. After main agent fixes with env var REACT_APP_BACKEND_URL or forwarded headers, retest the Embed page's live preview iframe and verify the widget fetch succeeds and blog cards render. Two workspaces exist for admin: one with a full roadmap (id ends ...832876) and one without (...832878). Backend tests are idempotent and safe to re-run.",
+  "rca_of_the_issue": "server.py line 435: `backend = str(request.base_url).rstrip('/')` — behind the K8s ingress, FastAPI sees the internal service URL rather than the external public HTTPS URL. Since widget.js is served as plain JS to third-party HTTPS sites, the embedded fetch/href absolute URLs must be HTTPS. Fix options: (1) read os.environ.get('PUBLIC_APP_URL') / REACT_APP_BACKEND_URL and use that; (2) build the URL from `request.headers.get('x-forwarded-proto','https')` + `request.headers.get('x-forwarded-host', request.url.hostname)`; (3) just hardcode `https://` scheme + the Host header value. Same fix pattern should apply anywhere the backend needs to emit its own public URL."
+}

@@ -1,0 +1,103 @@
+@import url('https://api.fontshare.com/v2/css?f[]=cabinet-grotesk@900,800,700,500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    :root {
+        --background: 0 0% 98%;
+        --foreground: 0 0% 4%;
+        --card: 0 0% 100%;
+        --card-foreground: 0 0% 4%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 0 0% 4%;
+        --primary: 223 100% 33%;
+        --primary-foreground: 0 0% 100%;
+        --secondary: 0 0% 96%;
+        --secondary-foreground: 0 0% 9%;
+        --muted: 0 0% 96%;
+        --muted-foreground: 0 0% 32%;
+        --accent: 0 0% 94%;
+        --accent-foreground: 0 0% 9%;
+        --destructive: 14 82% 51%;
+        --destructive-foreground: 0 0% 100%;
+        --border: 0 0% 90%;
+        --input: 0 0% 90%;
+        --ring: 223 100% 33%;
+        --radius: 0.5rem;
+    }
+    .dark {
+        --background: 0 0% 4%;
+        --foreground: 0 0% 96%;
+        --card: 0 0% 8%;
+        --card-foreground: 0 0% 96%;
+        --popover: 0 0% 8%;
+        --popover-foreground: 0 0% 96%;
+        --primary: 220 100% 50%;
+        --primary-foreground: 0 0% 100%;
+        --secondary: 0 0% 13%;
+        --secondary-foreground: 0 0% 96%;
+        --muted: 0 0% 13%;
+        --muted-foreground: 0 0% 64%;
+        --accent: 0 0% 15%;
+        --accent-foreground: 0 0% 96%;
+        --destructive: 3 100% 61%;
+        --destructive-foreground: 0 0% 100%;
+        --border: 0 0% 15%;
+        --input: 0 0% 15%;
+        --ring: 220 100% 50%;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+    body {
+        @apply bg-background text-foreground;
+        font-family: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+    h1, h2, h3, h4, .font-display {
+        font-family: 'Cabinet Grotesk', 'Manrope', sans-serif;
+    }
+    code, pre, .font-mono {
+        font-family: 'JetBrains Mono', monospace;
+    }
+    ::selection {
+        background: hsl(var(--primary));
+        color: hsl(var(--primary-foreground));
+    }
+}
+
+.grain {
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+}
+
+.glass {
+    background: hsl(var(--background) / 0.7);
+    backdrop-filter: blur(18px);
+}
+
+@keyframes fade-up {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-up { animation: fade-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+@keyframes tracing {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+.tracing-beam {
+    background: linear-gradient(90deg, transparent, hsl(var(--primary) / 0.5), transparent);
+    background-size: 200% 100%;
+    animation: tracing 1.8s linear infinite;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 8px; }

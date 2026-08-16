@@ -1,0 +1,121 @@
+{
+  "theme": "light_and_dark",
+  "typography": {
+    "fonts": {
+      "heading": "Cabinet Grotesk",
+      "body": "Manrope",
+      "mono": "JetBrains Mono"
+    },
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tight font-black",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight font-bold",
+      "h3": "text-xl sm:text-2xl font-semibold",
+      "h4": "text-lg sm:text-xl font-medium",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm",
+      "overline": "text-xs tracking-[0.2em] uppercase font-bold"
+    },
+    "instructions_to_main_agent": "Use Cabinet Grotesk for all headings. Never use Inter for headings. Keep leading tight on headings and loose on body. Apply fonts in global CSS or Tailwind config."
+  },
+  "colors": {
+    "archetype": "ARCHETYPE 4: SWISS & HIGH-CONTRAST",
+    "light": {
+      "background": "#FAFAFA",
+      "surface": "#FFFFFF",
+      "border": "#E5E5E5",
+      "text_primary": "#0A0A0A",
+      "text_secondary": "#525252",
+      "primary": "#002FA7",
+      "primary_foreground": "#FFFFFF",
+      "accent": "#002FA7",
+      "destructive": "#E94E1B"
+    },
+    "dark": {
+      "background": "#0A0A0A",
+      "surface": "#141414",
+      "border": "#262626",
+      "text_primary": "#F5F5F5",
+      "text_secondary": "#A3A3A3",
+      "primary": "#0055FF",
+      "primary_foreground": "#FFFFFF",
+      "accent": "#0055FF",
+      "destructive": "#FF453A"
+    },
+    "instructions_to_main_agent": "Implement both light and dark modes. Default to system preference with a toggle. Use high contrast borders. Dark mode uses deep obsidian (#0A0A0A) never pure black. Avoid teal green or purple for AI elements, use primary blue. Never use pure transparent backgrounds for overlays or headers."
+  },
+  "visual_enhancers": {
+    "surfaces": [
+      "The Grid Borders: Use for Data-heavy sections (Brain View, Task Board). Expose the skeleton with subtle borders on right and bottom of grid items.",
+      "Glassmorphism (The Crystal): Use for sticky top navigation bar and floating pills. Light mode: bg-white/70 backdrop-blur-xl border-white/40. Dark mode: bg-black/60 backdrop-blur-xl border-white/10.",
+      "The Tracing Beam: Use for Specialist Agents panel cards to show active 'running' state."
+    ],
+    "shadows": "Ambient + direct shadows for floating elements. Mostly flat surfaces with sharp 1px borders in the dashboard to maintain Swiss style.",
+    "border_radius": "Subtle roundness. max 8px (rounded-md) for cards and widgets. Pill-shaped (rounded-full) for the model picker and tags."
+  },
+  "grids_and_layouts": {
+    "dashboard_layout": "Collapsible left sidebar for navigation. Top sticky header with Glassmorphism for Model Picker Pill and Notifications. Main content area with generous padding (p-6 to p-12).",
+    "bento_grid": "Mode B: High Density Grid (For Dashboards). Base Grid: grid-cols-1 md:grid-cols-3 lg:grid-cols-4. Tight gap (gap-4 or gap-6). Use for Brain View and Specialist Agents.",
+    "instructions_to_main_agent": "Ensure all grid items are direct children of grid containers. Mobile-first responsive always. Use padding heavily for visual separation."
+  },
+  "components": {
+    "buttons": "Pill-shaped (rounded-full) or sharp rounded-md with hover states (translate-y-[-1px] and slight shadow). Must have active focus states.",
+    "cards": "Cardless or flat rectangular with 1px border. Do not overuse shadows on cards.",
+    "navigation": "Sidebar must have icons. Top nav must have model picker.",
+    "model_picker": "Pill-shaped dropdown in top nav. Glassmorphism effect.",
+    "task_board": "Kanban or timeline style list. Left-aligned text. Agent avatars next to tasks.",
+    "blog_editor": "Block-based rich text editor look. Clean, minimal, no messy toolbars.",
+    "add_blog_system": "Code snippet display block with 'Copy' button. Monospace font.",
+    "public_blog_page": "Marketing quality. Swiss minimalist. Huge H1 heading. Large hero image with 30-50% overlay if text is on top."
+  },
+  "motion": {
+    "instructions_to_main_agent": "Use framer-motion for micro-interactions. Hover states on cards (translate-y-1). Staggered entrance animations for task lists. Never use 'transition: all'. Respect prefers-reduced-motion."
+  },
+  "accessibility": {
+    "instructions_to_main_agent": "Ensure APCA contrast standards. Large text min 3:1, normal text min 4.5:1. Explicit hover and focus states for all interactive elements. Add aria-hidden to decorative elements. CRITICAL: Add data-testid to all interactive elements."
+  },
+  "media_and_icons": {
+    "icon_library": "lucide-react",
+    "image_urls": {
+      "user_avatar": {
+        "url": "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwxfHxwcm9mZXNzaW9uYWwlMjBoZWFkc2hvdCUyMGF2YXRhcnxlbnwwfHx8fDE3ODY4Njg2MTd8MA&ixlib=rb-4.1.0&q=85",
+        "description": "User profile avatar in top nav and author avatar in blog",
+        "category": "avatar"
+      },
+      "agent_avatar_1": {
+        "url": "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwzfHxwcm9mZXNzaW9uYWwlMjBoZWFkc2hvdCUyMGF2YXRhcnxlbnwwfHx8fDE3ODY4Njg2MTd8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Avatar for AI Content Agent",
+        "category": "avatar"
+      },
+      "agent_avatar_2": {
+        "url": "https://images.unsplash.com/photo-1580489944761-15a19d654956?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHw0fHxwcm9mZXNzaW9uYWwlMjBoZWFkc2hvdCUyMGF2YXRhcnxlbnwwfHx8fDE3ODY4Njg2MTd8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Avatar for AI SEO Agent",
+        "category": "avatar"
+      },
+      "brain_background": {
+        "url": "https://images.unsplash.com/photo-1557264337-e8a93017fe92?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjh8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGRhdGElMjB2aXN1YWxpemF0aW9uJTIwZGFya3xlbnwwfHx8fDE3ODY4Njg2MTZ8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Abstract visualization for Brain View hero/header",
+        "category": "background"
+      },
+      "public_blog_hero": {
+        "url": "https://images.unsplash.com/photo-1706689656095-168768dc20a5?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzNDR8MHwxfHNlYXJjaHwzfHxtb2Rlcm4lMjBvZmZpY2UlMjBtaW5pbWFsaXN0fGVufDB8fHx8MTc4Njg2ODYxN3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Hero image for public blog article",
+        "category": "blog_image"
+      }
+    }
+  },
+  "universal_guidelines_for_main_agent": [
+    "You tend to converge toward generic outputs. Avoid AI slop aesthetic.",
+    "Do not use dark colors as gradients.",
+    "Don't make generic centered layouts. Create depth with z-index hierarchy.",
+    "Use glass-morphism effects.",
+    "NEVER apply universal transition ('transition: all').",
+    "MUST NOT center align the app container (.App { text-align: center; }).",
+    "Always use modern button styles.",
+    "NEVER use AI assistant Emoji characters (🤖🧠💭💡🔮🎯) for icons.",
+    "Every interaction needs micro-animations.",
+    "Use 2-3x more spacing than feels comfortable.",
+    "Use subtle grain textures, custom cursors, loading animations.",
+    "Use sonner for toasts. IMPORTANT: you have .js files not .tsx files, so use `/app/frontend/src/components/ui/sonner.js`.",
+    "All interactive and key informational elements MUST include a `data-testid` attribute to facilitate robust automated testing."
+  ]
+}
