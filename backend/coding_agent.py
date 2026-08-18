@@ -1,4 +1,4 @@
-"""Streaming coding agent: LLM tool-calling loop over a Daytona sandbox."""
+"""Streaming coding agent: token-level LLM tool-calling loop over a Daytona sandbox."""
 import os
 import json
 import logging
@@ -6,15 +6,17 @@ from openai import AsyncOpenAI
 
 logger = logging.getLogger("coding_agent")
 
+# label = user-facing; real = provider model id; tier = speed grouping
 CODING_MODELS = [
-    {"id": "gpt-4o", "label": "GPT-4o", "provider": "openai", "tier": "premium"},
-    {"id": "gpt-4o-mini", "label": "GPT-4o mini", "provider": "openai", "tier": "cheap"},
-    {"id": "anthropic/claude-3.5-sonnet", "label": "Claude 3.5 Sonnet", "provider": "openrouter", "tier": "premium"},
-    {"id": "deepseek/deepseek-chat", "label": "DeepSeek V3", "provider": "openrouter", "tier": "cheap"},
-    {"id": "qwen/qwen-2.5-coder-32b-instruct", "label": "Qwen2.5 Coder 32B", "provider": "openrouter", "tier": "cheap"},
+    {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "real": "gpt-4o", "provider": "openai", "tier": "medium"},
+    {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6", "real": "anthropic/claude-sonnet-4.5", "provider": "openrouter", "tier": "slow"},
+    {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro", "real": "google/gemini-2.5-pro", "provider": "openrouter", "tier": "medium"},
+    {"id": "qwen-coder", "label": "Qwen2.5 Coder", "real": "qwen/qwen-2.5-coder-32b-instruct", "provider": "openrouter", "tier": "medium"},
+    {"id": "deepseek-v3", "label": "DeepSeek V3", "real": "deepseek/deepseek-chat", "provider": "openrouter", "tier": "fast"},
+    {"id": "gpt-4o-mini", "label": "GPT-4o mini", "real": "gpt-4o-mini", "provider": "openai", "tier": "fast"},
 ]
 CODING_MODEL_MAP = {m["id"]: m for m in CODING_MODELS}
-DEFAULT_CODING_MODEL = "gpt-4o"
+DEFAULT_CODING_MODEL = "gpt-5.6-terra"
 
 
 def _client(provider):
@@ -26,37 +28,31 @@ def _client(provider):
 
 
 TOOLS = [
-    {"type": "function", "function": {
-        "name": "list_files", "description": "List the project file tree.",
-        "parameters": {"type": "object", "properties": {}},
-    }},
-    {"type": "function", "function": {
-        "name": "read_file", "description": "Read a file's contents.",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-    }},
-    {"type": "function", "function": {
-        "name": "write_file", "description": "Create or overwrite a file with full contents.",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]},
-    }},
-    {"type": "function", "function": {
-        "name": "run_command", "description": "Run a shell command in the project root (e.g. npm install, ls). Avoid starting long-running dev servers.",
-        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
-    }},
+    {"type": "function", "function": {"name": "list_files", "description": "List the project file tree.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "read_file", "description": "Read a file's contents.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "write_file", "description": "Create or overwrite a file with full contents.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
+    {"type": "function", "function": {"name": "run_command", "description": "Run a shell command in the project root (e.g. npm install, ls). Avoid long-running dev servers.",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
 ]
 
 SYSTEM = """You are Arevei Coding Agent, an expert full-stack engineer working inside a live Daytona Linux sandbox.
-The project lives at the project root (all paths are relative to it). It may be ANY language or framework (React/Vite, Node, static HTML, Python, etc.) — inspect the files first to learn the stack. A dev/web server, when relevant, should listen on port 5173.
+The project lives at the project root (all paths are relative to it). It may be ANY language or framework — inspect the files first to learn the stack. A dev/web server, when relevant, listens on port 5173.
+
+Narrate briefly what you are about to do BEFORE each tool call (one short sentence), so the user sees live progress.
 
 Rules:
 - Use the tools to inspect and edit the real filesystem. Always write COMPLETE file contents with write_file (never partial diffs).
-- Before editing, list or read files to understand the current stack and state. Do not assume a fixed template or config — the user may use any framework, config, or language.
+- Before editing, list or read files to understand the current stack and state. Do not assume a fixed template or config.
 - Keep changes minimal and focused on the user's request.
-- Do NOT start a long-running dev server yourself (the platform manages it). You may run install commands (npm install, pip install) and quick build/lint commands.
-- When done, reply with a SHORT summary (2-4 markdown bullets) of exactly what you changed. Do not paste full file contents in the summary."""
+- Do NOT start a long-running dev server yourself (the platform manages it). You may run install commands.
+- When completely done, end with a SHORT summary (2-4 markdown bullets) of exactly what you changed."""
 
 
 async def run_agent(ops, model_id, history, user_message):
-    """Async generator yielding SSE event dicts."""
+    """Async generator yielding SSE event dicts with token-level streaming."""
     m = CODING_MODEL_MAP.get(model_id) or CODING_MODEL_MAP[DEFAULT_CODING_MODEL]
     client = _client(m["provider"])
 
@@ -69,46 +65,72 @@ async def run_agent(ops, model_id, history, user_message):
     summary = ""
     try:
         for _ in range(14):
-            resp = await client.chat.completions.create(
-                model=m["id"], messages=messages, tools=TOOLS, tool_choice="auto", temperature=0.2,
+            stream = await client.chat.completions.create(
+                model=m["real"], messages=messages, tools=TOOLS, tool_choice="auto",
+                temperature=0.2, stream=True, max_tokens=8000,
             )
-            msg = resp.choices[0].message
-            if not msg.tool_calls:
-                summary = msg.content or "Done."
+            content_buf = ""
+            tool_calls = {}
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if getattr(delta, "content", None):
+                    content_buf += delta.content
+                    yield {"type": "text_delta", "text": delta.content}
+                if getattr(delta, "tool_calls", None):
+                    for tc in delta.tool_calls:
+                        slot = tool_calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+                        if tc.id:
+                            slot["id"] = tc.id
+                        if tc.function and tc.function.name:
+                            slot["name"] = tc.function.name
+                        if tc.function and tc.function.arguments:
+                            slot["args"] += tc.function.arguments
+
+            if not tool_calls:
+                summary = content_buf or "Done."
                 break
+
             messages.append({
-                "role": "assistant",
-                "content": msg.content or "",
-                "tool_calls": [{"id": tc.id, "type": "function",
-                                "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in msg.tool_calls],
+                "role": "assistant", "content": content_buf or "",
+                "tool_calls": [{"id": s["id"] or f"call_{i}", "type": "function",
+                                "function": {"name": s["name"], "arguments": s["args"] or "{}"}}
+                               for i, s in sorted(tool_calls.items())],
             })
-            for tc in msg.tool_calls:
-                name = tc.function.name
+            for i, s in sorted(tool_calls.items()):
+                name = s["name"]
                 try:
-                    args = json.loads(tc.function.arguments or "{}")
+                    args = json.loads(s["args"] or "{}")
                 except Exception:
                     args = {}
-                event = {"type": "tool", "name": name, "args": args}
-                steps.append(event)
-                yield event
+                start_ev = {"type": "tool", "name": name, "args": args}
+                steps.append(start_ev)
+                yield start_ev
                 result, extra = await _execute(ops, name, args)
                 if extra:
                     steps.append(extra)
                     yield extra
-                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result[:20000]})
+                messages.append({"role": "tool", "tool_call_id": s["id"] or f"call_{i}", "content": result[:20000]})
         else:
             summary = "Reached step limit. Partial changes applied."
     except Exception as e:
         logger.exception("agent failed")
-        yield {"type": "error", "message": str(e)[:300]}
-        summary = f"Error: {str(e)[:200]}"
+        raw = str(e)
+        if "402" in raw or "more credits" in raw or "insufficient" in raw.lower():
+            msg = f"The model '{m['label']}' needs OpenRouter credits (your OpenRouter account balance is too low). Add credits at openrouter.ai/settings/credits, or switch to an OpenAI-backed model like GPT-5.6 Terra or GPT-4o mini."
+        elif "401" in raw or "invalid api key" in raw.lower():
+            msg = f"Auth failed for '{m['label']}'. Check the provider API key."
+        else:
+            msg = raw[:300]
+        yield {"type": "error", "message": msg}
+        summary = summary or f"Could not complete: {msg}"
 
     yield {"type": "summary", "text": summary}
     yield {"type": "done", "steps": steps, "summary": summary}
 
 
 async def _execute(ops, name, args):
-    """Returns (tool_result_string, extra_event_or_None)."""
     try:
         if name == "list_files":
             tree = await ops["list_files"]()

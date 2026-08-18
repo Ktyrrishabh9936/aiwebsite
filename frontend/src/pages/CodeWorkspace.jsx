@@ -118,7 +118,8 @@ export default function CodeWorkspace() {
         for (const part of parts) {
           const line = part.split("\n").find((l) => l.startsWith("data: ")); if (!line) continue;
           let ev; try { ev = JSON.parse(line.slice(6)); } catch { continue; }
-          if (ev.type === "summary") updateLast((a) => ({ ...a, content: ev.text }));
+          if (ev.type === "text_delta") updateLast((a) => ({ ...a, content: (a.content || "") + ev.text, working: true }));
+          else if (ev.type === "summary") updateLast((a) => ({ ...a, content: ev.text }));
           else if (ev.type === "done") updateLast((a) => ({ ...a, steps: ev.steps, working: false }));
           else if (ev.type === "end") { /* persisted */ }
           else if (ev.type === "error") updateLast((a) => ({ ...a, content: `⚠️ ${ev.message}`, working: false }));

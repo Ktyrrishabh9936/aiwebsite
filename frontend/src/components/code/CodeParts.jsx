@@ -74,6 +74,7 @@ function AgentMessage({ m }) {
     return <div className="rounded-md px-3.5 py-2.5 bg-primary text-primary-foreground text-sm">{m.content}</div>;
   }
   const steps = (m.steps || []).map((s, i) => ({ s, l: stepLabel(s), i })).filter((x) => x.l);
+  const lastStep = steps[steps.length - 1];
   return (
     <div className="rounded-md border border-border bg-card px-3.5 py-3">
       {steps.length > 0 && (
@@ -83,8 +84,14 @@ function AgentMessage({ m }) {
           ))}
         </div>
       )}
-      {m.working && !m.content ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground mt-2"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Working…</div>
+      {m.working ? (
+        <div className="mt-2">
+          <div className="flex items-center gap-2 text-xs text-primary mb-1.5">
+            <span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-60" /><span className="relative inline-flex rounded-full h-2 w-2 bg-primary" /></span>
+            <span className="font-medium">{lastStep ? lastStep.l.text : "Thinking…"}</span>
+          </div>
+          {m.content && <div className="text-sm whitespace-pre-wrap leading-relaxed text-muted-foreground">{m.content}<span className="inline-block w-1.5 h-4 bg-primary/70 ml-0.5 align-middle animate-pulse" /></div>}
+        </div>
       ) : (
         <div className="mt-2">
           <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-bold text-primary mb-1"><CheckCircle2 className="w-3 h-3" /> Summary</div>
@@ -115,8 +122,22 @@ export function AgentChat({ chatRef, messages, input, setInput, streaming, onSen
                 <span className="w-1.5 h-1.5 rounded-full bg-primary" />{currentModel?.label || "model"}<ChevronDown className="w-3 h-3 opacity-60" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-56">
-              {models.map((m) => <DropdownMenuItem key={m.id} onClick={() => onModel(m.id)} className="flex justify-between cursor-pointer"><span>{m.label}</span><span className="text-[10px] uppercase text-muted-foreground">{m.tier}</span></DropdownMenuItem>)}
+            <DropdownMenuContent align="start" className="w-64">
+              {["fast", "medium", "slow"].map((tier) => {
+                const group = models.filter((m) => m.tier === tier);
+                if (group.length === 0) return null;
+                return (
+                  <div key={tier}>
+                    <div className="px-2 py-1 text-[10px] uppercase tracking-wider font-bold text-muted-foreground">{tier}</div>
+                    {group.map((m) => (
+                      <DropdownMenuItem key={m.id} onClick={() => onModel(m.id)} className="flex items-center justify-between cursor-pointer">
+                        <span>{m.label}</span>
+                        <span className={m.tier === "fast" ? "text-[10px] px-1.5 rounded-full bg-emerald-500/15 text-emerald-500" : m.tier === "slow" ? "text-[10px] px-1.5 rounded-full bg-amber-500/15 text-amber-500" : "text-[10px] px-1.5 rounded-full bg-sky-500/15 text-sky-500"}>{m.tier}</span>
+                      </DropdownMenuItem>
+                    ))}
+                  </div>
+                );
+              })}
             </DropdownMenuContent>
           </DropdownMenu>
           <button onClick={onSend} disabled={streaming} data-testid="agent-send" className="grid place-items-center w-9 h-9 rounded-full bg-primary text-primary-foreground disabled:opacity-60">
