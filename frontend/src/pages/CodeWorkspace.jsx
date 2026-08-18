@@ -25,6 +25,7 @@ export default function CodeWorkspace() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const chatRef = useRef(null);
+  const abortRef = useRef(null);
 
   const loadFiles = useCallback(async () => {
     try { const r = await api.get(`/code/projects/${pid}/files`); setTree(r.data.tree); return r.data.tree; }
@@ -99,15 +100,17 @@ export default function CodeWorkspace() {
     } catch { setTermLines((l) => [...l, "command failed"]); }
   };
 
-  const send = async () => {
-    const msg = input.trim(); if (!msg || streaming) return;
+  const send = async (preset) => {
+    const msg = (preset || input).trim(); if (!msg || streaming) return;
     setInput("");
     setMessages((m) => [...m, { role: "user", content: msg }, { role: "assistant", content: "", steps: [], working: true }]);
     setStreaming(true);
+    const ctrl = new AbortController(); abortRef.current = ctrl;
     const updateLast = (fn) => setMessages((m) => { const c = [...m]; c[c.length - 1] = fn(c[c.length - 1]); return c; });
     try {
       const res = await fetch(`${API}/code/projects/${pid}/chat`, {
-        method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("arevei_token")}` },
+        method: "POST", signal: ctrl.signal,
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("arevei_token")}` },
         body: JSON.stringify({ message: msg, model_id: project?.model_id }),
       });
       const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
@@ -130,9 +133,14 @@ export default function CodeWorkspace() {
           }
         }
       }
-    } catch { updateLast((a) => ({ ...a, content: "⚠️ Agent connection failed", working: false })); }
-    finally { setStreaming(false); loadFiles(); if (activeFile) openFile(activeFile.path); }
+    } catch (e) {
+      if (e.name === "AbortError") updateLast((a) => ({ ...a, content: (a.content || "") + "\n\n_(stopped by you)_", working: false }));
+      else updateLast((a) => ({ ...a, content: "⚠️ Agent connection failed", working: false }));
+    }
+    finally { setStreaming(false); abortRef.current = null; loadFiles(); if (activeFile) openFile(activeFile.path); }
   };
+
+  const stop = () => { abortRef.current?.abort(); };
 
   const changeModel = async (id) => { const r = await api.patch(`/code/projects/${pid}`, { model_id: id }); setProject(r.data); };
   const sync = () => { loadFiles(); loadProject(); toast.success("Sandbox synced"); };
@@ -149,7 +157,7 @@ export default function CodeWorkspace() {
       <TopBar project={project} onBack={() => nav("/app/code")} onSync={sync} onRun={runDev} />
       <div className="flex-1 flex min-h-0">
         <AgentChat chatRef={chatRef} messages={messages} input={input} setInput={setInput} streaming={streaming}
-          onSend={send} models={models} currentModel={currentModel} onModel={changeModel} turns={turns} />
+          onSend={send} onStop={stop} models={models} currentModel={currentModel} onModel={changeModel} turns={turns} />
         <CenterBlock tab={tab} setTab={setTab} showFiles={showFiles} setShowFiles={setShowFiles}
           activeFile={activeFile} dirty={dirty} onSave={saveFile} theme={theme}
           onEditorChange={(v) => { setActiveFile((f) => ({ ...f, content: v ?? "" })); setDirty(true); }}

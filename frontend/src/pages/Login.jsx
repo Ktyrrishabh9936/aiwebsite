@@ -21,7 +21,7 @@ export default function Login() {
     try {
       await login(email, password);
       toast.success("Welcome back");
-      nav("/app");
+      nav(localStorage.getItem("arevei_onboarded") ? "/app" : "/welcome");
     } catch (err) {
       toast.error(formatError(err.response?.data?.detail) || "Login failed");
     } finally {

@@ -2,7 +2,7 @@ import { useState } from "react";
 import {
   Folder, FolderOpen, File as FileIcon, RefreshCw, TerminalSquare, Search,
   FileEdit, Loader2, CheckCircle2, ChevronDown, Send, Sparkles, History,
-  Code2, Monitor, Save, PanelRight, Play, ArrowLeft,
+  Code2, Monitor, Save, PanelRight, Play, ArrowLeft, Square,
 } from "lucide-react";
 import Editor from "@monaco-editor/react";
 import {
@@ -102,7 +102,8 @@ function AgentMessage({ m }) {
   );
 }
 
-export function AgentChat({ chatRef, messages, input, setInput, streaming, onSend, models, currentModel, onModel, turns }) {
+export function AgentChat({ chatRef, messages, input, setInput, streaming, onSend, onStop, models, currentModel, onModel, turns }) {
+  const suggestions = ["Build a landing page hero", "Add a contact form", "Make it dark mode", "Add a pricing section"];
   return (
     <div className="w-[380px] shrink-0 border-r border-border flex flex-col min-h-0">
       <div className="h-11 px-4 flex items-center justify-between border-b border-border">
@@ -110,39 +111,56 @@ export function AgentChat({ chatRef, messages, input, setInput, streaming, onSen
         <span className="inline-flex items-center gap-1 text-xs text-muted-foreground"><History className="w-3.5 h-3.5" /> {turns} turns</span>
       </div>
       <div ref={chatRef} className="flex-1 overflow-y-auto p-4 space-y-4" data-testid="agent-messages">
-        {messages.length === 0 && <div className="text-sm text-muted-foreground">Ask the agent to build or change anything. It edits files, runs commands, and reports a summary.</div>}
+        {messages.length === 0 && (
+          <div className="space-y-3">
+            <div className="text-sm text-muted-foreground">Ask the agent to build or change anything. It edits files, runs commands, and reports a summary.</div>
+            <div className="flex flex-wrap gap-1.5">
+              {suggestions.map((s) => (
+                <button key={s} onClick={() => onSend(s)} data-testid={`suggest-${s.slice(0, 6)}`} className="text-xs px-2.5 py-1.5 rounded-full border border-border hover:bg-accent hover:border-primary/40 transition-colors">{s}</button>
+              ))}
+            </div>
+          </div>
+        )}
         {messages.map((m, i) => <AgentMessage key={i} m={m} />)}
       </div>
       <div className="p-3 border-t border-border space-y-2">
-        <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(); } }} placeholder="Ask the agent to build…" data-testid="agent-input" rows={2} className="w-full px-3 py-2 rounded-md bg-background border border-border text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring" />
-        <div className="flex items-center justify-between">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button data-testid="agent-model-picker" className="inline-flex items-center gap-1.5 px-3 h-8 rounded-full border border-border text-xs font-medium hover:bg-accent">
-                <span className="w-1.5 h-1.5 rounded-full bg-primary" />{currentModel?.label || "model"}<ChevronDown className="w-3 h-3 opacity-60" />
+        <div className="rounded-xl border border-border bg-background focus-within:ring-2 focus-within:ring-ring/60 transition-shadow">
+          <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(); } }} placeholder="Ask the agent to build…  (Enter to send)" data-testid="agent-input" rows={2} className="w-full px-3 py-2.5 bg-transparent text-sm resize-none focus:outline-none" />
+          <div className="flex items-center justify-between px-2 pb-2">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button data-testid="agent-model-picker" className="inline-flex items-center gap-1.5 px-2.5 h-7 rounded-full border border-border text-xs font-medium hover:bg-accent">
+                  <span className="w-1.5 h-1.5 rounded-full bg-primary" />{currentModel?.label || "model"}<ChevronDown className="w-3 h-3 opacity-60" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64">
+                {["fast", "medium", "slow"].map((tier) => {
+                  const group = models.filter((m) => m.tier === tier);
+                  if (group.length === 0) return null;
+                  return (
+                    <div key={tier}>
+                      <div className="px-2 py-1 text-[10px] uppercase tracking-wider font-bold text-muted-foreground">{tier}</div>
+                      {group.map((m) => (
+                        <DropdownMenuItem key={m.id} onClick={() => onModel(m.id)} className="flex items-center justify-between cursor-pointer">
+                          <span>{m.label}</span>
+                          <span className={m.tier === "fast" ? "text-[10px] px-1.5 rounded-full bg-emerald-500/15 text-emerald-500" : m.tier === "slow" ? "text-[10px] px-1.5 rounded-full bg-amber-500/15 text-amber-500" : "text-[10px] px-1.5 rounded-full bg-sky-500/15 text-sky-500"}>{m.tier}</span>
+                        </DropdownMenuItem>
+                      ))}
+                    </div>
+                  );
+                })}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            {streaming ? (
+              <button onClick={onStop} data-testid="agent-stop" className="inline-flex items-center gap-1.5 px-3 h-8 rounded-full bg-destructive text-destructive-foreground text-xs font-semibold">
+                <Square className="w-3 h-3 fill-current" /> Stop
               </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-64">
-              {["fast", "medium", "slow"].map((tier) => {
-                const group = models.filter((m) => m.tier === tier);
-                if (group.length === 0) return null;
-                return (
-                  <div key={tier}>
-                    <div className="px-2 py-1 text-[10px] uppercase tracking-wider font-bold text-muted-foreground">{tier}</div>
-                    {group.map((m) => (
-                      <DropdownMenuItem key={m.id} onClick={() => onModel(m.id)} className="flex items-center justify-between cursor-pointer">
-                        <span>{m.label}</span>
-                        <span className={m.tier === "fast" ? "text-[10px] px-1.5 rounded-full bg-emerald-500/15 text-emerald-500" : m.tier === "slow" ? "text-[10px] px-1.5 rounded-full bg-amber-500/15 text-amber-500" : "text-[10px] px-1.5 rounded-full bg-sky-500/15 text-sky-500"}>{m.tier}</span>
-                      </DropdownMenuItem>
-                    ))}
-                  </div>
-                );
-              })}
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <button onClick={onSend} disabled={streaming} data-testid="agent-send" className="grid place-items-center w-9 h-9 rounded-full bg-primary text-primary-foreground disabled:opacity-60">
-            {streaming ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-          </button>
+            ) : (
+              <button onClick={() => onSend()} data-testid="agent-send" className="grid place-items-center w-8 h-8 rounded-full bg-primary text-primary-foreground">
+                <Send className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

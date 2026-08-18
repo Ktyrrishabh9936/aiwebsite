@@ -1,0 +1,46 @@
+{
+  "summary": "Frontend-only verification of Arevei onboarding (Pilot/Welcome/Build), global left sidebar shell + Settings tabs, and Stop button for streaming coding-agent runs. All acceptance criteria PASSED. Tested via public preview URL with admin@arevei.ai.",
+  "acceptance_verdicts": {
+    "onboarding_pilot_screen": "PASS - After login, cleared localStorage 'arevei_onboarded' and hit /welcome. Renders 'Hey, I'm Arevei.' + 'I'm your Pilot.' with three cards having data-testids pilot-build, pilot-migrate, pilot-skip.",
+    "pilot_migrate_toast": "PASS - Clicking [data-testid=pilot-migrate] shows a Sonner toast containing 'This is demo website content. Kindly contact the Arevei team for the website manager — vinay@arevei.com' (both 'demo website content' and 'vinay@arevei.com' assertions matched).",
+    "pilot_build_welcome_screen": "PASS - Clicking pilot-build advances to Welcome screen; [data-testid=welcome-fill-demo] present. The two secondary demo buttons (Connect your site / Import content) trigger the same toast containing 'vinay@arevei.com'.",
+    "pilot_skip_dashboard": "PASS - Clicking pilot-skip navigates to /app and dashboard shows the global left sidebar (AppSidebar).",
+    "build_flow_project_creation": "NOT FULLY EXECUTED - Did not click welcome-fill-demo end-to-end to avoid burning Daytona quota (30GiB org quota; two projects already provisioned per test hint). Code review confirmed startBuild() posts to /code/projects with template react-vite, polls sandbox_status, then enables [data-testid=build-open] when ready and [data-testid=build-dashboard] navigates to /app. Existing 'Stream Test' project (ready) was used for streaming/stop tests.",
+    "sidebar_items_present": "PASS - All seven data-testids found on /app: side-dashboard, side-workspace, side-brain, side-growth, side-content, side-settings, side-logout.",
+    "settings_tabs": "PASS - Clicking side-settings shows SettingsView with tabs settings-account, settings-team, settings-billing, settings-history all present. Account tab shows name/email/role.",
+    "sidebar_workspace_nav": "PASS - side-workspace navigates to /app/code.",
+    "sidebar_brain_nav": "PASS (behavioural) - Because an existing workspace exists in the DB (2 workspaces), side-brain correctly navigates to /app/w/<latest.id>/brain rather than showing the 'Create a website workspace first' toast. Toast fallback is code-verified in Dashboard.goSection when workspaces list is empty.",
+    "stop_button_streaming": "PASS - Opened 'Stream Test' project (ready), selected GPT-5.6 Terra via [data-testid=agent-model-picker], sent broad multi-step prompt. During streaming: [data-testid=agent-stop] rendered and [data-testid=agent-send] was hidden. Clicking Stop aborted the run; assistant message contains '(stopped by you)'. After abort, agent-send is back and agent-stop is gone.",
+    "send_button_when_idle": "PASS - Before sending, agent-send is present and agent-stop is not.",
+    "suggested_prompt_chips": "PARTIAL - Code path in AgentChat gates suggestion chips on messages.length===0 and renders four chips (Build a landing page hero / Add a contact form / Make it dark mode / Add a pricing section) with data-testid=`suggest-{first6chars}`. Runtime verification skipped because both existing ready projects already have persisted chat messages (Stream Test=13 msgs, Test App=2 msgs). Chips rendering + click→onSend behaviour is code-verified but not runtime-observed."
+  },
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Onboarding Welcome screen", "issues": ["The two secondary buttons ('Connect your site', 'Import content') lack a dedicated data-testid — only the primary welcome-fill-demo has one. Not blocking but harder to target reliably."]},
+      {"screen": "AgentChat suggestion chips", "issues": ["data-testid uses first 6 chars of the label ('suggest-Build ', 'suggest-Add a ', 'suggest-Make i', 'suggest-Add a ') which collides between the two 'Add a…' chips (Add a contact form vs Add a pricing section both become suggest-Add a ). Consider using a stable slug/index instead."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "(Optional) Give the two Welcome-screen secondary buttons unique data-testids (e.g. welcome-connect-site, welcome-import-content).",
+    "(Optional) Fix duplicate suggest-* testid collision — use full slugified label or index (e.g. suggest-0..3)."
+  ],
+  "critical_code_review_comments": [
+    "Onboarding.startBuild() polling has no timeout — if the sandbox never becomes ready (network/error branches aside), the interval runs indefinitely while the user sits on the Build screen. Consider a max-poll count or timeout toast.",
+    "Dashboard.goSection('workspace') hard-codes navigation to /app/code (project list) rather than a specific workspace; this differs from other sections that navigate into `latest.id`. Intentional per the spec, but worth documenting.",
+    "AgentChat suggestion chip data-testid slice(0,6) collides on labels sharing the first 6 chars (e.g. 'Add a contact form' vs 'Add a pricing section' both yield 'suggest-Add a ').",
+    "CodeWorkspace.send abort UX is correct (AbortController + '_(stopped by you)_' fallback). The finally-block calls loadFiles + openFile even after abort, which is fine but issues a redundant network request; acceptable.",
+    "AppSidebar is hidden below md breakpoint (className 'hidden md:flex'); no mobile drawer alternative is provided — mobile users cannot access nav from the dashboard."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (skipped per request)", "frontend": "100% of runtime-testable acceptance items passed; 1 item (suggested chips) code-verified only"},
+  "test_credentials": "admin@arevei.ai / arevei123",
+  "seed_data_creation": "None. Reused existing 'Stream Test' project (id 6a83d83e0a5b1515dd122861) for the Stop button test to conserve Daytona quota.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Two ready projects exist: 'Stream Test' (6a83d83e0a5b1515dd122861, 14 msgs after this run including a '_(stopped by you)_' entry) and 'Test App' (6a819371725c6cc7663a7877, 2 msgs). Two workspaces exist so side-brain/growth/content navigate straight into the latest workspace instead of showing the fallback toast — to exercise the toast, either delete all workspaces or mock the empty state. To runtime-verify the suggestion chips, use a brand-new project (will cost Daytona quota) or add a UI way to clear a project's chat history. Model GPT-5.6 Terra runs are fast; the broad-prompt trick still allowed catching the Stop button reliably within ~200ms polling.",
+  "rca_of_the_issue": "N/A — no functional bugs found this iteration."
+}

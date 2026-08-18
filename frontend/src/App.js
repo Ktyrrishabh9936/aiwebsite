@@ -8,6 +8,7 @@ import Landing from "./pages/Landing";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Dashboard from "./pages/Dashboard";
+import Onboarding from "./pages/Onboarding";
 import CodeProjects from "./pages/CodeProjects";
 import CodeWorkspace from "./pages/CodeWorkspace";
 import WorkspaceLayout from "./pages/WorkspaceLayout";
@@ -39,6 +40,7 @@ function App() {
               <Route path="/register" element={<Register />} />
               <Route path="/blog/:slug" element={<PublicBlog />} />
               <Route element={<Protected />}>
+                <Route path="/welcome" element={<Onboarding />} />
                 <Route path="/app" element={<Dashboard />} />
                 <Route path="/app/code" element={<CodeProjects />} />
                 <Route path="/app/code/:pid" element={<CodeWorkspace />} />
