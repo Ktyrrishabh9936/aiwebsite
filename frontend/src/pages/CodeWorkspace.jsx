@@ -27,8 +27,18 @@ export default function CodeWorkspace() {
   const chatRef = useRef(null);
 
   const loadFiles = useCallback(async () => {
-    try { const r = await api.get(`/code/projects/${pid}/files`); setTree(r.data.tree); } catch { /* waking */ }
+    try { const r = await api.get(`/code/projects/${pid}/files`); setTree(r.data.tree); return r.data.tree; }
+    catch { return []; }
   }, [pid]);
+
+  const firstFile = (nodes) => {
+    for (const n of nodes || []) {
+      if (n.type === "file") return n.path;
+      const c = firstFile(n.children);
+      if (c) return c;
+    }
+    return null;
+  };
 
   const loadProject = useCallback(async () => {
     const r = await api.get(`/code/projects/${pid}`); setProject(r.data); return r.data;
@@ -51,7 +61,7 @@ export default function CodeWorkspace() {
         await new Promise((res) => setTimeout(res, 3500));
         const np = await loadProject(); status = np.sandbox_status;
       }
-      if (status === "ready") { await loadFiles(); openFile("src/App.jsx"); }
+      if (status === "ready") { const t = await loadFiles(); const f = firstFile(t) || "src/App.jsx"; openFile(f); }
     })();
     // eslint-disable-next-line
   }, [pid]);

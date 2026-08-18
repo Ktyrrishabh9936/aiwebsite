@@ -121,20 +121,30 @@ async def start_dev_server(sb):
     await sb.process.create_session(session_id)
     cmd = (
         f"cd {BASE} && (pkill -f vite || true) && "
-        f"([ -d node_modules ] || npm install) && "
-        f"npm run dev -- --host 0.0.0.0 --port {PREVIEW_PORT}"
+        f"if [ -f package.json ]; then ([ -d node_modules ] || npm install) && "
+        f"(npm run dev -- --host 0.0.0.0 --port {PREVIEW_PORT} || npx --yes vite --host 0.0.0.0 --port {PREVIEW_PORT}); "
+        f"else npx --yes serve -l {PREVIEW_PORT} .; fi"
     )
     await sb.process.execute_session_command(session_id, SessionExecuteRequest(command=cmd, run_async=True))
 
 
-async def preview_status(sb):
-    link = await sb.get_preview_link(PREVIEW_PORT)
+async def preview_status(sb, existing_url=None):
+    url = existing_url
+    if not url:
+        try:
+            signed = await sb.create_signed_preview_url(PREVIEW_PORT, expires_in_seconds=3600)
+            url = getattr(signed, "url", None) or (signed.get("url") if isinstance(signed, dict) else None)
+        except Exception:
+            pass
+    if not url:
+        link = await sb.get_preview_link(PREVIEW_PORT)
+        url = getattr(link, "url", None) or (link.get("url") if isinstance(link, dict) else str(link))
     r = await sb.process.exec(
         f"curl -s -o /dev/null -w '%{{http_code}}' -m 3 http://localhost:{PREVIEW_PORT} 2>/dev/null || echo 000",
         timeout=15,
     )
     code = (r.result or "").strip()[-3:]
-    return {"url": link.url, "ready": code.startswith("2") or code.startswith("3")}
+    return {"url": url, "ready": code.startswith("2") or code.startswith("3")}
 
 
 async def delete_sandbox(sandbox_id):

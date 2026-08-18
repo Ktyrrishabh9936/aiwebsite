@@ -23,14 +23,16 @@ export default function CodeProjects() {
   const nav = useNavigate();
   const [projects, setProjects] = useState([]);
   const [models, setModels] = useState([]);
+  const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [modelId, setModelId] = useState("gpt-4o");
+  const [template, setTemplate] = useState("react-vite");
   const [creating, setCreating] = useState(false);
 
   const load = () => api.get("/code/projects").then((r) => setProjects(r.data)).finally(() => setLoading(false));
-  useEffect(() => { load(); api.get("/code/models").then((r) => { setModels(r.data.models); setModelId(r.data.default); }); }, []);
+  useEffect(() => { load(); api.get("/code/models").then((r) => { setModels(r.data.models); setModelId(r.data.default); setTemplates(r.data.templates || []); }); }, []);
   useEffect(() => {
     if (projects.some((p) => p.sandbox_status === "provisioning")) {
       const t = setInterval(load, 4000); return () => clearInterval(t);
@@ -41,7 +43,7 @@ export default function CodeProjects() {
     e.preventDefault();
     setCreating(true);
     try {
-      const r = await api.post("/code/projects", { name, model_id: modelId });
+      const r = await api.post("/code/projects", { name, model_id: modelId, template });
       toast.success("Project created — provisioning sandbox");
       nav(`/app/code/${r.data.id}`);
     } catch (err) { toast.error(formatError(err.response?.data?.detail)); }
@@ -86,6 +88,17 @@ export default function CodeProjects() {
                 <div className="space-y-2">
                   <Label htmlFor="pn">Project name</Label>
                   <Input id="pn" data-testid="code-name-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Jewelry store app" required />
+                </div>
+                <div className="space-y-2">
+                  <Label>Template / language</Label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {templates.map((t) => (
+                      <button type="button" key={t.id} onClick={() => setTemplate(t.id)} data-testid={`template-${t.id}`}
+                        className={template === t.id ? "px-3 h-11 rounded-md border-2 border-primary bg-primary/10 text-sm font-medium" : "px-3 h-11 rounded-md border border-border text-sm hover:bg-accent"}>
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 <div className="space-y-2">
                   <Label>Coding model</Label>

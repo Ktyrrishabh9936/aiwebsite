@@ -18,51 +18,79 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-SCAFFOLD = {
-    "package.json": json.dumps({
-        "name": "arevei-app", "private": True, "version": "0.0.0", "type": "module",
-        "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview"},
-        "dependencies": {"react": "^18.3.1", "react-dom": "^18.3.1"},
-        "devDependencies": {"@vitejs/plugin-react": "^4.3.1", "vite": "^5.4.0"},
-    }, indent=2),
-    "vite.config.js": (
-        "import { defineConfig } from 'vite'\n"
-        "import react from '@vitejs/plugin-react'\n\n"
-        "export default defineConfig({\n"
-        "  plugins: [react()],\n"
-        "  server: { host: true, port: 5173, strictPort: true, allowedHosts: true },\n"
-        "})\n"
-    ),
-    "index.html": (
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\" />\n"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n"
-        "<title>Arevei App</title>\n</head>\n<body>\n<div id=\"root\"></div>\n"
-        "<script type=\"module\" src=\"/src/main.jsx\"></script>\n</body>\n</html>\n"
-    ),
-    "src/main.jsx": (
-        "import React from 'react'\nimport { createRoot } from 'react-dom/client'\n"
-        "import App from './App.jsx'\nimport './index.css'\n\n"
-        "createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>)\n"
-    ),
-    "src/App.jsx": (
-        "export default function App() {\n"
-        "  return (\n"
-        "    <div className=\"app\">\n"
-        "      <h1>Welcome to your Arevei app</h1>\n"
-        "      <p>Ask the coding agent in the chat to build anything.</p>\n"
-        "    </div>\n"
-        "  )\n"
-        "}\n"
-    ),
-    "src/index.css": (
-        ":root{color-scheme:light dark}\n"
-        "*{box-sizing:border-box}\n"
-        "body{margin:0;font-family:system-ui,sans-serif;background:#0a0a0a;color:#f5f5f5}\n"
-        ".app{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center;padding:24px}\n"
-        "h1{font-size:2rem;margin:0}\n"
-        "p{color:#a3a3a3;margin:0}\n"
-    ),
+SCAFFOLDS = {
+    "react-vite": {
+        "package.json": json.dumps({
+            "name": "arevei-app", "private": True, "version": "0.0.0", "type": "module",
+            "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview"},
+            "dependencies": {"react": "^18.3.1", "react-dom": "^18.3.1"},
+            "devDependencies": {"@vitejs/plugin-react": "^4.3.1", "vite": "^5.4.0"},
+        }, indent=2),
+        "vite.config.js": (
+            "import { defineConfig } from 'vite'\n"
+            "import react from '@vitejs/plugin-react'\n\n"
+            "export default defineConfig({\n"
+            "  plugins: [react()],\n"
+            "  server: { host: true, port: 5173, strictPort: true, allowedHosts: true },\n"
+            "})\n"
+        ),
+        "index.html": (
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\" />\n"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n"
+            "<title>Arevei App</title>\n</head>\n<body>\n<div id=\"root\"></div>\n"
+            "<script type=\"module\" src=\"/src/main.jsx\"></script>\n</body>\n</html>\n"
+        ),
+        "src/main.jsx": (
+            "import React from 'react'\nimport { createRoot } from 'react-dom/client'\n"
+            "import App from './App.jsx'\nimport './index.css'\n\n"
+            "createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>)\n"
+        ),
+        "src/App.jsx": (
+            "export default function App() {\n"
+            "  return (\n"
+            "    <div className=\"app\">\n"
+            "      <h1>Welcome to your Arevei app</h1>\n"
+            "      <p>Ask the coding agent in the chat to build anything.</p>\n"
+            "    </div>\n"
+            "  )\n"
+            "}\n"
+        ),
+        "src/index.css": (
+            ":root{color-scheme:light dark}\n"
+            "*{box-sizing:border-box}\n"
+            "body{margin:0;font-family:system-ui,sans-serif;background:#0a0a0a;color:#f5f5f5}\n"
+            ".app{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center;padding:24px}\n"
+            "h1{font-size:2rem;margin:0}\n"
+            "p{color:#a3a3a3;margin:0}\n"
+        ),
+    },
+    "node": {
+        "package.json": json.dumps({
+            "name": "arevei-node", "version": "1.0.0", "type": "module",
+            "scripts": {"dev": "node index.js", "start": "node index.js"},
+        }, indent=2),
+        "index.js": (
+            "import http from 'http'\n\n"
+            "const server = http.createServer((req, res) => {\n"
+            "  res.writeHead(200, { 'Content-Type': 'text/html' })\n"
+            "  res.end('<h1>Arevei Node server</h1><p>Ask the agent to build your API or app.</p>')\n"
+            "})\n\n"
+            "server.listen(5173, '0.0.0.0', () => console.log('listening on 5173'))\n"
+        ),
+    },
+    "static": {
+        "index.html": (
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\" />\n"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n"
+            "<title>Arevei Site</title>\n<style>body{font-family:system-ui;background:#0a0a0a;color:#f5f5f5;display:grid;place-items:center;height:100vh;margin:0;text-align:center}</style>\n"
+            "</head>\n<body>\n<div><h1>Welcome to your Arevei site</h1><p>Ask the agent to build anything.</p></div>\n</body>\n</html>\n"
+        ),
+    },
+    "blank": {
+        "README.md": "# New Arevei project\n\nThis is a blank sandbox. Ask the coding agent to build anything in any language or framework — it controls the full filesystem, config, and terminal.\n",
+    },
 }
+TEMPLATES = list(SCAFFOLDS.keys())
 
 
 def build_coding_router(db):
@@ -87,10 +115,10 @@ def build_coding_router(db):
         p["id"] = str(p.pop("_id"))
         return p
 
-    async def provision(pid):
+    async def provision(pid, template):
         try:
             sb = await dz.create_sandbox(pid)
-            for path, content in SCAFFOLD.items():
+            for path, content in SCAFFOLDS.get(template, SCAFFOLDS["blank"]).items():
                 await dz.write_file(sb, path, content)
             await db.code_projects.update_one({"_id": ObjectId(pid)},
                                               {"$set": {"sandbox_id": sb.id, "sandbox_status": "ready"}})
@@ -107,16 +135,25 @@ def build_coding_router(db):
     # ---------- models ----------
     @router.get("/models")
     async def models():
-        return {"models": coding_agent.CODING_MODELS, "default": coding_agent.DEFAULT_CODING_MODEL}
+        return {"models": coding_agent.CODING_MODELS, "default": coding_agent.DEFAULT_CODING_MODEL,
+                "templates": [
+                    {"id": "react-vite", "label": "React (Vite)"},
+                    {"id": "node", "label": "Node.js"},
+                    {"id": "static", "label": "Static HTML"},
+                    {"id": "blank", "label": "Blank (any language)"},
+                ]}
 
     # ---------- projects ----------
     @router.post("/projects")
     async def create_project(request: Request, body: dict = Body(...)):
         user = await user_of(request)
+        template = body.get("template") or "react-vite"
+        if template not in SCAFFOLDS:
+            template = "react-vite"
         doc = {
             "user_id": str(user["_id"]),
             "name": body.get("name") or "Untitled project",
-            "template": "react-vite",
+            "template": template,
             "model_id": body.get("model_id") or coding_agent.DEFAULT_CODING_MODEL,
             "sandbox_id": None,
             "sandbox_status": "provisioning",
@@ -126,7 +163,7 @@ def build_coding_router(db):
         }
         res = await db.code_projects.insert_one(doc)
         pid = str(res.inserted_id)
-        asyncio.create_task(provision(pid))
+        asyncio.create_task(provision(pid, template))
         doc["_id"] = res.inserted_id
         return out(doc)
 
@@ -208,6 +245,7 @@ def build_coding_router(db):
         proj = await owned(pid, user)
         sb = await get_started_sandbox(proj)
         await dz.start_dev_server(sb)
+        await db.code_projects.update_one({"_id": ObjectId(pid)}, {"$set": {"preview_url": None}})
         return {"starting": True}
 
     @router.get("/projects/{pid}/preview")
@@ -215,7 +253,7 @@ def build_coding_router(db):
         user = await user_of(request)
         proj = await owned(pid, user)
         sb = await get_started_sandbox(proj)
-        status = await dz.preview_status(sb)
+        status = await dz.preview_status(sb, existing_url=proj.get("preview_url"))
         if status.get("url"):
             await db.code_projects.update_one({"_id": ObjectId(pid)}, {"$set": {"preview_url": status["url"]}})
         return status
