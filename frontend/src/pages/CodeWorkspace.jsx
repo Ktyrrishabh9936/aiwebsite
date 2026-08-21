@@ -12,6 +12,7 @@ export default function CodeWorkspace() {
   const { theme } = useTheme();
   const [project, setProject] = useState(null);
   const [models, setModels] = useState([]);
+  const [providers, setProviders] = useState({});
   const [tree, setTree] = useState([]);
   const [activeFile, setActiveFile] = useState(null);
   const [dirty, setDirty] = useState(false);
@@ -55,7 +56,7 @@ export default function CodeWorkspace() {
   useEffect(() => {
     (async () => {
       const p = await loadProject();
-      api.get("/code/models").then((r) => setModels(r.data.models));
+      api.get("/code/models").then((r) => { setModels(r.data.models); setProviders(r.data.providers || {}); });
       api.get(`/code/projects/${pid}/messages`).then((r) => setMessages(r.data)).catch(() => {});
       let status = p.sandbox_status;
       while (status === "provisioning") {
@@ -157,7 +158,7 @@ export default function CodeWorkspace() {
       <TopBar project={project} onBack={() => nav("/app/code")} onSync={sync} onRun={runDev} />
       <div className="flex-1 flex min-h-0">
         <AgentChat chatRef={chatRef} messages={messages} input={input} setInput={setInput} streaming={streaming}
-          onSend={send} onStop={stop} models={models} currentModel={currentModel} onModel={changeModel} turns={turns} />
+          onSend={send} onStop={stop} models={models} providers={providers} currentModel={currentModel} onModel={changeModel} turns={turns} />
         <CenterBlock tab={tab} setTab={setTab} showFiles={showFiles} setShowFiles={setShowFiles}
           activeFile={activeFile} dirty={dirty} onSave={saveFile} theme={theme}
           onEditorChange={(v) => { setActiveFile((f) => ({ ...f, content: v ?? "" })); setDirty(true); }}

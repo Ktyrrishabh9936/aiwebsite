@@ -8,12 +8,13 @@ logger = logging.getLogger("coding_agent")
 
 # label = user-facing; real = provider model id; tier = speed grouping
 CODING_MODELS = [
-    {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "real": "gpt-4o", "provider": "openai", "tier": "medium"},
-    {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6", "real": "anthropic/claude-sonnet-4.5", "provider": "openrouter", "tier": "slow"},
-    {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro", "real": "google/gemini-2.5-pro", "provider": "openrouter", "tier": "medium"},
-    {"id": "qwen-coder", "label": "Qwen2.5 Coder", "real": "qwen/qwen-2.5-coder-32b-instruct", "provider": "openrouter", "tier": "medium"},
-    {"id": "deepseek-v3", "label": "DeepSeek V3", "real": "deepseek/deepseek-chat", "provider": "openrouter", "tier": "fast"},
-    {"id": "gpt-4o-mini", "label": "GPT-4o mini", "real": "gpt-4o-mini", "provider": "openai", "tier": "fast"},
+    {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "real": "gpt-4o", "provider": "openai", "tier": "premium", "capabilities": ["coding", "design", "terminal"]},
+    {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6", "real": "anthropic/claude-sonnet-4.5", "provider": "openrouter", "tier": "premium", "capabilities": ["coding", "reasoning", "design"]},
+    {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro", "real": "google/gemini-2.5-pro", "provider": "openrouter", "tier": "balanced", "capabilities": ["coding", "long-context"]},
+    {"id": "qwen-coder", "label": "Qwen2.5 Coder", "real": "qwen/qwen-2.5-coder-32b-instruct", "provider": "openrouter", "tier": "balanced", "capabilities": ["coding", "fast-edits"]},
+    {"id": "deepseek-v3", "label": "DeepSeek V3", "real": "deepseek/deepseek-chat", "provider": "openrouter", "tier": "fast", "capabilities": ["coding", "cheap"]},
+    {"id": "gpt-4o-mini", "label": "GPT-4o mini", "real": "gpt-4o-mini", "provider": "openai", "tier": "fast", "capabilities": ["coding", "cheap"]},
+    {"id": "minimax-m1", "label": "MiniMax M1", "real": "minimax/minimax-m1", "provider": "openrouter", "tier": "cheap", "capabilities": ["coding", "cheap"]},
 ]
 CODING_MODEL_MAP = {m["id"]: m for m in CODING_MODELS}
 DEFAULT_CODING_MODEL = "gpt-5.6-terra"
@@ -46,7 +47,10 @@ Narrate briefly what you are about to do BEFORE each tool call (one short senten
 Rules:
 - Use the tools to inspect and edit the real filesystem. Always write COMPLETE file contents with write_file (never partial diffs).
 - Before editing, list or read files to understand the current stack and state. Do not assume a fixed template or config.
-- Keep changes minimal and focused on the user's request.
+- When building from a blank or starter app, make the UI feel polished by default: responsive layout, clear hierarchy, refined spacing, usable states, and real content. Do not leave generic placeholder pages unless the user explicitly asks for basic scaffolding.
+- For website/app requests, plan the design, implement it, run the relevant install/build/test command when available, and summarize the result.
+- If you need to use code or terminal tools, say what operation you are about to perform before the tool call.
+- Keep changes focused on the user's request while still delivering a complete product-quality surface.
 - Do NOT start a long-running dev server yourself (the platform manages it). You may run install commands.
 - When completely done, end with a SHORT summary (2-4 markdown bullets) of exactly what you changed."""
 

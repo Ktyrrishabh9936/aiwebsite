@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Plus, Code2, ArrowLeft, Loader2, CheckCircle2, AlertCircle, Terminal, Trash2 } from "lucide-react";
+import { Plus, Code2, ArrowLeft, Loader2, CheckCircle2, AlertCircle, Terminal, Trash2, Github, PlugZap } from "lucide-react";
 import { toast } from "sonner";
 import api, { formatError } from "../lib/api";
 import { Logo } from "../components/Logo";
@@ -23,16 +23,20 @@ export default function CodeProjects() {
   const nav = useNavigate();
   const [projects, setProjects] = useState([]);
   const [models, setModels] = useState([]);
+  const [providers, setProviders] = useState({});
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [modelId, setModelId] = useState("gpt-4o");
   const [template, setTemplate] = useState("react-vite");
+  const [source, setSource] = useState("template");
+  const [repoUrl, setRepoUrl] = useState("");
+  const [branch, setBranch] = useState("");
   const [creating, setCreating] = useState(false);
 
   const load = () => api.get("/code/projects").then((r) => setProjects(r.data)).finally(() => setLoading(false));
-  useEffect(() => { load(); api.get("/code/models").then((r) => { setModels(r.data.models); setModelId(r.data.default); setTemplates(r.data.templates || []); }); }, []);
+  useEffect(() => { load(); api.get("/code/models").then((r) => { setModels(r.data.models); setModelId(r.data.default); setTemplates(r.data.templates || []); setProviders(r.data.providers || {}); }); }, []);
   useEffect(() => {
     if (projects.some((p) => p.sandbox_status === "provisioning")) {
       const t = setInterval(load, 4000); return () => clearInterval(t);
@@ -43,8 +47,11 @@ export default function CodeProjects() {
     e.preventDefault();
     setCreating(true);
     try {
-      const r = await api.post("/code/projects", { name, model_id: modelId, template });
-      toast.success("Project created — provisioning sandbox");
+      const payload = { name, model_id: modelId, template };
+      const r = source === "github"
+        ? await api.post("/code/projects/import/github", { ...payload, repo_url: repoUrl, branch: branch || undefined })
+        : await api.post("/code/projects", payload);
+      toast.success(source === "github" ? "Import started - cloning GitHub repo" : "Project created - provisioning sandbox");
       nav(`/app/code/${r.data.id}`);
     } catch (err) { toast.error(formatError(err.response?.data?.detail)); }
     finally { setCreating(false); }
@@ -75,6 +82,13 @@ export default function CodeProjects() {
           <div>
             <h1 className="font-display text-3xl sm:text-4xl font-black tracking-tight">AI Coding Workspace</h1>
             <p className="text-muted-foreground mt-1">Describe an app, the agent builds it in a live cloud sandbox — edit, run, preview.</p>
+            <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
+              {Object.entries(providers).map(([key, value]) => (
+                <span key={key} className={value.configured ? "inline-flex items-center gap-1 rounded-full border border-border px-2 py-1 text-primary" : "inline-flex items-center gap-1 rounded-full border border-border px-2 py-1"}>
+                  <PlugZap className="w-3 h-3" /> {key}: {value.configured ? "connected" : value.env}
+                </span>
+              ))}
+            </div>
           </div>
           <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
@@ -85,21 +99,38 @@ export default function CodeProjects() {
             <DialogContent>
               <DialogHeader><DialogTitle className="font-display">New coding project</DialogTitle></DialogHeader>
               <form onSubmit={create} className="space-y-5 pt-2" data-testid="create-code-form">
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" onClick={() => setSource("template")} className={source === "template" ? "h-10 rounded-md border-2 border-primary bg-primary/10 text-sm font-semibold" : "h-10 rounded-md border border-border text-sm hover:bg-accent"}>Template</button>
+                  <button type="button" onClick={() => setSource("github")} className={source === "github" ? "h-10 rounded-md border-2 border-primary bg-primary/10 text-sm font-semibold inline-flex items-center justify-center gap-2" : "h-10 rounded-md border border-border text-sm hover:bg-accent inline-flex items-center justify-center gap-2"}><Github className="w-4 h-4" /> GitHub</button>
+                </div>
                 <div className="space-y-2">
                   <Label htmlFor="pn">Project name</Label>
-                  <Input id="pn" data-testid="code-name-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Jewelry store app" required />
+                  <Input id="pn" data-testid="code-name-input" value={name} onChange={(e) => setName(e.target.value)} placeholder={source === "github" ? "Optional, inferred from repo" : "Jewelry store app"} required={source === "template"} />
                 </div>
-                <div className="space-y-2">
-                  <Label>Template / language</Label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {templates.map((t) => (
-                      <button type="button" key={t.id} onClick={() => setTemplate(t.id)} data-testid={`template-${t.id}`}
-                        className={template === t.id ? "px-3 h-11 rounded-md border-2 border-primary bg-primary/10 text-sm font-medium" : "px-3 h-11 rounded-md border border-border text-sm hover:bg-accent"}>
-                        {t.label}
-                      </button>
-                    ))}
+                {source === "github" ? (
+                  <div className="space-y-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="repo">GitHub repository URL</Label>
+                      <Input id="repo" data-testid="github-repo-input" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="https://github.com/org/repo.git" required={source === "github"} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="branch">Branch (optional)</Label>
+                      <Input id="branch" data-testid="github-branch-input" value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="main" />
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="space-y-2">
+                    <Label>Template / language</Label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {templates.map((t) => (
+                        <button type="button" key={t.id} onClick={() => setTemplate(t.id)} data-testid={`template-${t.id}`}
+                          className={template === t.id ? "px-3 h-11 rounded-md border-2 border-primary bg-primary/10 text-sm font-medium" : "px-3 h-11 rounded-md border border-border text-sm hover:bg-accent"}>
+                          {t.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="space-y-2">
                   <Label>Coding model</Label>
                   <DropdownMenu>
@@ -112,14 +143,14 @@ export default function CodeProjects() {
                     <DropdownMenuContent className="w-64">
                       {models.map((m) => (
                         <DropdownMenuItem key={m.id} onClick={() => setModelId(m.id)} className="flex justify-between cursor-pointer">
-                          <span>{m.label}</span><span className="text-[10px] uppercase text-muted-foreground">{m.tier}</span>
+                          <span>{m.label}</span><span className={m.configured ? "text-[10px] uppercase text-primary" : "text-[10px] uppercase text-amber-500"}>{m.configured ? m.tier : "key needed"}</span>
                         </DropdownMenuItem>
                       ))}
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
                 <button type="submit" disabled={creating} data-testid="create-code-submit" className="w-full h-11 rounded-full bg-primary text-primary-foreground font-semibold disabled:opacity-60 inline-flex items-center justify-center gap-2">
-                  {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Terminal className="w-4 h-4" />} Create & provision
+                  {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : source === "github" ? <Github className="w-4 h-4" /> : <Terminal className="w-4 h-4" />} {source === "github" ? "Import repository" : "Create & provision"}
                 </button>
               </form>
             </DialogContent>

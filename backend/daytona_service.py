@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import posixpath
+import shlex
 from daytona import AsyncDaytona, CreateSandboxFromSnapshotParams
 
 logger = logging.getLogger("daytona")
@@ -52,6 +53,27 @@ async def ensure_started(sandbox_id):
 async def exec_cmd(sb, command, timeout=120):
     r = await sb.process.exec(f"cd {BASE} && {command}", timeout=timeout)
     return {"exit_code": r.exit_code, "output": (r.result or "")[:60000]}
+
+
+async def import_github_repo(sb, repo_url, branch=None, token=None):
+    safe_url = (repo_url or "").strip()
+    if not (safe_url.startswith("https://github.com/") or safe_url.startswith("git@github.com:")):
+        raise ValueError("Only GitHub repositories are supported for import.")
+
+    auth_url = safe_url
+    if token and safe_url.startswith("https://github.com/"):
+        auth_url = safe_url.replace("https://", f"https://x-access-token:{token}@", 1)
+
+    branch_arg = f"--branch {shlex.quote(branch.strip())}" if branch else ""
+    cmd = (
+        f"rm -rf {BASE}/* {BASE}/.[!.]* {BASE}/..?* 2>/dev/null || true; "
+        f"git clone --depth 1 {branch_arg} {shlex.quote(auth_url)} {shlex.quote(BASE)}"
+    )
+    r = await sb.process.exec(cmd, timeout=180)
+    if r.exit_code != 0:
+        clean = (r.result or "").replace(token or "", "***")
+        raise RuntimeError(clean[:1000] or "GitHub clone failed.")
+    return {"exit_code": r.exit_code, "output": (r.result or "Imported repository.")[:60000]}
 
 
 async def write_file(sb, rel_path, content):

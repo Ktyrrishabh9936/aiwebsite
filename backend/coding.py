@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import APIRouter, Request, HTTPException, Body
@@ -48,20 +49,35 @@ SCAFFOLDS = {
         "src/App.jsx": (
             "export default function App() {\n"
             "  return (\n"
-            "    <div className=\"app\">\n"
-            "      <h1>Welcome to your Arevei app</h1>\n"
-            "      <p>Ask the coding agent in the chat to build anything.</p>\n"
-            "    </div>\n"
+            "    <main className=\"shell\">\n"
+            "      <section className=\"hero\">\n"
+            "        <p className=\"eyebrow\">Arevei starter</p>\n"
+            "        <h1>Welcome to your Arevei app</h1>\n"
+            "        <p className=\"lead\">A polished React canvas is ready. Ask the coding agent to turn this into a product, portfolio, store, dashboard, or game.</p>\n"
+            "        <div className=\"actions\">\n"
+            "          <a href=\"#features\">Explore starter</a>\n"
+            "          <button>Start building</button>\n"
+            "        </div>\n"
+            "      </section>\n"
+            "      <section id=\"features\" className=\"grid\">\n"
+            "        {['Responsive layout', 'Production spacing', 'Design-first edits'].map((item) => <article key={item}><span></span><h2>{item}</h2><p>Use this as the foundation for a more complete generated experience.</p></article>)}\n"
+            "      </section>\n"
+            "    </main>\n"
             "  )\n"
             "}\n"
         ),
         "src/index.css": (
-            ":root{color-scheme:light dark}\n"
-            "*{box-sizing:border-box}\n"
-            "body{margin:0;font-family:system-ui,sans-serif;background:#0a0a0a;color:#f5f5f5}\n"
-            ".app{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center;padding:24px}\n"
-            "h1{font-size:2rem;margin:0}\n"
-            "p{color:#a3a3a3;margin:0}\n"
+            ":root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#101010;background:#f6f3ee}\n"
+            "*{box-sizing:border-box} body{margin:0} a{color:inherit;text-decoration:none} button{font:inherit}\n"
+            ".shell{min-height:100vh;padding:48px clamp(20px,5vw,72px);background:linear-gradient(135deg,#f6f3ee 0%,#f8fbff 48%,#eaf6ef 100%);color:#101010}\n"
+            ".hero{min-height:62vh;display:flex;flex-direction:column;justify-content:center;max-width:920px}\n"
+            ".eyebrow{margin:0 0 18px;text-transform:uppercase;letter-spacing:.16em;font-size:12px;font-weight:800;color:#126b55}\n"
+            "h1{font-size:clamp(44px,9vw,104px);line-height:.9;margin:0;letter-spacing:0;font-weight:900;max-width:10ch}\n"
+            ".lead{font-size:clamp(18px,2vw,24px);line-height:1.45;max-width:700px;margin:28px 0;color:#3b3b3b}\n"
+            ".actions{display:flex;gap:12px;flex-wrap:wrap}.actions a,.actions button{height:46px;border-radius:8px;padding:0 18px;display:inline-flex;align-items:center;border:1px solid #111;background:#111;color:white;font-weight:800}.actions button{background:white;color:#111}\n"
+            ".grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:26px}.grid article{background:rgba(255,255,255,.68);border:1px solid rgba(16,16,16,.12);border-radius:8px;padding:20px;box-shadow:0 20px 70px rgba(20,40,60,.08)}\n"
+            ".grid span{display:block;width:32px;height:4px;border-radius:4px;background:#126b55;margin-bottom:20px}.grid h2{font-size:18px;margin:0 0 8px}.grid p{margin:0;color:#555;line-height:1.5}\n"
+            "@media(max-width:760px){.shell{padding:28px 18px}.hero{min-height:58vh}.grid{grid-template-columns:1fr}}\n"
         ),
     },
     "node": {
@@ -135,7 +151,24 @@ def build_coding_router(db):
     # ---------- models ----------
     @router.get("/models")
     async def models():
-        return {"models": coding_agent.CODING_MODELS, "default": coding_agent.DEFAULT_CODING_MODEL,
+        def ready(provider):
+            if provider == "openai":
+                return bool(os.environ.get("OPENAI_API_KEY"))
+            if provider == "openrouter":
+                return bool(os.environ.get("OPENROUTER_API_KEY"))
+            if provider == "nvidia":
+                return bool(os.environ.get("NVIDIA_NIM_API_KEY"))
+            return False
+
+        models = [{**m, "configured": ready(m.get("provider"))} for m in coding_agent.CODING_MODELS]
+        return {"models": models, "default": coding_agent.DEFAULT_CODING_MODEL,
+                "providers": {
+                    "openai": {"configured": ready("openai"), "env": "OPENAI_API_KEY"},
+                    "openrouter": {"configured": ready("openrouter"), "env": "OPENROUTER_API_KEY"},
+                    "nvidia": {"configured": ready("nvidia"), "env": "NVIDIA_NIM_API_KEY"},
+                    "github": {"configured": bool(os.environ.get("GITHUB_TOKEN")), "env": "GITHUB_TOKEN"},
+                    "skills": {"configured": True, "env": "Built-in coding, design, terminal, file, and testing skills"},
+                },
                 "templates": [
                     {"id": "react-vite", "label": "React (Vite)"},
                     {"id": "node", "label": "Node.js"},
@@ -164,6 +197,43 @@ def build_coding_router(db):
         res = await db.code_projects.insert_one(doc)
         pid = str(res.inserted_id)
         asyncio.create_task(provision(pid, template))
+        doc["_id"] = res.inserted_id
+        return out(doc)
+
+    @router.post("/projects/import/github")
+    async def import_github(request: Request, body: dict = Body(...)):
+        user = await user_of(request)
+        repo_url = (body.get("repo_url") or "").strip()
+        if not repo_url:
+            raise HTTPException(400, "repo_url required")
+        doc = {
+            "user_id": str(user["_id"]),
+            "name": body.get("name") or repo_url.rstrip("/").split("/")[-1].replace(".git", "") or "GitHub project",
+            "template": "github",
+            "model_id": body.get("model_id") or coding_agent.DEFAULT_CODING_MODEL,
+            "sandbox_id": None,
+            "sandbox_status": "provisioning",
+            "preview_url": None,
+            "deployed_url": None,
+            "repo_url": repo_url,
+            "branch": body.get("branch") or None,
+            "created_at": now_iso(),
+        }
+        res = await db.code_projects.insert_one(doc)
+        pid = str(res.inserted_id)
+
+        async def import_bg():
+            try:
+                sb = await dz.create_sandbox(pid)
+                await dz.import_github_repo(sb, repo_url, body.get("branch"), os.environ.get("GITHUB_TOKEN"))
+                await db.code_projects.update_one({"_id": ObjectId(pid)},
+                                                  {"$set": {"sandbox_id": sb.id, "sandbox_status": "ready"}})
+            except Exception as e:
+                logger.exception("github import failed")
+                await db.code_projects.update_one({"_id": ObjectId(pid)},
+                                                  {"$set": {"sandbox_status": "error", "error": str(e)[:300]}})
+
+        asyncio.create_task(import_bg())
         doc["_id"] = res.inserted_id
         return out(doc)
 
