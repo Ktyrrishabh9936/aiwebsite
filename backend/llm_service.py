@@ -1,7 +1,6 @@
 import os
 import re
 import json
-import uuid
 import logging
 import httpx
 from dotenv import load_dotenv
@@ -11,7 +10,6 @@ load_dotenv(Path(__file__).parent / ".env")
 
 logger = logging.getLogger("llm")
 
-EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
 NVIDIA_KEY = os.environ.get("NVIDIA_NIM_API_KEY")
 
@@ -22,12 +20,12 @@ DEFAULT_MODEL = "gpt-5.4"
 
 # Model registry surfaced to the UI model picker
 MODELS = [
-    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "provider": "emergent", "sub": "anthropic", "tier": "premium"},
-    {"id": "gpt-5.4", "label": "GPT-5.4", "provider": "emergent", "sub": "openai", "tier": "premium"},
-    {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash", "provider": "emergent", "sub": "gemini", "tier": "fast"},
-    {"id": "deepseek/deepseek-chat", "label": "DeepSeek V3", "provider": "openrouter", "sub": None, "tier": "cheap"},
-    {"id": "meta-llama/llama-3.3-70b-instruct", "label": "Llama 3.3 70B", "provider": "openrouter", "sub": None, "tier": "cheap"},
-    {"id": "meta/llama-3.1-70b-instruct", "label": "NVIDIA Llama 3.1 70B", "provider": "nvidia", "sub": None, "tier": "cheap"},
+    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "real": "anthropic/claude-sonnet-4.5", "provider": "openrouter", "tier": "premium"},
+    {"id": "gpt-5.4", "label": "GPT-5.4", "real": "openai/gpt-5.4", "provider": "openrouter", "tier": "premium"},
+    {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash", "real": "google/gemini-2.5-flash", "provider": "openrouter", "tier": "fast"},
+    {"id": "deepseek/deepseek-chat", "label": "DeepSeek V3", "real": "deepseek/deepseek-chat", "provider": "openrouter", "tier": "cheap"},
+    {"id": "meta-llama/llama-3.3-70b-instruct", "label": "Llama 3.3 70B", "real": "meta-llama/llama-3.3-70b-instruct", "provider": "openrouter", "tier": "cheap"},
+    {"id": "meta/llama-3.1-70b-instruct", "label": "NVIDIA Llama 3.1 70B", "real": "meta/llama-3.1-70b-instruct", "provider": "nvidia", "tier": "cheap"},
 ]
 MODEL_MAP = {m["id"]: m for m in MODELS}
 
@@ -57,22 +55,13 @@ async def _openai_compatible(url, key, model, system, prompt, temperature, max_t
 async def generate_text(model_id, system, prompt, temperature=0.7, max_tokens=4000):
     m = _resolve(model_id)
     try:
-        if m["provider"] == "emergent":
-            from emergentintegrations.llm.chat import LlmChat, UserMessage
-            chat = LlmChat(
-                api_key=EMERGENT_KEY,
-                session_id=str(uuid.uuid4()),
-                system_message=system,
-            ).with_model(m["sub"], m["id"])
-            resp = await chat.send_message(UserMessage(text=prompt))
-            return resp if isinstance(resp, str) else str(resp)
-        elif m["provider"] == "openrouter":
-            return await _openai_compatible(OPENROUTER_URL, OPENROUTER_KEY, m["id"], system, prompt, temperature, max_tokens)
+        if m["provider"] == "openrouter":
+            return await _openai_compatible(OPENROUTER_URL, OPENROUTER_KEY, m["real"], system, prompt, temperature, max_tokens)
         else:
             return await _openai_compatible(NVIDIA_URL, NVIDIA_KEY, m["id"], system, prompt, temperature, max_tokens)
     except Exception as e:
         logger.exception("generate_text failed")
-        # graceful fallback to default emergent model
+        # Gracefully retry with the configured default model.
         if model_id != DEFAULT_MODEL:
             return await generate_text(DEFAULT_MODEL, system, prompt, temperature, max_tokens)
         raise
@@ -109,23 +98,11 @@ async def generate_json(model_id, system, prompt, temperature=0.5, max_tokens=60
 
 async def stream_text(model_id, system, prompt):
     m = _resolve(model_id)
-    if m["provider"] == "emergent":
-        from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
-        chat = LlmChat(
-            api_key=EMERGENT_KEY,
-            session_id=str(uuid.uuid4()),
-            system_message=system,
-        ).with_model(m["sub"], m["id"])
-        async for ev in chat.stream_message(UserMessage(text=prompt)):
-            if isinstance(ev, TextDelta):
-                yield ev.content
-            elif isinstance(ev, StreamDone):
-                break
-    else:
+    if m["provider"] == "openrouter" or m["provider"] == "nvidia":
         url, key = (OPENROUTER_URL, OPENROUTER_KEY) if m["provider"] == "openrouter" else (NVIDIA_URL, NVIDIA_KEY)
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         payload = {
-            "model": m["id"],
+            "model": m.get("real", m["id"]),
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
