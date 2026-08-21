@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useOutletContext, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Play, Check, Clock, Loader2, Trash2, CheckCircle2, XCircle, FileText, Eye } from "lucide-react";
@@ -28,8 +28,8 @@ export default function Tasks() {
   const [busy, setBusy] = useState(null);
   const [detail, setDetail] = useState(null);
 
-  const load = () => api.get(`/workspaces/${ws.id}/tasks`).then((r) => setTasks(r.data)).catch(() => {});
-  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [ws.id]);
+  const load = useCallback(() => api.get(`/workspaces/${ws.id}/tasks`).then((r) => setTasks(r.data)).catch(() => {}), [ws.id]);
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
   const run = async (id) => {
     setBusy(id);

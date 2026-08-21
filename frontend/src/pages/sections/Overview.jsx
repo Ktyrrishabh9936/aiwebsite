@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useOutletContext, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Brain, FileText, ListChecks, Sparkles, Loader2, ArrowRight, RefreshCw } from "lucide-react";
@@ -22,11 +22,11 @@ export default function Overview() {
   const [blogs, setBlogs] = useState([]);
   const [genning, setGenning] = useState(false);
 
-  const load = () => {
+  const load = useCallback(() => {
     api.get(`/workspaces/${ws.id}/tasks`).then((r) => setTasks(r.data)).catch(() => {});
     api.get(`/workspaces/${ws.id}/blogs`).then((r) => setBlogs(r.data)).catch(() => {});
-  };
-  useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, [ws.id]);
+  }, [ws.id]);
+  useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, [load]);
 
   const genRoadmap = async () => {
     setGenning(true);

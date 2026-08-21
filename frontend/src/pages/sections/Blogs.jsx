@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useOutletContext, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Plus, Loader2, Sparkles, Eye, Trash2, Globe, PenLine } from "lucide-react";
@@ -17,8 +17,8 @@ export default function Blogs() {
   const [topic, setTopic] = useState("");
   const [genning, setGenning] = useState(false);
 
-  const load = () => api.get(`/workspaces/${ws.id}/blogs`).then((r) => setBlogs(r.data)).finally(() => setLoading(false));
-  useEffect(() => { load(); }, [ws.id]);
+  const load = useCallback(() => api.get(`/workspaces/${ws.id}/blogs`).then((r) => setBlogs(r.data)).finally(() => setLoading(false)), [ws.id]);
+  useEffect(() => { load(); }, [load]);
 
   const generate = async (e) => {
     e.preventDefault();
