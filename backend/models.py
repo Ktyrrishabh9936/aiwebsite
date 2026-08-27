@@ -94,6 +94,43 @@ class Notification(BaseDocument):
     created_at: str = Field(default_factory=now_iso)
 
 
+class Workflow(BaseDocument):
+    workspace_id: str
+    kind: str = "ads_to_crm"
+    status: str = "draft"  # draft | published
+    sheet_connection_id: Optional[str] = None
+    published_at: Optional[str] = None
+    created_at: str = Field(default_factory=now_iso)
+
+
+class GoogleSheetConnection(BaseDocument):
+    workspace_id: str
+    google_email: Optional[str] = None
+    spreadsheet_id: Optional[str] = None
+    spreadsheet_name: Optional[str] = None
+    sheet_name: Optional[str] = None
+    header_row: List[str] = Field(default_factory=list)
+    column_map: dict = Field(default_factory=dict)  # maps standard keys to headers
+    cursor: int = 1  # processed rows cursor
+    tokens: dict = Field(default_factory=dict)  # access_token, refresh_token, etc.
+    created_at: str = Field(default_factory=now_iso)
+    updated_at: str = Field(default_factory=now_iso)
+
+
+class CRMLead(BaseDocument):
+    workspace_id: str
+    workflow_kind: str = "ads_to_crm"
+    source: str = "google_sheet"
+    sheet_row_key: str  # spreadsheet_id + tab + row_number or lead_id
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    fields: dict = Field(default_factory=dict)
+    status: str = "new"  # new | contacted | won | lost
+    created_at: str = Field(default_factory=now_iso)
+    updated_at: str = Field(default_factory=now_iso)
+
+
 BLOG_IMAGE_POOL = [
     "https://images.unsplash.com/photo-1742292042826-cc35ffd81c74?crop=entropy&cs=srgb&fm=jpg&q=85&w=1600",
     "https://images.unsplash.com/photo-1737442528819-5526652236e8?crop=entropy&cs=srgb&fm=jpg&q=85&w=1600",

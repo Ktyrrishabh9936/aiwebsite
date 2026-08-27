@@ -463,7 +463,7 @@ async def scheduler_loop():
         try:
             now = datetime.now(timezone.utc).isoformat()
             task = await db.tasks.find_one({"status": "pending", "requires_approval": False,
-                                            "scheduled_time": {"$lte": now}})
+                                             "scheduled_time": {"$lte": now}})
             if task:
                 logger.info("Scheduler executing task %s", task.get("title"))
                 await execute_task(task)
@@ -471,6 +471,123 @@ async def scheduler_loop():
             logger.exception("scheduler tick failed")
         await asyncio.sleep(30)
 
+
+async def google_sheets_poller_loop():
+    import httpx
+    from models import CRMLead
+    from google_sheets import refresh_access_token
+    await asyncio.sleep(15)
+    while True:
+        try:
+            cursor = db.workflows.find({"kind": "ads_to_crm", "status": "published"})
+            async for wf in cursor:
+                ws_id = wf["workspace_id"]
+                conn = await db.google_sheet_connections.find_one({"workspace_id": ws_id})
+                if not conn or not conn.get("spreadsheet_id") or not conn.get("sheet_name"):
+                    continue
+                
+                spreadsheet_id = conn["spreadsheet_id"]
+                sheet_name = conn["sheet_name"]
+                headers = conn.get("header_row", [])
+                col_map = conn.get("column_map", {})
+                current_cursor = conn.get("cursor", 1)
+                
+                start_row = current_cursor + 1
+                end_row = start_row + 200
+                range_str = f"{sheet_name}!A{start_row}:Z{end_row}"
+                
+                access_token = conn.get("tokens", {}).get("access_token")
+                if not access_token:
+                    continue
+                
+                async def fetch_values(token):
+                    async with httpx.AsyncClient() as client:
+                        url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{range_str}"
+                        return await client.get(url, headers={"Authorization": f"Bearer {token}"})
+                
+                res = await fetch_values(access_token)
+                if res.status_code == 401:
+                    try:
+                        class FakeRequest:
+                            def __init__(self, app_inst):
+                                self.app = app_inst
+                        
+                        fake_req = FakeRequest(app)
+                        access_token = await refresh_access_token(conn, fake_req)
+                        res = await fetch_values(access_token)
+                    except Exception as e:
+                        logger.error("Failed to auto refresh token for workspace %s: %s", ws_id, e)
+                        await db.workflows.update_one({"_id": wf["_id"]}, {"$set": {"status": "draft"}})
+                        await notify(ws_id, "error", "Google Sheets workflow paused", "Authentication expired. Please reconnect.")
+                        continue
+                
+                if res.status_code != 200:
+                    logger.error("Failed to poll sheet values for workspace %s: %s", ws_id, res.text)
+                    continue
+                
+                data = res.json()
+                rows = data.get("values", [])
+                if not rows:
+                    continue
+                
+                new_leads_count = 0
+                for idx, row in enumerate(rows):
+                    row_num = start_row + idx
+                    padded_row = list(row) + [""] * max(0, len(headers) - len(row))
+                    row_dict = {}
+                    for h_idx, h_name in enumerate(headers):
+                        if h_idx < len(padded_row):
+                            row_dict[h_name] = padded_row[h_idx]
+                    
+                    email_header = col_map.get("email")
+                    fullname_header = col_map.get("full_name")
+                    phone_header = col_map.get("phone")
+                    lead_id_header = col_map.get("meta_lead_id")
+                    
+                    email_val = row_dict.get(email_header) if email_header else None
+                    fullname_val = row_dict.get(fullname_header) if fullname_header else None
+                    phone_val = row_dict.get(phone_header) if phone_header else None
+                    lead_id_val = row_dict.get(lead_id_header) if lead_id_header else None
+                    
+                    row_key = lead_id_val if lead_id_val else f"{spreadsheet_id}_{sheet_name}_{row_num}"
+                    
+                    existing_lead = await db.crm_leads.find_one({"workspace_id": ws_id, "sheet_row_key": row_key})
+                    if not existing_lead:
+                        lead_doc = CRMLead(
+                            workspace_id=ws_id,
+                            workflow_kind="ads_to_crm",
+                            source="google_sheet",
+                            sheet_row_key=row_key,
+                            email=email_val,
+                            full_name=fullname_val,
+                            phone=phone_val,
+                            fields=row_dict,
+                            status="new"
+                        )
+                        await db.crm_leads.insert_one(lead_doc.to_mongo())
+                        new_leads_count += 1
+                
+                new_cursor = current_cursor + len(rows)
+                await db.google_sheet_connections.update_one(
+                    {"workspace_id": ws_id},
+                    {"$set": {"cursor": new_cursor, "updated_at": now_iso()}}
+                )
+                
+                if new_leads_count > 0:
+                    await notify(ws_id, "success", f"{new_leads_count} new leads imported", f"Imported {new_leads_count} new lead(s) from your connected Google Sheet.")
+                    
+        except Exception:
+            logger.exception("google sheets poller tick failed")
+        await asyncio.sleep(30)
+
+
+from google_sheets import router as google_sheets_router
+from workflows import router as workflows_router
+from crm import router as crm_router
+
+api.include_router(google_sheets_router)
+api.include_router(workflows_router)
+api.include_router(crm_router)
 
 app.include_router(build_auth_router(db))
 app.include_router(build_coding_router(db))
@@ -488,12 +605,16 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
+    app.state.db = db
     await db.users.create_index("email", unique=True)
     await db.workspaces.create_index("public_key")
     await db.blogs.create_index("slug", unique=True)
     await db.code_projects.create_index("user_id")
+    await db.workflows.create_index([("workspace_id", 1), ("kind", 1)])
+    await db.crm_leads.create_index([("workspace_id", 1), ("sheet_row_key", 1)], unique=True)
     await seed_admin(db)
     asyncio.create_task(scheduler_loop())
+    asyncio.create_task(google_sheets_poller_loop())
     logger.info("Arevei backend ready")
 
 

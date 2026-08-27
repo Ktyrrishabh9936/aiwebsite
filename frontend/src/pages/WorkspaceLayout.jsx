@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { NavLink, Outlet, useParams, useNavigate, Link } from "react-router-dom";
 import {
   LayoutDashboard, Brain as BrainIcon, MessageSquare, ListChecks, FileText, Code2,
-  Bell, LogOut, ChevronLeft, Loader2, Boxes,
+  Bell, LogOut, ChevronLeft, Loader2, Boxes, Workflow, Users,
 } from "lucide-react";
 import { toast } from "sonner";
 import api from "../lib/api";
@@ -20,6 +20,8 @@ const nav = [
   { to: "tasks", label: "Tasks", icon: ListChecks },
   { to: "blogs", label: "Blogs", icon: FileText },
   { to: "embed", label: "Add Blog System", icon: Code2 },
+  { to: "workflows", label: "Workflows", icon: Workflow },
+  { to: "crm", label: "CRM Leads", icon: Users },
 ];
 
 const kindDot = { success: "bg-primary", approval: "bg-amber-500", error: "bg-destructive", info: "bg-muted-foreground" };

@@ -20,6 +20,9 @@ import Blogs from "./pages/sections/Blogs";
 import BlogEditor from "./pages/sections/BlogEditor";
 import Embed from "./pages/sections/Embed";
 import PublicBlog from "./pages/PublicBlog";
+import Workflows from "./pages/sections/Workflows";
+import AdsToCrmWorkflow from "./pages/sections/AdsToCrmWorkflow";
+import CrmInbox from "./pages/sections/CrmInbox";
 
 function Protected() {
   const { user, ready } = useAuth();
@@ -52,6 +55,9 @@ function App() {
                   <Route path="blogs" element={<Blogs />} />
                   <Route path="blogs/:blogId" element={<BlogEditor />} />
                   <Route path="embed" element={<Embed />} />
+                  <Route path="workflows" element={<Workflows />} />
+                  <Route path="workflows/ads-to-crm" element={<AdsToCrmWorkflow />} />
+                  <Route path="crm" element={<CrmInbox />} />
                 </Route>
               </Route>
             </Routes>
