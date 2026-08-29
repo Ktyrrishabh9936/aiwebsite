@@ -68,8 +68,8 @@ export default function WorkspaceLayout() {
   if (!ws) return <div className="min-h-screen grid place-items-center text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin" /></div>;
 
   return (
-    <div className="min-h-screen flex">
-      <aside className="hidden md:flex flex-col w-60 border-r border-border bg-card shrink-0">
+    <div className="h-screen overflow-hidden md:pl-60">
+      <aside className="hidden md:flex fixed inset-y-0 left-0 z-30 flex-col w-60 border-r border-border bg-card">
         <div className="h-16 flex items-center px-5 border-b border-border">
           <Logo className="text-base" to="/app" />
         </div>
@@ -103,7 +103,7 @@ export default function WorkspaceLayout() {
         </div>
       </aside>
 
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="h-screen flex flex-col min-w-0">
         <header className="sticky top-0 z-20 glass border-b border-border">
           <div className="h-16 px-5 flex items-center justify-between gap-3">
             <div className="min-w-0">

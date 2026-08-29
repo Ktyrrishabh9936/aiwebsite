@@ -125,8 +125,19 @@ class CRMLead(BaseDocument):
     email: Optional[str] = None
     full_name: Optional[str] = None
     phone: Optional[str] = None
+    address: Optional[str] = None
+    assigned_salesperson: Optional[str] = None
+    notes: str = ""
     fields: dict = Field(default_factory=dict)
+    field_values: dict = Field(default_factory=dict)
     status: str = "new"  # new | contacted | won | lost
+    customer_status: Optional[str] = None  # lead | customer
+    conversion_type: Optional[str] = None  # single_payment | payment_plan
+    converted_at: Optional[str] = None
+    payment_plan: dict = Field(default_factory=dict)
+    timeline: List[dict] = Field(default_factory=list)
+    receipts: List[dict] = Field(default_factory=list)
+    final_invoice: dict = Field(default_factory=dict)
     created_at: str = Field(default_factory=now_iso)
     updated_at: str = Field(default_factory=now_iso)
 

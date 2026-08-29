@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from bson import ObjectId
 from models import GoogleSheetConnection, Workflow, now_iso
 import httpx
+from crm import active_fields, ensure_crm_settings
 
 router = APIRouter(prefix="/google")
 
@@ -193,6 +194,28 @@ async def list_spreadsheets(ws_id: str, request: Request):
         
     return res.json().get("files", [])
 
+@router.get("/workspaces/{ws_id}/spreadsheets/{spreadsheet_id}/tabs")
+async def list_spreadsheet_tabs(ws_id: str, spreadsheet_id: str, request: Request):
+    db = request.app.state.db if hasattr(request.app.state, "db") else request.app.extra.get("db")
+    conn = await db.google_sheet_connections.find_one({"workspace_id": ws_id})
+    if not conn:
+        raise HTTPException(status_code=400, detail="Google sheet connection not found.")
+
+    async def try_fetch(token):
+        async with httpx.AsyncClient() as client:
+            url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}?fields=sheets.properties.title"
+            return await client.get(url, headers={"Authorization": f"Bearer {token}"})
+
+    access_token = conn["tokens"].get("access_token")
+    res = await try_fetch(access_token)
+    if res.status_code == 401:
+        access_token = await refresh_access_token(conn, request)
+        res = await try_fetch(access_token)
+    if res.status_code != 200:
+        raise HTTPException(status_code=res.status_code, detail=f"Failed to fetch sheet tabs: {res.text}")
+    sheets = res.json().get("sheets", [])
+    return [{"name": s.get("properties", {}).get("title", "")} for s in sheets if s.get("properties", {}).get("title")]
+
 @router.post("/workspaces/{ws_id}/bind")
 async def bind_sheet(ws_id: str, request: Request, body: dict):
     db = request.app.state.db if hasattr(request.app.state, "db") else request.app.extra.get("db")
@@ -261,7 +284,11 @@ async def bind_sheet(ws_id: str, request: Request, body: dict):
 @router.patch("/workspaces/{ws_id}/column_map")
 async def update_column_map(ws_id: str, request: Request, body: dict):
     db = request.app.state.db if hasattr(request.app.state, "db") else request.app.extra.get("db")
-    column_map = body.get("column_map", {})
+    settings = await ensure_crm_settings(db, ws_id)
+    allowed = {f["key"] for f in active_fields(settings)}
+    column_map = {k: v for k, v in (body.get("column_map", {}) or {}).items() if k in allowed or k == "meta_lead_id"}
+    if not column_map.get("email"):
+        raise HTTPException(status_code=400, detail="Email column mapping is required.")
     
     await db.google_sheet_connections.update_one(
         {"workspace_id": ws_id},

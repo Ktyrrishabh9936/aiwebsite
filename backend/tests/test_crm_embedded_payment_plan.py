@@ -1,0 +1,179 @@
+import sys
+from pathlib import Path
+
+from fastapi import HTTPException
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from crm import (  # noqa: E402
+    DEFAULT_FIELDS,
+    DEFAULT_ORGANIZATION,
+    DEFAULT_STATES,
+    invoice_html,
+    normalize_field,
+    normalize_payment_plan,
+    payment_plan_ready_for_final_invoice,
+    recalculate_payment_plan,
+    receipt_html,
+    render_template_html,
+    single_payment_summary,
+    validate_field_values,
+)
+
+
+def test_email_field_is_locked_required():
+    field = normalize_field({"key": "email", "type": "text", "required": False, "active": False})
+
+    assert field["key"] == "email"
+    assert field["type"] == "email"
+    assert field["required"] is True
+    assert field["active"] is True
+
+
+def test_required_email_validation_uses_crm_field_values():
+    settings = {"fields": DEFAULT_FIELDS, "states": DEFAULT_STATES}
+
+    try:
+        validate_field_values({"full_name": "Diya Sharma"}, settings)
+        assert False, "missing required email should fail"
+    except HTTPException:
+        pass
+
+    values = validate_field_values({"email": "diya@example.com", "unknown": "ignored"}, settings)
+    assert values == {"email": "diya@example.com"}
+
+
+def test_payment_plan_stays_embedded_and_completes_by_stage_status():
+    plan = normalize_payment_plan({
+        "final_invoice_note": "Invoice INV-001 ready",
+        "stages": [
+            {"name": "Token Amount", "amount": "100000", "due_timing": "On booking", "status": "paid"},
+            {"name": "Final Payment", "amount": "900000", "due_timing": "Registry", "status": "paid"},
+        ],
+    })
+
+    assert plan["status"] == "completed"
+    assert len(plan["stages"]) == 2
+    assert plan["final_invoice_note"] == "Invoice INV-001 ready"
+
+
+def test_single_payment_summary_tracks_partial_and_full_due():
+    lead = {}
+    partial = single_payment_summary(lead, [{"amount": "4000"}], "10000")
+    full = single_payment_summary({"payment_summary": partial}, [{"amount": "4000"}, {"amount": "6000"}])
+
+    assert partial["total_paid"] == "4000"
+    assert partial["due_amount"] == "6000"
+    assert partial["status"] == "active"
+    assert full["total_paid"] == "10000"
+    assert full["due_amount"] == "0"
+    assert full["status"] == "completed"
+
+
+def test_multistep_partial_receipt_keeps_next_stage_absent_until_due_clears():
+    plan = normalize_payment_plan({
+        "total_amount": "20000",
+        "stages": [{"id": "stage-1", "name": "Payment 1", "amount": "5000"}],
+    })
+
+    partial = recalculate_payment_plan(plan, [{"stage_id": "stage-1", "amount": "2000"}])
+    completed_first = recalculate_payment_plan(plan, [{"stage_id": "stage-1", "amount": "5000"}])
+
+    assert len(partial["stages"]) == 1
+    assert partial["stages"][0]["paid_amount"] == "2000"
+    assert partial["stages"][0]["due_amount"] == "18000"
+    assert partial["stages"][0]["status"] == "partially_paid"
+    assert len(completed_first["stages"]) == 2
+    assert completed_first["stages"][0]["status"] == "paid"
+    assert completed_first["stages"][1]["amount"] == "15000"
+    assert completed_first["due_amount"] == "15000"
+
+
+def test_multistep_multiple_receipts_sum_by_stage_and_complete_plan():
+    plan = normalize_payment_plan({
+        "total_amount": "10000",
+        "stages": [
+            {"id": "stage-1", "name": "Payment 1", "amount": "4000"},
+            {"id": "stage-2", "name": "Payment 2", "amount": "6000"},
+        ],
+    })
+    receipts = [
+        {"stage_id": "stage-1", "amount": "1000"},
+        {"stage_id": "stage-1", "amount": "3000"},
+        {"stage_id": "stage-2", "amount": "6000"},
+    ]
+
+    recalculated = recalculate_payment_plan(plan, receipts)
+
+    assert recalculated["total_paid"] == "10000"
+    assert recalculated["due_amount"] == "0"
+    assert recalculated["status"] == "completed"
+    assert recalculated["stages"][0]["paid_amount"] == "4000"
+    assert recalculated["stages"][0]["due_amount"] == "0"
+
+
+def test_final_invoice_requires_every_payment_stage_paid_even_when_due_is_zero():
+    plan = normalize_payment_plan({
+        "total_amount": "10000",
+        "stages": [
+            {"id": "stage-1", "name": "Payment 1", "amount": "4000"},
+            {"id": "stage-2", "name": "Payment 2", "amount": "6000"},
+        ],
+    })
+
+    recalculated = recalculate_payment_plan(plan, [{"stage_id": "stage-1", "amount": "10000"}])
+
+    assert recalculated["due_amount"] == "0"
+    assert recalculated["stages"][0]["status"] == "paid"
+    assert recalculated["stages"][1]["status"] == "pending"
+    assert payment_plan_ready_for_final_invoice(recalculated) is False
+
+
+def test_template_render_uses_configured_field_values_and_payment_plan():
+    settings = {"fields": DEFAULT_FIELDS, "states": DEFAULT_STATES}
+    lead = {
+        "field_values": {"full_name": "Diya Sharma", "email": "diya@example.com", "phone": "999"},
+        "payment_plan": {"stages": [{"name": "Token Amount", "amount": "100000", "due_timing": "Today", "status": "paid"}]},
+    }
+    template = {"name": "Receipt", "html": "<h1>{{full_name}}</h1><p>{{email}}</p><table>{{payment_plan.stages}}</table>"}
+
+    html = render_template_html(template, lead, settings)
+
+    assert "Diya Sharma" in html
+    assert "diya@example.com" in html
+    assert "Token Amount" in html
+
+
+def test_default_receipt_and_invoice_html_include_snapshots():
+    receipt = {
+        "receipt_number": "REC-0001",
+        "transaction_id": "TXN-001",
+        "payment_stage": "Single Payment",
+        "amount": "100000",
+        "payment_date": "2026-08-29",
+        "payment_method": "Bank Transfer",
+        "status": "Paid",
+        "due_amount": "0",
+        "description": "Booking payment",
+        "salesperson": "Riya",
+        "organization": {**DEFAULT_ORGANIZATION, "company_name": "Arevei Realty"},
+        "customer": {"name": "Diya Sharma", "email": "diya@example.com", "phone": "999", "address": "Unit 101"},
+    }
+    invoice = {
+        "invoice_number": "INV-0001",
+        "generated_at": "2026-08-29",
+        "organization": receipt["organization"],
+        "customer": receipt["customer"],
+        "receipts": [receipt],
+        "total_paid": "100000",
+        "due_amount": "0",
+        "salesperson": "Riya",
+        "description": "Final settlement",
+    }
+
+    assert "REC-0001" in receipt_html(receipt)
+    assert "TXN-001" in receipt_html(receipt)
+    assert "Diya Sharma" in receipt_html(receipt)
+    assert "INV-0001" in invoice_html(invoice)
+    assert "REC-0001" in invoice_html(invoice)
+    assert "TXN-001" in invoice_html(invoice)

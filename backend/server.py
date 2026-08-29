@@ -475,6 +475,7 @@ async def scheduler_loop():
 async def google_sheets_poller_loop():
     import httpx
     from models import CRMLead
+    from crm import active_fields, ensure_crm_settings
     from google_sheets import refresh_access_token
     await asyncio.sleep(15)
     while True:
@@ -491,6 +492,8 @@ async def google_sheets_poller_loop():
                 headers = conn.get("header_row", [])
                 col_map = conn.get("column_map", {})
                 current_cursor = conn.get("cursor", 1)
+                crm_settings = await ensure_crm_settings(db, ws_id)
+                crm_field_keys = {f["key"] for f in active_fields(crm_settings)}
                 
                 start_row = current_cursor + 1
                 end_row = start_row + 200
@@ -539,15 +542,13 @@ async def google_sheets_poller_loop():
                         if h_idx < len(padded_row):
                             row_dict[h_name] = padded_row[h_idx]
                     
-                    email_header = col_map.get("email")
-                    fullname_header = col_map.get("full_name")
-                    phone_header = col_map.get("phone")
                     lead_id_header = col_map.get("meta_lead_id")
-                    
-                    email_val = row_dict.get(email_header) if email_header else None
-                    fullname_val = row_dict.get(fullname_header) if fullname_header else None
-                    phone_val = row_dict.get(phone_header) if phone_header else None
                     lead_id_val = row_dict.get(lead_id_header) if lead_id_header else None
+                    field_values = {}
+                    for field_key in crm_field_keys:
+                        header_name = col_map.get(field_key)
+                        if header_name and header_name in row_dict:
+                            field_values[field_key] = row_dict.get(header_name)
                     
                     row_key = lead_id_val if lead_id_val else f"{spreadsheet_id}_{sheet_name}_{row_num}"
                     
@@ -558,9 +559,12 @@ async def google_sheets_poller_loop():
                             workflow_kind="ads_to_crm",
                             source="google_sheet",
                             sheet_row_key=row_key,
-                            email=email_val,
-                            full_name=fullname_val,
-                            phone=phone_val,
+                            email=field_values.get("email"),
+                            full_name=field_values.get("full_name"),
+                            phone=field_values.get("phone"),
+                            address=field_values.get("address"),
+                            assigned_salesperson=field_values.get("assigned_salesperson"),
+                            field_values=field_values,
                             fields=row_dict,
                             status="new"
                         )
@@ -612,6 +616,7 @@ async def startup():
     await db.code_projects.create_index("user_id")
     await db.workflows.create_index([("workspace_id", 1), ("kind", 1)])
     await db.crm_leads.create_index([("workspace_id", 1), ("sheet_row_key", 1)], unique=True)
+    await db.crm_settings.create_index("workspace_id", unique=True)
     await seed_admin(db)
     asyncio.create_task(scheduler_loop())
     asyncio.create_task(google_sheets_poller_loop())
