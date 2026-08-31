@@ -17,7 +17,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [url, setUrl] = useState("");
-  const [modelId, setModelId] = useState("gpt-5.4");
+  const [modelId, setModelId] = useState("gemini-3-flash-preview");
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {

@@ -10,8 +10,6 @@ logger = logging.getLogger("coding_agent")
 CODING_MODELS = [
     {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "real": "gpt-4o", "provider": "openai", "tier": "premium", "capabilities": ["coding", "design", "terminal"]},
     {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6", "real": "anthropic/claude-sonnet-4.5", "provider": "openrouter", "tier": "premium", "capabilities": ["coding", "reasoning", "design"]},
-    {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro", "real": "google/gemini-2.5-pro", "provider": "openrouter", "tier": "balanced", "capabilities": ["coding", "long-context"]},
-    {"id": "qwen-coder", "label": "Qwen2.5 Coder", "real": "qwen/qwen-2.5-coder-32b-instruct", "provider": "openrouter", "tier": "balanced", "capabilities": ["coding", "fast-edits"]},
     {"id": "deepseek-v3", "label": "DeepSeek V3", "real": "deepseek/deepseek-chat", "provider": "openrouter", "tier": "fast", "capabilities": ["coding", "cheap"]},
     {"id": "gpt-4o-mini", "label": "GPT-4o mini", "real": "gpt-4o-mini", "provider": "openai", "tier": "fast", "capabilities": ["coding", "cheap"]},
     {"id": "minimax-m1", "label": "MiniMax M1", "real": "minimax/minimax-m1", "provider": "openrouter", "tier": "cheap", "capabilities": ["coding", "cheap"]},

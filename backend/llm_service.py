@@ -16,16 +16,13 @@ NVIDIA_KEY = os.environ.get("NVIDIA_NIM_API_KEY")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gemini-3-flash-preview"
 
 # Model registry surfaced to the UI model picker
 MODELS = [
-    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "real": "anthropic/claude-sonnet-4.5", "provider": "openrouter", "tier": "premium"},
-    {"id": "gpt-5.4", "label": "GPT-5.4", "real": "openai/gpt-5.4", "provider": "openrouter", "tier": "premium"},
     {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash", "real": "google/gemini-2.5-flash", "provider": "openrouter", "tier": "fast"},
     {"id": "deepseek/deepseek-chat", "label": "DeepSeek V3", "real": "deepseek/deepseek-chat", "provider": "openrouter", "tier": "cheap"},
     {"id": "meta-llama/llama-3.3-70b-instruct", "label": "Llama 3.3 70B", "real": "meta-llama/llama-3.3-70b-instruct", "provider": "openrouter", "tier": "cheap"},
-    {"id": "meta/llama-3.1-70b-instruct", "label": "NVIDIA Llama 3.1 70B", "real": "meta/llama-3.1-70b-instruct", "provider": "nvidia", "tier": "cheap"},
 ]
 MODEL_MAP = {m["id"]: m for m in MODELS}
 

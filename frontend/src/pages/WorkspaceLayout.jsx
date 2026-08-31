@@ -45,7 +45,7 @@ export default function WorkspaceLayout() {
   const [workspaces, setWorkspaces] = useState([]);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceUrl, setWorkspaceUrl] = useState("");
-  const [workspaceModelId, setWorkspaceModelId] = useState("gpt-5.4");
+  const [workspaceModelId, setWorkspaceModelId] = useState("gemini-3-flash-preview");
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [notFound, setNotFound] = useState(false);
 

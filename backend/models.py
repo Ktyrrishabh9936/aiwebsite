@@ -42,7 +42,7 @@ class Workspace(BaseDocument):
     name: str
     website_url: str
     public_key: str
-    model_id: str = "gpt-5.4"
+    model_id: str = "gemini-3-flash-preview"
     brain: dict = Field(default_factory=dict)
     brain_status: str = "pending"  # pending | building | ready | error
     roadmap: List[dict] = Field(default_factory=list)

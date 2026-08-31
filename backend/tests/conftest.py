@@ -35,7 +35,7 @@ def auth_client(api_client, admin_token):
 @pytest.fixture(scope="session")
 def workspace(auth_client):
     """Create workspace once and wait for brain to be ready."""
-    r = auth_client.post(f"{API}/workspaces", json={"website_url": "https://stripe.com", "model_id": "gpt-5.4"})
+    r = auth_client.post(f"{API}/workspaces", json={"website_url": "https://stripe.com", "model_id": "gemini-3-flash-preview"})
     assert r.status_code == 200, r.text
     ws = r.json()
     ws_id = ws["id"]

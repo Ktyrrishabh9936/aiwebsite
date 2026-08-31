@@ -69,10 +69,9 @@ class TestModels:
         data = r.json()
         assert "models" in data and "default" in data
         ids = [m["id"] for m in data["models"]]
-        assert len(ids) == 6, f"expected 6 models, got {len(ids)}: {ids}"
-        for expected in ["gpt-5.4", "claude-sonnet-4-6", "gemini-3-flash-preview",
-                         "deepseek/deepseek-chat", "meta-llama/llama-3.3-70b-instruct",
-                         "meta/llama-3.1-70b-instruct"]:
+        assert len(ids) == 3, f"expected 3 models, got {len(ids)}: {ids}"
+        for expected in ["gemini-3-flash-preview", "deepseek/deepseek-chat",
+                         "meta-llama/llama-3.3-70b-instruct"]:
             assert expected in ids, f"model {expected} missing"
 
 
@@ -92,11 +91,11 @@ class TestWorkspaceBrain:
         assert brain["business_profile"].get("company_name"), "empty company_name"
 
     def test_patch_workspace_model(self, auth_client, workspace):
-        r = auth_client.patch(f"{API}/workspaces/{workspace['id']}", json={"model_id": "claude-sonnet-4-6"})
+        r = auth_client.patch(f"{API}/workspaces/{workspace['id']}", json={"model_id": "deepseek/deepseek-chat"})
         assert r.status_code == 200
-        assert r.json()["model_id"] == "claude-sonnet-4-6"
+        assert r.json()["model_id"] == "deepseek/deepseek-chat"
         # revert
-        auth_client.patch(f"{API}/workspaces/{workspace['id']}", json={"model_id": "gpt-5.4"})
+        auth_client.patch(f"{API}/workspaces/{workspace['id']}", json={"model_id": "gemini-3-flash-preview"})
 
     def test_edit_brain(self, auth_client, workspace):
         brain = dict(workspace["brain"])
@@ -189,7 +188,7 @@ class TestManagerChat:
         # Ask arithmetic question so we can validate real LLM output
         payload = {"message": "What is 17 + 26? Reply with just the number, nothing else.",
                    "history": [],
-                   "model_id": workspace.get("model_id", "gpt-5.4")}
+                   "model_id": workspace.get("model_id", "gemini-3-flash-preview")}
         url = f"{API}/workspaces/{workspace['id']}/chat"
         with requests.post(url, json=payload, headers=auth_client.headers, stream=True, timeout=90) as r:
             assert r.status_code == 200
