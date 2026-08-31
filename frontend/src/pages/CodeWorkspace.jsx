@@ -145,6 +145,15 @@ export default function CodeWorkspace() {
 
   const changeModel = async (id) => { const r = await api.patch(`/code/projects/${pid}`, { model_id: id }); setProject(r.data); };
   const sync = () => { loadFiles(); loadProject(); toast.success("Sandbox synced"); };
+  const backToProjects = async () => {
+    try {
+      const r = await api.get("/workspaces");
+      const latest = r.data?.[0];
+      nav(latest ? `/app/w/${latest.id}/projects` : "/app");
+    } catch {
+      nav("/app");
+    }
+  };
 
   if (!project) return <div className="min-h-screen grid place-items-center"><Loader2 className="w-6 h-6 animate-spin text-primary" /></div>;
   if (project.sandbox_status === "provisioning")
@@ -155,7 +164,7 @@ export default function CodeWorkspace() {
 
   return (
     <div className="h-screen flex flex-col bg-background">
-      <TopBar project={project} onBack={() => nav("/app/code")} onSync={sync} onRun={runDev} />
+      <TopBar project={project} onBack={backToProjects} onSync={sync} onRun={runDev} />
       <div className="flex-1 flex min-h-0">
         <AgentChat chatRef={chatRef} messages={messages} input={input} setInput={setInput} streaming={streaming}
           onSend={send} onStop={stop} models={models} providers={providers} currentModel={currentModel} onModel={changeModel} turns={turns} />

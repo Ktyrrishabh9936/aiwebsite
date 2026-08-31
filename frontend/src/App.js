@@ -23,6 +23,8 @@ import PublicBlog from "./pages/PublicBlog";
 import Workflows from "./pages/sections/Workflows";
 import AdsToCrmWorkflow from "./pages/sections/AdsToCrmWorkflow";
 import CrmInbox from "./pages/sections/CrmInbox";
+import Projects from "./pages/sections/Projects";
+import Settings from "./pages/sections/Settings";
 
 function Protected() {
   const { user, ready } = useAuth();
@@ -49,6 +51,8 @@ function App() {
                 <Route path="/app/code/:pid" element={<CodeWorkspace />} />
                 <Route path="/app/w/:wsId" element={<WorkspaceLayout />}>
                   <Route index element={<Overview />} />
+                  <Route path="projects" element={<Projects />} />
+                  <Route path="settings" element={<Settings />} />
                   <Route path="brain" element={<Brain />} />
                   <Route path="manager" element={<Manager />} />
                   <Route path="tasks" element={<Tasks />} />

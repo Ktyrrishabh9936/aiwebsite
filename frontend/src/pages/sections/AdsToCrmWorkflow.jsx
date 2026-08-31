@@ -203,7 +203,7 @@ export default function AdsToCrmWorkflow() {
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6">
       <Link to={`/app/w/${wsId}/workflows`} className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
-        <ArrowLeft className="w-4 h-4" /> Back to Workspaces
+        <ArrowLeft className="w-4 h-4" /> Back to Workflows
       </Link>
 
       <div className="flex items-center justify-between border-b pb-4">
