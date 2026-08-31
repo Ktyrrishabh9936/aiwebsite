@@ -9,8 +9,10 @@ from crm import (  # noqa: E402
     DEFAULT_FIELDS,
     DEFAULT_ORGANIZATION,
     DEFAULT_STATES,
+    effective_organization,
     invoice_html,
     normalize_field,
+    normalize_lead_note,
     normalize_payment_plan,
     payment_plan_ready_for_final_invoice,
     recalculate_payment_plan,
@@ -55,6 +57,31 @@ def test_payment_plan_stays_embedded_and_completes_by_stage_status():
     assert plan["status"] == "completed"
     assert len(plan["stages"]) == 2
     assert plan["final_invoice_note"] == "Invoice INV-001 ready"
+    assert plan["stages"][0]["source"] == "system"
+
+
+def test_payment_stage_manual_source_is_preserved():
+    plan = normalize_payment_plan({
+        "total_amount": "10000",
+        "stages": [{"name": "Custom Milestone", "amount": "10000", "source": "manual"}],
+    })
+
+    assert plan["stages"][0]["source"] == "manual"
+
+
+def test_lead_note_requires_body_and_gets_timestamp():
+    note = normalize_lead_note({"body": "Called customer about payment documents", "author": "Sales"})
+
+    assert note["body"] == "Called customer about payment documents"
+    assert note["author"] == "Sales"
+    assert note["id"]
+    assert note["created_at"]
+
+    try:
+        normalize_lead_note({"body": "  "})
+        assert False, "empty note should fail"
+    except HTTPException as exc:
+        assert exc.status_code == 400
 
 
 def test_single_payment_summary_tracks_partial_and_full_due():
@@ -156,7 +183,7 @@ def test_default_receipt_and_invoice_html_include_snapshots():
         "due_amount": "0",
         "description": "Booking payment",
         "salesperson": "Riya",
-        "organization": {**DEFAULT_ORGANIZATION, "company_name": "Arevei Realty"},
+        "organization": {**DEFAULT_ORGANIZATION, "company_name": "Arevei Realty", "logo_url": "https://example.com/logo.png", "bank_details": "Bank XYZ", "authorized_signatory": "Riya Sen"},
         "customer": {"name": "Diya Sharma", "email": "diya@example.com", "phone": "999", "address": "Unit 101"},
     }
     invoice = {
@@ -174,6 +201,24 @@ def test_default_receipt_and_invoice_html_include_snapshots():
     assert "REC-0001" in receipt_html(receipt)
     assert "TXN-001" in receipt_html(receipt)
     assert "Diya Sharma" in receipt_html(receipt)
+    assert "https://example.com/logo.png" in receipt_html(receipt)
+    assert "Bank XYZ" in receipt_html(receipt)
+    assert "Riya Sen" in receipt_html(receipt)
     assert "INV-0001" in invoice_html(invoice)
     assert "REC-0001" in invoice_html(invoice)
     assert "TXN-001" in invoice_html(invoice)
+    assert "Arevei Realty" in invoice_html(invoice)
+
+
+def test_brain_organization_overrides_crm_settings_for_documents():
+    settings = {"organization": {"company_name": "CRM Co", "logo_url": "https://example.com/crm.png", "receipt_prefix": "CRM", "document_accent_color": "#000000"}}
+    workspace = {"brain": {"organization": {"company_name": "Brain Co", "logo_url": "https://example.com/brain.png", "invoice_prefix": "BINV", "document_accent_color": "#ffcc00"}}}
+
+    org = effective_organization(settings, workspace)
+
+    assert org["company_name"] == "Brain Co"
+    assert org["logo_url"] == "https://example.com/brain.png"
+    assert org["receipt_prefix"] == "CRM"
+    assert org["invoice_prefix"] == "BINV"
+    assert org["document_accent_color"] == "#ffcc00"
+    assert "--accent:#ffcc00" in receipt_html({"organization": org, "customer": {}})

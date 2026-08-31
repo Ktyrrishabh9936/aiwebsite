@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import {
   Users, Calendar, Info, Search, ChevronRight, XCircle, Save, BadgeIndianRupee,
   Plus, CheckCircle2, Settings, Trash2, Columns3, Palette, Building2,
-  ReceiptText, FileText, ExternalLink, RefreshCw, FileCode2
+  ReceiptText, FileText, ExternalLink, RefreshCw, FileCode2, MessageSquare, Send
 } from "lucide-react";
 import { toast } from "sonner";
 import api, { API, formatError } from "../../lib/api";
@@ -13,7 +13,7 @@ const DEFAULT_STAGES = [];
 const PAYMENT_METHODS = ["Cash", "Bank Transfer", "UPI", "Cheque", "Card", "Other"];
 const PAYMENT_STATUSES = ["Paid", "Pending"];
 const ORG_FIELDS = ["company_name", "logo_url", "address", "phone", "email", "website", "tax_number", "bank_details", "authorized_signatory", "receipt_prefix", "invoice_prefix"];
-const DETAIL_TABS = ["Details", "Payments", "Receipts", "Invoice"];
+const DETAIL_TABS = ["Details", "Payments", "Receipts", "Invoice", "Notes"];
 const today = () => new Date().toISOString().slice(0, 10);
 const stateClasses = {
   blue: "bg-blue-500/10 text-blue-500 border-blue-500/20",
@@ -46,7 +46,8 @@ function planFrom(lead) {
     payment_method: stage.payment_method || "Bank Transfer",
     due_amount: stage.due_amount || "",
     description: stage.description || "",
-    payment_amount: ""
+    payment_amount: "",
+    source: stage.source || "system"
   }));
   return deriveStageDues({
     status: plan.status || "active",
@@ -273,6 +274,36 @@ export default function CrmInbox() {
     }
   };
 
+  const addLeadNote = async (body) => {
+    if (!selectedLead) return;
+    try {
+      setSaving(true);
+      const r = await api.post(`/workspaces/${wsId}/crm/leads/${selectedLead.id}/notes`, { body });
+      toast.success("Note added");
+      mergeLead(r.data);
+      return r.data;
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      setSaving(false);
+    }
+    return null;
+  };
+
+  const deleteLeadNote = async (noteId) => {
+    if (!selectedLead) return;
+    try {
+      setSaving(true);
+      const r = await api.delete(`/workspaces/${wsId}/crm/leads/${selectedLead.id}/notes/${noteId}`);
+      toast.success("Note removed");
+      mergeLead(r.data);
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const addField = async () => {
     try {
       const r = await api.post(`/workspaces/${wsId}/crm/settings/fields`, newField);
@@ -387,6 +418,8 @@ export default function CrmInbox() {
                 setReceiptForm={setReceiptForm}
                 createReceipt={createReceipt}
                 createInvoice={createInvoice}
+                addLeadNote={addLeadNote}
+                deleteLeadNote={deleteLeadNote}
                 close={() => setSelectedLead(null)}
                 wsId={wsId}
               />
@@ -439,9 +472,10 @@ function LeadTable({ leads, fields, states, selectedLead, loading, onSelect, onS
 }
 
 function LeadDetail(props) {
-  const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, close, wsId } = props;
+  const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, addLeadNote, deleteLeadNote, close, wsId } = props;
   const [detailTab, setDetailTab] = useState("Details");
   const [activeStageId, setActiveStageId] = useState("");
+  const [noteDraft, setNoteDraft] = useState("");
   const isCustomer = lead.customer_status === "customer" || lead.status === "won";
   useEffect(() => {
     if (paymentPlan.stages?.[0]?.id && !paymentPlan.stages.some((stage) => stage.id === activeStageId)) setActiveStageId(paymentPlan.stages[0].id);
@@ -463,6 +497,7 @@ function LeadDetail(props) {
       due_amount: value,
       description: "",
       payment_amount: "",
+      source: "system",
     }];
     setPaymentPlan(deriveStageDues({ ...paymentPlan, total_amount: value, stages }));
   };
@@ -477,9 +512,18 @@ function LeadDetail(props) {
   const addStage = () => {
     const count = (paymentPlan.stages || []).length + 1;
     const remaining = numericAmount(paymentPlan.due_amount || paymentPlan.total_amount);
-    const nextStage = { id: `new-${Date.now()}`, name: `Payment ${count}`, amount: "", paid_amount: "", due_timing: "", status: "pending", receipt_note: "", transaction_id: "", payment_date: today(), payment_method: "Bank Transfer", due_amount: String(remaining || ""), description: "", payment_amount: "" };
+    const nextStage = { id: `new-${Date.now()}`, name: `Payment ${count}`, amount: "", paid_amount: "", due_timing: "", status: "pending", receipt_note: "", transaction_id: "", payment_date: today(), payment_method: "Bank Transfer", due_amount: String(remaining || ""), description: "", payment_amount: "", source: "manual" };
     const stages = [...paymentPlan.stages, nextStage];
     setActiveStageId(nextStage.id);
+    setPaymentPlan(deriveStageDues({ ...paymentPlan, stages }));
+  };
+  const stageReceipt = (stage) => [...(lead.receipts || [])].reverse().find((receipt) => receipt.stage_id === stage?.id);
+  const stageHasReceipt = (stage) => Boolean(stageReceipt(stage));
+  const removeStage = (stage, index) => {
+    if (stage.source !== "manual" || stageHasReceipt(stage)) return;
+    const stages = paymentPlan.stages.filter((_, i) => i !== index);
+    const nextActive = stages[Math.min(index, stages.length - 1)] || stages[index - 1] || stages[0];
+    setActiveStageId(nextActive?.id || "");
     setPaymentPlan(deriveStageDues({ ...paymentPlan, stages }));
   };
   const currentPlan = lead.payment_plan?.stages ? lead.payment_plan : paymentPlan;
@@ -490,10 +534,11 @@ function LeadDetail(props) {
   const activeStageIndex = Math.max(0, (paymentPlan.stages || []).findIndex((stage) => stage.id === (activeStageId || paymentPlan.stages?.[0]?.id)));
   const activeStage = (paymentPlan.stages || [])[activeStageIndex];
   const stageCount = (paymentPlan.stages || []).length;
-  const lastStage = stageCount ? paymentPlan.stages[stageCount - 1] : null;
-  const canAddStage = !stageCount || (lastStage?.status === "paid" && numericAmount(paymentPlan.due_amount) > 0);
+  const canAddStage = isCustomer && lead.conversion_type !== "single_payment";
   const activeBalance = numericAmount(paymentPlan.due_amount || activeStage?.due_amount || paymentPlan.total_amount);
   const activeDueAmount = Math.max(0, activeBalance - numericAmount(activeStage?.amount));
+  const activeStageReceipt = stageReceipt(activeStage);
+  const singlePaymentReceipt = [...(lead.receipts || [])].reverse().find((receipt) => !receipt.stage_id);
   const updateActiveAmount = (value) => {
     updateStagePatch(activeStageIndex, { amount: value, status: statusForPayment(value, activeBalance).toLowerCase().replaceAll(" ", "_") });
   };
@@ -513,6 +558,12 @@ function LeadDetail(props) {
     });
     const nextStage = updated?.payment_plan?.stages?.find((s) => numericAmount(s.due_amount) > 0);
     if (nextStage?.id) setActiveStageId(nextStage.id);
+  };
+  const sendNote = async () => {
+    const body = noteDraft.trim();
+    if (!body) return;
+    const updated = await addLeadNote(body);
+    if (updated) setNoteDraft("");
   };
 
   return (
@@ -553,7 +604,17 @@ function LeadDetail(props) {
                 <div className="flex rounded-lg border bg-background p-1 overflow-x-auto">
                   {paymentPlan.stages.map((stage, index) => {
                     const locked = index > 0 && paymentPlan.stages[index - 1]?.status !== "paid";
-                    return <button key={stage.id || index} disabled={locked} onClick={() => setActiveStageId(stage.id)} className={`px-3 h-9 rounded-md text-xs font-semibold whitespace-nowrap disabled:opacity-40 ${activeStageIndex === index ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{stage.name || `Stage ${index + 1}`}</button>;
+                    const canRemove = stage.source === "manual" && !stageHasReceipt(stage);
+                    return (
+                      <div key={stage.id || index} className={`flex items-center rounded-md ${activeStageIndex === index ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>
+                        <button disabled={locked} onClick={() => setActiveStageId(stage.id)} className="px-3 h-9 text-xs font-semibold whitespace-nowrap disabled:opacity-40">{stage.name || `Stage ${index + 1}`}</button>
+                        {stage.source === "manual" && (
+                          <button onClick={(e) => { e.stopPropagation(); removeStage(stage, index); }} disabled={!canRemove} title={canRemove ? "Remove stage" : "Stage has receipt history"} className="h-9 w-8 grid place-items-center rounded-md hover:bg-destructive/10 disabled:opacity-40">
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    );
                   })}
                 </div>
                 {activeStage && (
@@ -572,7 +633,10 @@ function LeadDetail(props) {
                       <SmallInput label="Transaction ID" value={activeStage.transaction_id || ""} onChange={(v) => updateStage(activeStageIndex, "transaction_id", v)} />
                     </div>
                     <textarea value={activeStage.description || ""} onChange={(e) => updateStage(activeStageIndex, "description", e.target.value)} placeholder="Transaction description" rows={2} className="w-full px-3 py-2 rounded-lg border bg-background text-sm" />
-                    <button onClick={() => makeStageReceipt(activeStage)} disabled={saving || (activeStageIndex > 0 && paymentPlan.stages[activeStageIndex - 1]?.status !== "paid") || !numericAmount(activeStage.amount) || numericAmount(activeStage.amount) > activeBalance} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><ReceiptText className="w-4 h-4" /> Generate Receipt & Continue</button>
+                    <div className="flex flex-wrap gap-2">
+                      <button onClick={() => makeStageReceipt(activeStage)} disabled={saving || activeStage.status === "paid" || (activeStageIndex > 0 && paymentPlan.stages[activeStageIndex - 1]?.status !== "paid") || !numericAmount(activeStage.amount) || numericAmount(activeStage.amount) > activeBalance} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><ReceiptText className="w-4 h-4" /> Generate Receipt & Continue</button>
+                      {activeStageReceipt && <a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${activeStageReceipt.id}/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Receipt</a>}
+                    </div>
                   </div>
                 )}
               </>
@@ -596,7 +660,10 @@ function LeadDetail(props) {
               <SmallInput label="Transaction ID" value={receiptForm.transaction_id} onChange={(v) => setReceiptForm({ ...receiptForm, transaction_id: v })} />
             </div>
             <textarea value={receiptForm.description} onChange={(e) => setReceiptForm({ ...receiptForm, description: e.target.value })} placeholder="Payment description" rows={2} className="w-full px-3 py-2 rounded-lg border bg-background text-sm" />
-            <button onClick={() => createReceipt({ ...receiptForm, amount: receiptForm.paid_amount, payment_stage: "Single Payment" })} disabled={saving || !numericAmount(receiptForm.total_amount) || !numericAmount(receiptForm.paid_amount) || numericAmount(receiptForm.paid_amount) > numericAmount(receiptForm.total_amount) - numericAmount(receiptForm.existing_paid)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><ReceiptText className="w-4 h-4" /> Generate Receipt</button>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={() => createReceipt({ ...receiptForm, amount: receiptForm.paid_amount, payment_stage: "Single Payment" })} disabled={saving || !numericAmount(receiptForm.total_amount) || !numericAmount(receiptForm.paid_amount) || numericAmount(receiptForm.paid_amount) > numericAmount(receiptForm.total_amount) - numericAmount(receiptForm.existing_paid)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><ReceiptText className="w-4 h-4" /> Generate Receipt</button>
+              {singlePaymentReceipt && <a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${singlePaymentReceipt.id}/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Receipt</a>}
+            </div>
           </section>
         )}
 
@@ -604,6 +671,31 @@ function LeadDetail(props) {
           <section className="space-y-3">
             <h4 className="font-bold flex items-center gap-2"><ReceiptText className="w-4 h-4 text-primary" /> Receipt History</h4>
             <div className="grid gap-2">{(lead.receipts || []).length === 0 ? <div className="text-xs text-muted-foreground p-3 rounded-lg border border-dashed">No payment transactions yet.</div> : (lead.receipts || []).map((receipt) => <a key={receipt.id} href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${receipt.id}/html`} target="_blank" rel="noreferrer" className="flex items-center justify-between p-3 rounded-lg border bg-background hover:bg-accent text-sm"><span>{receipt.receipt_number} - {receipt.transaction_id || "No transaction ID"} - {receipt.payment_stage}</span><ExternalLink className="w-4 h-4" /></a>)}</div>
+          </section>
+        )}
+
+        {detailTab === "Notes" && (
+          <section className="space-y-3">
+            <h4 className="font-bold flex items-center gap-2"><MessageSquare className="w-4 h-4 text-primary" /> Lead Notes</h4>
+            <div className="h-[360px] overflow-y-auto rounded-lg border bg-background p-3 space-y-3">
+              {(lead.lead_notes || []).length === 0 ? (
+                <div className="h-full grid place-items-center text-center text-xs text-muted-foreground">No notes yet.</div>
+              ) : (lead.lead_notes || []).map((note) => (
+                <div key={note.id} className="flex justify-end">
+                  <div className="max-w-[86%] rounded-2xl rounded-br-md bg-primary text-primary-foreground px-3 py-2 shadow-sm">
+                    <div className="text-sm whitespace-pre-wrap leading-relaxed">{note.body}</div>
+                    <div className="mt-1 flex items-center justify-end gap-2 text-[10px] opacity-80">
+                      <span>{new Date(note.created_at).toLocaleString()}</span>
+                      <button onClick={() => deleteLeadNote(note.id)} disabled={saving} className="opacity-80 hover:opacity-100 disabled:opacity-40" title="Remove note"><Trash2 className="w-3 h-3" /></button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-end gap-2">
+              <textarea value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} placeholder="Add an internal lead note" rows={3} className="flex-1 px-3 py-2 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
+              <button onClick={sendNote} disabled={saving || !noteDraft.trim()} className="grid place-items-center w-11 h-11 rounded-full bg-primary text-primary-foreground disabled:opacity-50" title="Send note"><Send className="w-4 h-4" /></button>
+            </div>
           </section>
         )}
 
@@ -615,7 +707,7 @@ function LeadDetail(props) {
           </section>
         )}
 
-        {detailTab !== "Details" && !isCustomer && <div className="text-xs text-muted-foreground rounded-lg border border-dashed p-4">Convert this lead first to use payments and documents.</div>}
+        {detailTab !== "Details" && detailTab !== "Notes" && !isCustomer && <div className="text-xs text-muted-foreground rounded-lg border border-dashed p-4">Convert this lead first to use payments and documents.</div>}
       </div>
     </aside>
   );

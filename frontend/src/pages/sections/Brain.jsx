@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { RefreshCw, Save, Loader2 } from "lucide-react";
+import { RefreshCw, Save, Loader2, Building2 } from "lucide-react";
 import { toast } from "sonner";
 import api from "../../lib/api";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "../../components/ui/dialog";
@@ -8,12 +8,32 @@ import { Textarea } from "../../components/ui/textarea";
 
 const DOMAINS = [
   { key: "business_profile", label: "Business Profile" },
+  { key: "organization", label: "Organization" },
   { key: "brand_identity", label: "Brand Identity" },
   { key: "audience", label: "Audience" },
   { key: "goals_constraints", label: "Goals & Constraints" },
   { key: "evidence", label: "Evidence" },
   { key: "decision_memory", label: "Decision Memory" },
 ];
+
+const ORG_FIELDS = [
+  ["company_name", "Company Name"],
+  ["logo_url", "Logo URL"],
+  ["address", "Address"],
+  ["phone", "Phone"],
+  ["email", "Email"],
+  ["website", "Website"],
+  ["tax_number", "Tax Number"],
+  ["bank_details", "Bank Details"],
+  ["authorized_signatory", "Authorized Signatory"],
+  ["receipt_prefix", "Receipt Prefix"],
+  ["invoice_prefix", "Invoice Prefix"],
+  ["document_accent_color", "Document Accent Color"],
+  ["document_text_color", "Document Text Color"],
+  ["document_muted_color", "Document Muted Color"],
+  ["document_table_header_color", "Table Header Color"],
+];
+const COLOR_FIELDS = new Set(["document_accent_color", "document_text_color", "document_muted_color", "document_table_header_color"]);
 
 function renderValue(v) {
   if (v == null) return <span className="text-muted-foreground">—</span>;
@@ -50,6 +70,11 @@ export default function BrainView() {
   const [editOpen, setEditOpen] = useState(false);
   const [json, setJson] = useState("");
   const [saving, setSaving] = useState(false);
+  const [orgDraft, setOrgDraft] = useState(brain.organization || {});
+
+  useEffect(() => {
+    setOrgDraft(brain.organization || {});
+  }, [brain.organization]);
 
   const openEdit = () => {
     const clean = { ...brain };
@@ -73,6 +98,38 @@ export default function BrainView() {
     }
   };
 
+  const saveOrganization = async () => {
+    setSaving(true);
+    try {
+      const cleanOrg = Object.fromEntries(ORG_FIELDS.map(([key]) => [key, String(orgDraft[key] || "").trim()]));
+      await api.put(`/workspaces/${ws.id}/brain`, { brain: { ...brain, organization: cleanOrg, _source_url: brain._source_url, _pages_crawled: brain._pages_crawled } });
+      await refresh();
+      toast.success("Organization saved to brain");
+    } catch (e) {
+      toast.error("Could not save organization");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const retrain = () => api.post(`/workspaces/${ws.id}/rebrain`).then(() => { refresh(); toast.success("Re-training brain"); });
+
+  if (ws.brain_status === "error") {
+    return (
+      <div className="p-10 max-w-4xl mx-auto">
+        <div className="border border-destructive/40 rounded-md bg-destructive/5 p-10 text-center flex flex-col items-center gap-4">
+          <div>
+            <h1 className="font-display text-2xl font-black text-destructive">Brain training failed</h1>
+            <p className="text-sm text-muted-foreground mt-2">Switch to a working model in the top bar, then re-train the brain.</p>
+          </div>
+          <button onClick={retrain} data-testid="rebrain-btn" className="inline-flex items-center gap-2 px-4 h-10 rounded-full border border-border hover:bg-accent text-sm font-medium">
+            <RefreshCw className="w-4 h-4" /> Re-train
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (ws.brain_status !== "ready") {
     return (
       <div className="p-10 max-w-4xl mx-auto">
@@ -94,7 +151,7 @@ export default function BrainView() {
           </p>
         </div>
         <div className="flex gap-2">
-          <button onClick={() => api.post(`/workspaces/${ws.id}/rebrain`).then(() => { refresh(); toast.success("Re-training brain"); })} data-testid="rebrain-btn" className="inline-flex items-center gap-2 px-4 h-10 rounded-full border border-border hover:bg-accent text-sm font-medium">
+          <button onClick={retrain} data-testid="rebrain-btn" className="inline-flex items-center gap-2 px-4 h-10 rounded-full border border-border hover:bg-accent text-sm font-medium">
             <RefreshCw className="w-4 h-4" /> Re-train
           </button>
           <Dialog open={editOpen} onOpenChange={setEditOpen}>
@@ -113,6 +170,35 @@ export default function BrainView() {
           </Dialog>
         </div>
       </div>
+
+      <section className="border border-border rounded-md bg-card p-6 space-y-5">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <h2 className="font-display text-xl font-bold flex items-center gap-2"><Building2 className="w-5 h-5 text-primary" /> Organization</h2>
+            <p className="text-sm text-muted-foreground mt-1">Used on CRM receipts and final invoices.</p>
+          </div>
+          <button onClick={saveOrganization} disabled={saving} className="inline-flex items-center gap-2 px-4 h-10 rounded-full bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-60">
+            <Save className="w-4 h-4" /> {saving ? "Saving..." : "Save organization"}
+          </button>
+        </div>
+        <div className="grid md:grid-cols-2 gap-3">
+          {ORG_FIELDS.map(([key, label]) => (
+            <label key={key} className={key === "address" || key === "bank_details" ? "space-y-1.5 md:col-span-2" : "space-y-1.5"}>
+              <span className="text-xs font-semibold text-muted-foreground uppercase">{label}</span>
+              {key === "address" || key === "bank_details" ? (
+                <textarea value={orgDraft[key] || ""} onChange={(e) => setOrgDraft({ ...orgDraft, [key]: e.target.value })} rows={3} className="w-full px-3 py-2 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
+              ) : COLOR_FIELDS.has(key) ? (
+                <div className="flex gap-2">
+                  <input type="color" value={orgDraft[key] || (key === "document_accent_color" ? "#f5c400" : key === "document_table_header_color" ? "#1f2937" : key === "document_muted_color" ? "#6b7280" : "#111827")} onChange={(e) => setOrgDraft({ ...orgDraft, [key]: e.target.value })} className="h-10 w-12 rounded-lg border bg-background p-1" />
+                  <input value={orgDraft[key] || ""} onChange={(e) => setOrgDraft({ ...orgDraft, [key]: e.target.value })} placeholder="#111827" className="w-full h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
+                </div>
+              ) : (
+                <input value={orgDraft[key] || ""} onChange={(e) => setOrgDraft({ ...orgDraft, [key]: e.target.value })} className="w-full h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
+              )}
+            </label>
+          ))}
+        </div>
+      </section>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {DOMAINS.map((d) => (

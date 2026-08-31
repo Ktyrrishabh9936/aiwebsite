@@ -70,6 +70,10 @@ DEFAULT_ORGANIZATION = {
     "authorized_signatory": "Authorized Signatory",
     "receipt_prefix": "REC",
     "invoice_prefix": "INV",
+    "document_accent_color": "#f5c400",
+    "document_text_color": "#111827",
+    "document_muted_color": "#6b7280",
+    "document_table_header_color": "#1f2937",
 }
 
 
@@ -235,6 +239,9 @@ def normalize_payment_stage(stage):
     status = stage.get("status") or "pending"
     if status not in VALID_STAGE_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid payment stage status")
+    source = stage.get("source") or "system"
+    if source not in {"system", "manual"}:
+        source = "system"
     return {
         "id": str(stage.get("id") or ObjectId()),
         "name": str(stage.get("name") or "").strip(),
@@ -248,6 +255,7 @@ def normalize_payment_stage(stage):
         "payment_method": str(stage.get("payment_method") or "").strip(),
         "due_amount": str(stage.get("due_amount") or "").strip(),
         "description": str(stage.get("description") or "").strip(),
+        "source": source,
     }
 
 
@@ -351,6 +359,7 @@ def ensure_first_stage(plan):
             "payment_method": "",
             "due_amount": money_text(total),
             "description": "",
+            "source": "system",
         }]
     return {**plan, "stages": stages}
 
@@ -398,6 +407,7 @@ def recalculate_payment_plan(plan, receipts):
             "payment_method": "",
             "due_amount": money_text(plan_due),
             "description": "",
+            "source": "system",
         })
 
     completed = bool(recalculated) and plan_due == 0
@@ -439,6 +449,83 @@ def customer_snapshot(lead, settings):
     }
 
 
+def clean_organization_values(values):
+    values = values or {}
+    allowed = set(DEFAULT_ORGANIZATION.keys())
+    clean = {}
+    for key in allowed:
+        value = str(values.get(key) or "").strip()
+        if value:
+            clean[key] = value
+    return clean
+
+
+def effective_organization(settings, workspace=None):
+    brain = (workspace or {}).get("brain") or {}
+    crm_org = clean_organization_values((settings or {}).get("organization") or {})
+    brain_org = clean_organization_values(brain.get("organization") or {})
+    return {**deepcopy(DEFAULT_ORGANIZATION), **crm_org, **brain_org}
+
+
+def brand_initials(name):
+    words = [part for part in re.split(r"\s+", str(name or "").strip()) if part]
+    initials = "".join(word[0].upper() for word in words[:2])
+    return initials or "A"
+
+
+def logo_html(org):
+    logo_url = html.escape(org.get("logo_url", ""))
+    if logo_url:
+        return f'<img class="logo" src="{logo_url}" alt="{html.escape(org.get("company_name", "Company"))} logo">'
+    return f'<div class="logo logo-fallback">{html.escape(brand_initials(org.get("company_name")))}</div>'
+
+
+def css_color(value, fallback):
+    value = str(value or "").strip()
+    if re.fullmatch(r"#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?", value):
+        return value
+    if re.fullmatch(r"rgba?\([0-9\s,%.]+\)", value):
+        return value
+    return fallback
+
+
+def document_styles(org=None):
+    org = org or {}
+    accent = css_color(org.get("document_accent_color"), "#f5c400")
+    ink = css_color(org.get("document_text_color"), "#111827")
+    muted = css_color(org.get("document_muted_color"), "#6b7280")
+    table_header = css_color(org.get("document_table_header_color"), "#1f2937")
+    return f"""
+    :root{{--ink:{ink};--muted:{muted};--line:#e5e7eb;--soft:#f8fafc;--accent:{accent};--table-head:{table_header}}}
+    *{{box-sizing:border-box}}body{{font-family:Inter,Arial,sans-serif;margin:0;background:#f3f4f6;color:var(--ink)}}
+    .page{{width:794px;min-height:1123px;margin:24px auto;background:#fff;padding:42px 48px;box-shadow:0 20px 55px rgba(15,23,42,.14);position:relative;overflow:hidden}}
+    .page:before{{content:"";position:absolute;left:0;right:0;top:0;height:10px;background:var(--accent)}}
+    .top{{display:grid;grid-template-columns:1.2fr .8fr;gap:32px;align-items:start;margin-top:18px}}
+    .brand{{display:flex;gap:14px;align-items:center}}.logo{{width:54px;height:54px;object-fit:contain;border:1px solid var(--line);background:#fff}}.logo-fallback{{display:grid;place-items:center;background:var(--ink);color:#fff;font-weight:900;font-size:18px}}
+    h1{{font-size:38px;line-height:1;margin:0;text-transform:uppercase;font-weight:800;letter-spacing:0}}h2{{font-size:13px;text-transform:uppercase;margin:0 0 10px;font-weight:800;letter-spacing:0;color:var(--ink)}}
+    .doc-title{{display:flex;align-items:center;justify-content:flex-end;gap:12px}}.bar{{height:18px;width:74px;background:var(--accent);display:inline-block}}.bar.small{{width:34px}}
+    .muted{{color:var(--muted);font-size:12px;line-height:1.55}}.meta{{display:grid;grid-template-columns:auto 1fr;gap:7px 16px;margin-top:28px;font-size:12px}}.meta b{{font-size:12px}}
+    .grid{{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:34px}}.box{{min-height:112px}}.section-line{{height:8px;background:var(--accent);width:100%;margin:18px 0 20px}}
+    table{{width:100%;border-collapse:collapse;margin-top:24px;font-size:12px}}th{{background:var(--table-head);color:#fff;text-align:left;text-transform:uppercase;font-size:11px;font-weight:800}}td,th{{border:1px solid var(--line);padding:12px}}tbody tr:nth-child(even){{background:var(--soft)}}
+    .right{{text-align:right}}.total{{margin-left:auto;margin-top:22px;width:315px;border:1px solid var(--line)}}.row{{display:flex;justify-content:space-between;gap:16px;padding:12px 14px;border-bottom:1px solid var(--line);font-size:13px}}.row:last-child{{border-bottom:0;background:var(--accent);font-weight:900}}
+    .footer{{display:grid;grid-template-columns:1fr 220px;gap:32px;margin-top:44px;align-items:end}}.sign{{border-top:1px solid #9ca3af;padding-top:10px;text-align:center;font-size:12px;font-weight:700}}.footbar{{position:absolute;left:48px;right:48px;bottom:28px;border-top:3px solid var(--accent);padding-top:12px;display:flex;gap:18px;font-size:11px;color:var(--ink)}}
+    button{{position:fixed;right:24px;top:24px;padding:10px 14px;border:0;border-radius:6px;background:var(--ink);color:white;font-weight:800}}@media print{{body{{background:white}}.page{{box-shadow:none;margin:0;width:auto;min-height:1123px}}button{{display:none}}}}
+    """
+
+
+def normalize_lead_note(body):
+    body = body or {}
+    note = str(body.get("body") or body.get("note") or body.get("content") or "").strip()
+    if not note:
+        raise HTTPException(status_code=400, detail="Note cannot be empty")
+    return {
+        "id": str(ObjectId()),
+        "body": note,
+        "author": str(body.get("author") or "Internal").strip() or "Internal",
+        "created_at": now_iso(),
+    }
+
+
 def receipt_html(receipt):
     org = receipt.get("organization", {})
     customer = receipt.get("customer", {})
@@ -447,26 +534,16 @@ def receipt_html(receipt):
 <head>
   <meta charset="utf-8">
   <title>{html.escape(receipt.get("receipt_number", "Receipt"))}</title>
-  <style>
-    body{{font-family:Inter,Arial,sans-serif;margin:0;background:#f5f7fb;color:#101828}}
-    .page{{width:794px;min-height:1123px;margin:24px auto;background:#fff;padding:44px;box-shadow:0 16px 50px rgba(15,23,42,.12)}}
-    .top{{display:flex;justify-content:space-between;gap:24px;border-bottom:3px solid #0f62fe;padding-bottom:24px}}
-    .brand{{display:flex;gap:14px;align-items:flex-start}}.logo{{width:56px;height:56px;border-radius:12px;object-fit:contain;background:#eef4ff}}
-    h1{{margin:0;font-size:34px}} h2{{margin:0 0 8px;font-size:18px}} .muted{{color:#667085;font-size:13px;line-height:1.55}}
-    .badge{{display:inline-block;background:#e8f1ff;color:#0f62fe;padding:6px 10px;border-radius:999px;font-weight:700;font-size:12px}}
-    .grid{{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:28px}} .box{{border:1px solid #e4e7ec;border-radius:12px;padding:18px}}
-    table{{width:100%;border-collapse:collapse;margin-top:28px}} th{{background:#f2f4f7;text-align:left;color:#475467;font-size:12px;text-transform:uppercase}}td,th{{border:1px solid #e4e7ec;padding:12px}}
-    .total{{margin-left:auto;margin-top:24px;width:330px;border:1px solid #e4e7ec;border-radius:12px;overflow:hidden}}.row{{display:flex;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #e4e7ec}}.row:last-child{{border-bottom:0;font-weight:800;background:#f8fafc}}
-    .footer{{display:flex;justify-content:space-between;gap:24px;margin-top:52px;align-items:end}}.sign{{border-top:1px solid #98a2b3;padding-top:10px;text-align:center;min-width:220px}}
-    button{{position:fixed;right:24px;top:24px;padding:10px 14px;border:0;border-radius:8px;background:#0f62fe;color:white;font-weight:700}} @media print{{body{{background:white}}.page{{box-shadow:none;margin:0;width:auto;min-height:auto}}button{{display:none}}}}
-  </style>
+  <style>{document_styles(org)}</style>
 </head>
 <body><button onclick="window.print()">Print / Save PDF</button><main class="page">
-  <section class="top"><div class="brand">{f'<img class="logo" src="{html.escape(org.get("logo_url", ""))}">' if org.get("logo_url") else '<div class="logo"></div>'}<div><h2>{html.escape(org.get("company_name", ""))}</h2><div class="muted">{html.escape(org.get("address", ""))}<br>{html.escape(org.get("phone", ""))} {html.escape(org.get("email", ""))}<br>{html.escape(org.get("tax_number", ""))}</div></div></div><div><h1>Receipt</h1><p class="badge">{html.escape(receipt.get("receipt_number", ""))}</p><div class="muted">Date: {html.escape(receipt.get("payment_date", ""))}</div></div></section>
-  <section class="grid"><div class="box"><h2>Customer</h2><div class="muted">{html.escape(customer.get("name", ""))}<br>{html.escape(customer.get("email", ""))}<br>{html.escape(customer.get("phone", ""))}<br>{html.escape(customer.get("address", ""))}</div></div><div class="box"><h2>Payment</h2><div class="muted">Stage: {html.escape(receipt.get("payment_stage", ""))}<br>Transaction ID: {html.escape(receipt.get("transaction_id", ""))}<br>Method: {html.escape(receipt.get("payment_method", ""))}<br>Status: {html.escape(receipt.get("status", ""))}</div></div></section>
-  <table><thead><tr><th>Description</th><th>Transaction ID</th><th>Amount</th><th>Due Amount</th></tr></thead><tbody><tr><td>{html.escape(receipt.get("description", ""))}</td><td>{html.escape(receipt.get("transaction_id", ""))}</td><td>{html.escape(str(receipt.get("amount", "")))}</td><td>{html.escape(str(receipt.get("due_amount", "")))}</td></tr></tbody></table>
+  <section class="top"><div class="brand">{logo_html(org)}<div><h2>{html.escape(org.get("company_name", ""))}</h2><div class="muted">{html.escape(org.get("address", ""))}<br>{html.escape(org.get("phone", ""))} {html.escape(org.get("email", ""))}<br>{html.escape(org.get("tax_number", ""))}</div></div></div><div><div class="doc-title"><span class="bar small"></span><h1>Receipt</h1><span class="bar small"></span></div><div class="meta"><b>Receipt#</b><span>{html.escape(receipt.get("receipt_number", ""))}</span><b>Date</b><span>{html.escape(receipt.get("payment_date", ""))}</span></div></div></section>
+  <div class="section-line"></div>
+  <section class="grid"><div class="box"><h2>Receipt To</h2><div class="muted">{html.escape(customer.get("name", ""))}<br>{html.escape(customer.get("email", ""))}<br>{html.escape(customer.get("phone", ""))}<br>{html.escape(customer.get("address", ""))}</div></div><div class="box"><h2>Payment Info</h2><div class="muted">Stage: {html.escape(receipt.get("payment_stage", ""))}<br>Transaction ID: {html.escape(receipt.get("transaction_id", ""))}<br>Method: {html.escape(receipt.get("payment_method", ""))}<br>Status: {html.escape(receipt.get("status", ""))}</div></div></section>
+  <table><thead><tr><th>Sl.</th><th>Description</th><th>Transaction ID</th><th class="right">Amount</th><th class="right">Due Amount</th></tr></thead><tbody><tr><td>1</td><td>{html.escape(receipt.get("description", "") or receipt.get("payment_stage", ""))}</td><td>{html.escape(receipt.get("transaction_id", ""))}</td><td class="right">{html.escape(str(receipt.get("amount", "")))}</td><td class="right">{html.escape(str(receipt.get("due_amount", "")))}</td></tr></tbody></table>
   <section class="total"><div class="row"><span>Paid Amount</span><strong>{html.escape(str(receipt.get("amount", "")))}</strong></div><div class="row"><span>Balance Due</span><strong>{html.escape(str(receipt.get("due_amount", "")))}</strong></div></section>
   <section class="footer"><div class="muted">{html.escape(org.get("bank_details", ""))}</div><div class="sign">{html.escape(org.get("authorized_signatory", "Authorized Signatory"))}</div></section>
+  <section class="footbar"><span>{html.escape(org.get("phone", ""))}</span><span>{html.escape(org.get("address", ""))}</span><span>{html.escape(org.get("website", ""))}</span></section>
 </main></body></html>"""
 
 
@@ -475,16 +552,18 @@ def invoice_html(invoice):
     customer = invoice.get("customer", {})
     receipts = invoice.get("receipts", [])
     rows = "".join(
-        f"<tr><td>{html.escape(r.get('receipt_number',''))}</td><td>{html.escape(r.get('transaction_id',''))}</td><td>{html.escape(r.get('payment_stage',''))}</td><td>{html.escape(r.get('payment_date',''))}</td><td>{html.escape(str(r.get('amount','')))}</td><td>{html.escape(str(r.get('due_amount','')))}</td></tr>"
-        for r in receipts
+        f"<tr><td>{i}</td><td>{html.escape(r.get('receipt_number',''))}</td><td>{html.escape(r.get('payment_stage',''))}</td><td>{html.escape(r.get('payment_date',''))}</td><td>{html.escape(r.get('transaction_id',''))}</td><td class='right'>{html.escape(str(r.get('amount','')))}</td></tr>"
+        for i, r in enumerate(receipts, 1)
     )
-    return f"""<!doctype html><html><head><meta charset="utf-8"><title>{html.escape(invoice.get("invoice_number", "Final Invoice"))}</title><style>
-body{{font-family:Inter,Arial,sans-serif;margin:0;background:#f5f7fb;color:#101828}}.page{{width:794px;min-height:1123px;margin:24px auto;background:#fff;padding:44px;box-shadow:0 16px 50px rgba(15,23,42,.12)}}.top{{display:flex;justify-content:space-between;border-bottom:3px solid #111827;padding-bottom:24px}}h1{{font-size:34px;margin:0}}h2{{margin:0 0 8px;font-size:18px}}.muted{{color:#667085;font-size:13px;line-height:1.55}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:28px}}.box{{border:1px solid #e4e7ec;border-radius:12px;padding:18px}}table{{width:100%;border-collapse:collapse;margin-top:28px}}td,th{{border:1px solid #e4e7ec;padding:12px}}th{{background:#f2f4f7;text-align:left;font-size:12px;text-transform:uppercase}}.total{{margin-left:auto;margin-top:24px;width:330px;border:1px solid #e4e7ec;border-radius:12px;overflow:hidden}}.row{{display:flex;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #e4e7ec}}.row:last-child{{border-bottom:0;font-weight:800;background:#f8fafc}}button{{position:fixed;right:24px;top:24px;padding:10px 14px;border:0;border-radius:8px;background:#111827;color:white;font-weight:700}}@media print{{body{{background:white}}.page{{box-shadow:none;margin:0;width:auto;min-height:auto}}button{{display:none}}}}</style></head><body><button onclick="window.print()">Print / Save PDF</button><main class="page">
-<section class="top"><div><h2>{html.escape(org.get("company_name",""))}</h2><div class="muted">{html.escape(org.get("address",""))}<br>{html.escape(org.get("phone",""))} {html.escape(org.get("email",""))}<br>{html.escape(org.get("tax_number",""))}</div></div><div><h1>Final Invoice</h1><div class="muted">Invoice: {html.escape(invoice.get("invoice_number",""))}<br>Date: {html.escape(invoice.get("generated_at",""))}</div></div></section>
-<section class="grid"><div class="box"><h2>Customer</h2><div class="muted">{html.escape(customer.get("name",""))}<br>{html.escape(customer.get("email",""))}<br>{html.escape(customer.get("phone",""))}<br>{html.escape(customer.get("address",""))}</div></div><div class="box"><h2>Summary</h2><div class="muted">Status: Completed</div></div></section>
-<table><thead><tr><th>Receipt</th><th>Transaction ID</th><th>Stage</th><th>Date</th><th>Amount</th><th>Due</th></tr></thead><tbody>{rows}</tbody></table>
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>{html.escape(invoice.get("invoice_number", "Final Invoice"))}</title><style>{document_styles(org)}</style></head><body><button onclick="window.print()">Print / Save PDF</button><main class="page">
+<section class="top"><div class="brand">{logo_html(org)}<div><h2>{html.escape(org.get("company_name",""))}</h2><div class="muted">{html.escape(org.get("address",""))}<br>{html.escape(org.get("phone",""))} {html.escape(org.get("email",""))}<br>{html.escape(org.get("tax_number",""))}</div></div></div><div><div class="doc-title"><span class="bar"></span><h1>Invoice</h1><span class="bar small"></span></div><div class="meta"><b>Invoice#</b><span>{html.escape(invoice.get("invoice_number",""))}</span><b>Date</b><span>{html.escape(invoice.get("generated_at",""))}</span></div></div></section>
+<div class="section-line"></div>
+<section class="grid"><div class="box"><h2>Invoice To</h2><div class="muted">{html.escape(customer.get("name",""))}<br>{html.escape(customer.get("email",""))}<br>{html.escape(customer.get("phone",""))}<br>{html.escape(customer.get("address",""))}</div></div><div class="box"><h2>Payment Info</h2><div class="muted">Status: Completed<br>Receipts: {len(receipts)}<br>Tax Number: {html.escape(org.get("tax_number",""))}</div></div></section>
+<table><thead><tr><th>Sl.</th><th>Receipt</th><th>Stage</th><th>Date</th><th>Transaction ID</th><th class="right">Amount</th></tr></thead><tbody>{rows}</tbody></table>
 <section class="total"><div class="row"><span>Total Paid</span><strong>{html.escape(str(invoice.get("total_paid","")))}</strong></div><div class="row"><span>Final Due</span><strong>{html.escape(str(invoice.get("due_amount","")))}</strong></div></section>
-<p class="muted" style="margin-top:40px">{html.escape(invoice.get("description",""))}</p></main></body></html>"""
+<section class="footer"><div class="muted">{html.escape(invoice.get("description",""))}<br><br>{html.escape(org.get("bank_details",""))}</div><div class="sign">{html.escape(org.get("authorized_signatory","Authorized Signatory"))}</div></section>
+<section class="footbar"><span>{html.escape(org.get("phone",""))}</span><span>{html.escape(org.get("address",""))}</span><span>{html.escape(org.get("website",""))}</span></section>
+</main></body></html>"""
 
 
 @router.get("/settings")
@@ -617,6 +696,44 @@ async def get_lead(ws_id: str, lead_id: str, request: Request):
     return decorate_lead(doc, settings)
 
 
+@router.get("/leads/{lead_id}/notes")
+async def list_lead_notes(ws_id: str, lead_id: str, request: Request):
+    db = db_from(request)
+    doc = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    return doc.get("lead_notes") or []
+
+
+@router.post("/leads/{lead_id}/notes")
+async def add_lead_note(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
+    db = db_from(request)
+    settings = await ensure_crm_settings(db, ws_id)
+    doc = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    note = normalize_lead_note(body)
+    await db.crm_leads.update_one(
+        {"workspace_id": ws_id, "_id": oid(lead_id)},
+        {"$push": {"lead_notes": note}, "$set": {"updated_at": now_iso()}},
+    )
+    return decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)}), settings)
+
+
+@router.delete("/leads/{lead_id}/notes/{note_id}")
+async def delete_lead_note(ws_id: str, lead_id: str, note_id: str, request: Request):
+    db = db_from(request)
+    settings = await ensure_crm_settings(db, ws_id)
+    doc = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    await db.crm_leads.update_one(
+        {"workspace_id": ws_id, "_id": oid(lead_id)},
+        {"$pull": {"lead_notes": {"id": note_id}}, "$set": {"updated_at": now_iso()}},
+    )
+    return decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)}), settings)
+
+
 @router.patch("/leads/{lead_id}")
 async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
     db = db_from(request)
@@ -684,7 +801,8 @@ async def create_receipt(ws_id: str, lead_id: str, request: Request, body: dict 
     lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
-    org = {**deepcopy(DEFAULT_ORGANIZATION), **(settings.get("organization") or {})}
+    workspace = await db.workspaces.find_one({"_id": oid(ws_id)})
+    org = effective_organization(settings, workspace)
     receipts = lead.get("receipts") or []
     receipt_number = str(body.get("receipt_number") or sequence_number(receipts, org.get("receipt_prefix", "REC"))).strip()
     if any(r.get("receipt_number") == receipt_number for r in receipts):
@@ -779,7 +897,8 @@ async def create_final_invoice(ws_id: str, lead_id: str, request: Request, body:
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
     conversion_type = lead.get("conversion_type") or "payment_plan"
-    org = {**deepcopy(DEFAULT_ORGANIZATION), **(settings.get("organization") or {})}
+    workspace = await db.workspaces.find_one({"_id": oid(ws_id)})
+    org = effective_organization(settings, workspace)
     receipts = lead.get("receipts") or []
     if not receipts:
         raise HTTPException(status_code=400, detail="Add at least one payment transaction before generating final invoice")
