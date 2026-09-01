@@ -286,7 +286,7 @@ export function AgentChat({ chatRef, messages, input, setInput, streaming, onSen
             <div className="text-sm text-muted-foreground">Ask the agent to build or change anything. It edits files, runs commands, uses skills, and reports code plus terminal results.</div>
             <div className="grid grid-cols-2 gap-2 text-xs">
               <div className="rounded-md border border-border p-2"><Wrench className="w-3.5 h-3.5 text-primary mb-1" /> Skills ready</div>
-              <div className="rounded-md border border-border p-2"><PlugZap className="w-3.5 h-3.5 text-primary mb-1" /> {providers?.bedrock?.configured || providers?.openrouter?.configured ? "Models connected" : "Add model keys"}</div>
+              <div className="rounded-md border border-border p-2"><PlugZap className="w-3.5 h-3.5 text-primary mb-1" /> {providers?.openai?.configured || providers?.openrouter?.configured || providers?.nvidia?.configured ? "Models connected" : "Add model keys"}</div>
             </div>
             <div className="flex flex-wrap gap-1.5">
               {suggestions.map((s) => (

@@ -43,10 +43,10 @@ async def publish_workflow(ws_id: str, request: Request):
     if not conn or not conn.get("spreadsheet_id"):
         raise HTTPException(status_code=400, detail="You must connect and bind a Google Sheet before publishing.")
     
-    # Email is the required CRM identity field.
+    # Phone is the required CRM identity field.
     col_map = conn.get("column_map", {})
-    if not col_map or not col_map.get("email"):
-        raise HTTPException(status_code=400, detail="Please map the spreadsheet Email column before publishing.")
+    if not col_map or not col_map.get("phone"):
+        raise HTTPException(status_code=400, detail="Please map the spreadsheet Phone column before publishing.")
         
     await db.workflows.update_one(
         {"workspace_id": ws_id, "kind": "ads_to_crm"},

@@ -26,26 +26,36 @@ from crm import (  # noqa: E402
 )
 
 
-def test_email_field_is_locked_required():
-    field = normalize_field({"key": "email", "type": "text", "required": False, "active": False})
+def test_phone_field_is_locked_required():
+    default_fields = {field["key"]: field for field in DEFAULT_FIELDS}
+    assert default_fields["phone"]["required"] is True
+    assert default_fields["email"]["required"] is False
 
-    assert field["key"] == "email"
-    assert field["type"] == "email"
+    field = normalize_field({"key": "phone", "type": "text", "required": False, "active": False})
+
+    assert field["key"] == "phone"
+    assert field["type"] == "phone"
     assert field["required"] is True
     assert field["active"] is True
 
 
-def test_required_email_validation_uses_crm_field_values():
+def test_required_phone_validation_uses_crm_field_values():
     settings = {"fields": DEFAULT_FIELDS, "states": DEFAULT_STATES}
 
     try:
         validate_field_values({"full_name": "Diya Sharma"}, settings)
-        assert False, "missing required email should fail"
+        assert False, "missing required phone should fail"
     except HTTPException:
         pass
 
-    values = validate_field_values({"email": "diya@example.com", "unknown": "ignored"}, settings)
-    assert values == {"email": "diya@example.com"}
+    try:
+        validate_field_values({"email": "diya@example.com"}, settings)
+        assert False, "email-only values should fail"
+    except HTTPException:
+        pass
+
+    values = validate_field_values({"phone": "999", "email": "diya@example.com", "unknown": "ignored"}, settings)
+    assert values == {"phone": "999", "email": "diya@example.com"}
 
 
 def test_payment_plan_stays_embedded_and_completes_by_stage_status():

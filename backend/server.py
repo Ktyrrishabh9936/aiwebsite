@@ -95,11 +95,11 @@ async def list_models():
             return {"configured": ok, "reason": "" if ok else "NVIDIA_NIM_API_KEY is missing"}
         return {"configured": False, "reason": "Unknown provider"}
 
-    statuses = {provider: provider_status(provider) for provider in ("bedrock", "openrouter", "nvidia")}
-    models = [{**m, **provider_status(m.get("provider"))} for m in llm_service.MODELS]
+    visible_models = [m for m in llm_service.MODELS if m.get("provider") != "bedrock"]
+    statuses = {provider: provider_status(provider) for provider in ("openrouter", "nvidia")}
+    models = [{**m, **provider_status(m.get("provider"))} for m in visible_models]
     return {"models": models, "default": llm_service.DEFAULT_MODEL,
             "providers": {
-                "bedrock": {**statuses["bedrock"], "env": "AWS_BEARER_TOKEN_BEDROCK"},
                 "openrouter": {**statuses["openrouter"], "env": "OPENROUTER_API_KEY"},
                 "nvidia": {**statuses["nvidia"], "env": "NVIDIA_NIM_API_KEY"},
             }}

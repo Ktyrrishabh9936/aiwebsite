@@ -324,7 +324,7 @@ export default function AdsToCrmWorkflow() {
               </div>
               <button
                 onClick={handleSaveMapping}
-                disabled={savingMap || !columnMap.email}
+                disabled={savingMap || !columnMap.phone}
                 className="w-full mt-4 inline-flex items-center justify-center gap-2 h-10 rounded-lg bg-accent text-accent-foreground font-semibold text-sm hover:bg-accent/80 transition disabled:opacity-50"
               >
                 {savingMap && <RefreshCw className="w-4 h-4 animate-spin" />}

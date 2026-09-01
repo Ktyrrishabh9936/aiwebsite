@@ -23,6 +23,15 @@ class TestLeadConnector:
         data = r.json()
         assert data["connected"] is False
 
+    def test_column_mapping_requires_phone(self, auth_client):
+        ws_id = "000000000000000000000001"
+        r = auth_client.patch(
+            f"{API}/google/workspaces/{ws_id}/column_map",
+            json={"column_map": {"email": "Email"}},
+        )
+        assert r.status_code == 400
+        assert "Phone column mapping is required" in r.text
+
     def test_crm_leads_empty(self, auth_client, workspace):
         ws_id = workspace["id"]
         r = auth_client.get(f"{API}/workspaces/{ws_id}/crm/leads")

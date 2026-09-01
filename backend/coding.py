@@ -208,14 +208,14 @@ def build_coding_router(db):
                 return {"configured": has_boto3 and has_creds, "reason": reason}
             return {"configured": False, "reason": "Unknown provider"}
 
-        statuses = {provider: provider_status(provider) for provider in ("openai", "openrouter", "nvidia", "bedrock")}
-        models = [{**m, **provider_status(m.get("provider"))} for m in coding_agent.CODING_MODELS]
+        visible_models = [m for m in coding_agent.CODING_MODELS if m.get("provider") != "bedrock"]
+        statuses = {provider: provider_status(provider) for provider in ("openai", "openrouter", "nvidia")}
+        models = [{**m, **provider_status(m.get("provider"))} for m in visible_models]
         return {"models": models, "default": coding_agent.DEFAULT_CODING_MODEL,
                 "providers": {
                     "openai": {**statuses["openai"], "env": "OPENAI_API_KEY"},
                     "openrouter": {**statuses["openrouter"], "env": "OPENROUTER_API_KEY"},
                     "nvidia": {**statuses["nvidia"], "env": "NVIDIA_NIM_API_KEY"},
-                    "bedrock": {**statuses["bedrock"], "env": "AWS_BEARER_TOKEN_BEDROCK"},
                     "github": {"configured": bool(os.environ.get("GITHUB_TOKEN")), "env": "GITHUB_TOKEN"},
                     "skills": {"configured": True, "env": "Built-in coding, design, terminal, file, and testing skills"},
                 },

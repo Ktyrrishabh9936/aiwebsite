@@ -27,12 +27,12 @@ VALID_FIELD_TYPES = {
 }
 VALID_STAGE_STATUSES = {"pending", "partially_paid", "paid"}
 VALID_PLAN_STATUSES = {"draft", "active", "completed", "cancelled"}
-SYSTEM_FIELD_KEYS = {"email"}
+SYSTEM_FIELD_KEYS = {"phone"}
 
 DEFAULT_FIELDS = [
-    {"key": "email", "label": "Email", "type": "email", "required": True, "system": True, "active": True, "options": []},
+    {"key": "phone", "label": "Phone", "type": "phone", "required": True, "system": True, "active": True, "options": []},
     {"key": "full_name", "label": "Name", "type": "text", "required": False, "system": True, "active": True, "options": []},
-    {"key": "phone", "label": "Phone", "type": "phone", "required": False, "system": True, "active": True, "options": []},
+    {"key": "email", "label": "Email", "type": "email", "required": False, "system": True, "active": True, "options": []},
     {"key": "address", "label": "Address", "type": "long_text", "required": False, "system": False, "active": True, "options": []},
     {"key": "source", "label": "Lead Source", "type": "text", "required": False, "system": True, "active": True, "options": []},
     {"key": "assigned_salesperson", "label": "Assigned Salesperson", "type": "text", "required": False, "system": False, "active": True, "options": []},
@@ -111,11 +111,11 @@ def normalize_field(field, existing=None):
     system = bool(existing.get("system") or field.get("system") or key in SYSTEM_FIELD_KEYS)
     required = bool(field.get("required", existing.get("required", False)))
     active = bool(field.get("active", existing.get("active", True)))
-    if key == "email":
+    if key == "phone":
         required = True
         system = True
         active = True
-        field_type = "email"
+        field_type = "phone"
     return {
         "key": key,
         "label": str(field.get("label") or existing.get("label") or key.replace("_", " ").title()).strip(),
@@ -167,12 +167,34 @@ def normalize_template(template, existing=None):
     }
 
 
+def phone_first_fields(fields):
+    current = {f.get("key"): f for f in fields or []}
+    normalized = []
+    seen = set()
+    for default_field in DEFAULT_FIELDS:
+        source = current.get(default_field["key"]) or default_field
+        patch = {**source}
+        if default_field["key"] == "email":
+            patch["required"] = False
+        item = normalize_field(patch, source)
+        item["updated_at"] = source.get("updated_at", item["updated_at"])
+        normalized.append(item)
+        seen.add(default_field["key"])
+    for field in fields or []:
+        key = field.get("key")
+        if key not in seen:
+            item = normalize_field(field, field)
+            item["updated_at"] = field.get("updated_at", item["updated_at"])
+            normalized.append(item)
+            seen.add(key)
+    return normalized
+
+
 async def ensure_crm_settings(db, ws_id):
     settings = await db.crm_settings.find_one({"workspace_id": ws_id})
     if settings:
-        fields = settings.get("fields") or []
-        if not any(f.get("key") == "email" for f in fields):
-            fields.insert(0, deepcopy(DEFAULT_FIELDS[0]))
+        fields = phone_first_fields(settings.get("fields") or [])
+        if fields != (settings.get("fields") or []):
             await db.crm_settings.update_one({"workspace_id": ws_id}, {"$set": {"fields": fields, "updated_at": now_iso()}})
             settings["fields"] = fields
         return settings
@@ -887,8 +909,8 @@ async def replace_fields(ws_id: str, request: Request, body: dict = Body(...)):
     settings = await ensure_crm_settings(db, ws_id)
     current = {f["key"]: f for f in settings.get("fields", [])}
     fields = [normalize_field(field, current.get(keyify(field.get("key") or field.get("label")))) for field in body.get("fields", [])]
-    if not any(f["key"] == "email" for f in fields):
-        fields.insert(0, normalize_field({"key": "email"}, current.get("email")))
+    if not any(f["key"] == "phone" for f in fields):
+        fields.insert(0, normalize_field({"key": "phone"}, current.get("phone")))
     await db.crm_settings.update_one({"workspace_id": ws_id}, {"$set": {"fields": fields, "updated_at": now_iso()}})
     return doc_out(await db.crm_settings.find_one({"workspace_id": ws_id}))
 
@@ -929,8 +951,8 @@ async def deactivate_field(ws_id: str, field_key: str, request: Request):
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
     key = keyify(field_key)
-    if key == "email":
-        raise HTTPException(status_code=400, detail="Email is required and cannot be removed")
+    if key == "phone":
+        raise HTTPException(status_code=400, detail="Phone is required and cannot be removed")
     fields = [{**f, "active": False, "updated_at": now_iso()} if f.get("key") == key else f for f in settings.get("fields", [])]
     await db.crm_settings.update_one({"workspace_id": ws_id}, {"$set": {"fields": fields, "updated_at": now_iso()}})
     return doc_out(await db.crm_settings.find_one({"workspace_id": ws_id}))

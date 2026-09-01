@@ -287,8 +287,8 @@ async def update_column_map(ws_id: str, request: Request, body: dict):
     settings = await ensure_crm_settings(db, ws_id)
     allowed = {f["key"] for f in active_fields(settings)}
     column_map = {k: v for k, v in (body.get("column_map", {}) or {}).items() if k in allowed or k == "meta_lead_id"}
-    if not column_map.get("email"):
-        raise HTTPException(status_code=400, detail="Email column mapping is required.")
+    if not column_map.get("phone"):
+        raise HTTPException(status_code=400, detail="Phone column mapping is required.")
     
     await db.google_sheet_connections.update_one(
         {"workspace_id": ws_id},
