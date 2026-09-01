@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <linearGradient id="arevei-mark" x1="14" y1="88" x2="79" y2="23" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#32CFF4"/>
+      <stop offset=".52" stop-color="#45E8CE"/>
+      <stop offset="1" stop-color="#66F09D"/>
+    </linearGradient>
+  </defs>
+  <rect width="100" height="100" rx="18" fill="#030908"/>
+  <path d="M50 14 15 89h13.5L50 40.5 71.5 89H85L50 14Z" fill="url(#arevei-mark)"/>
+  <path d="M50 40.5 32.2 80h35.6L50 40.5Z" fill="#030908"/>
+</svg>
