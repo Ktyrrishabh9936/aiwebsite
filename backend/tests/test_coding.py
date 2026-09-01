@@ -261,9 +261,9 @@ class TestCodingAgentEditsFile:
                         except Exception:
                             continue
                         t = ev.get("type")
-                        if t == "file":
+                        if t in ("file", "file_changed"):
                             got_file_event = True
-                        elif t == "summary":
+                        elif t in ("summary", "final_summary"):
                             got_summary = True
                         elif t in ("end", "done"):
                             deadline = 0

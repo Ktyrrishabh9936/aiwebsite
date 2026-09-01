@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import base64
 from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import APIRouter, Request, HTTPException, Body
@@ -13,10 +14,40 @@ import daytona_service as dz
 import coding_agent
 
 logger = logging.getLogger("coding")
+MAX_ATTACHMENTS = 3
+MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
+ALLOWED_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
 
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def validate_chat_attachments(raw):
+    attachments = raw or []
+    if not isinstance(attachments, list):
+        raise HTTPException(400, "attachments must be a list")
+    if len(attachments) > MAX_ATTACHMENTS:
+        raise HTTPException(400, "Attach up to 3 images.")
+    cleaned = []
+    for item in attachments:
+        mime = item.get("mime_type")
+        data = item.get("data_base64") or ""
+        if mime not in ALLOWED_IMAGE_MIME_TYPES:
+            raise HTTPException(400, "Only PNG, JPEG, or WebP image references are supported.")
+        try:
+            raw_bytes = base64.b64decode(data, validate=True)
+        except Exception:
+            raise HTTPException(400, "Invalid image attachment.")
+        if len(raw_bytes) > MAX_ATTACHMENT_BYTES:
+            raise HTTPException(400, "Each image must be 4 MB or smaller.")
+        cleaned.append({
+            "name": str(item.get("name") or "reference-image")[:120],
+            "mime_type": mime,
+            "data_base64": data,
+            "size": len(raw_bytes),
+        })
+    return cleaned
 
 
 SCAFFOLDS = {
@@ -158,6 +189,8 @@ def build_coding_router(db):
                 return bool(os.environ.get("OPENROUTER_API_KEY"))
             if provider == "nvidia":
                 return bool(os.environ.get("NVIDIA_NIM_API_KEY"))
+            if provider == "bedrock":
+                return bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or os.environ.get("AWS_ACCESS_KEY_ID"))
             return False
 
         models = [{**m, "configured": ready(m.get("provider"))} for m in coding_agent.CODING_MODELS]
@@ -166,6 +199,7 @@ def build_coding_router(db):
                     "openai": {"configured": ready("openai"), "env": "OPENAI_API_KEY"},
                     "openrouter": {"configured": ready("openrouter"), "env": "OPENROUTER_API_KEY"},
                     "nvidia": {"configured": ready("nvidia"), "env": "NVIDIA_NIM_API_KEY"},
+                    "bedrock": {"configured": ready("bedrock"), "env": "AWS_BEARER_TOKEN_BEDROCK"},
                     "github": {"configured": bool(os.environ.get("GITHUB_TOKEN")), "env": "GITHUB_TOKEN"},
                     "skills": {"configured": True, "env": "Built-in coding, design, terminal, file, and testing skills"},
                 },
@@ -335,7 +369,8 @@ def build_coding_router(db):
         await owned(pid, user)
         docs = await db.code_messages.find({"project_id": pid}).sort("created_at", 1).to_list(500)
         return [{"id": str(d["_id"]), "role": d["role"], "content": d["content"],
-                 "steps": d.get("steps", []), "created_at": d["created_at"]} for d in docs]
+                 "steps": d.get("steps", []), "attachments": d.get("attachments", []),
+                 "changed_files": d.get("changed_files", []), "created_at": d["created_at"]} for d in docs]
 
     @router.post("/projects/{pid}/chat")
     async def chat(pid: str, request: Request, body: dict = Body(...)):
@@ -343,6 +378,10 @@ def build_coding_router(db):
         proj = await owned(pid, user)
         message = body.get("message", "")
         model_id = body.get("model_id") or proj.get("model_id")
+        attachments = validate_chat_attachments(body.get("attachments"))
+        model = coding_agent.CODING_MODEL_MAP.get(model_id) or coding_agent.CODING_MODEL_MAP[coding_agent.DEFAULT_CODING_MODEL]
+        if attachments and not model.get("vision"):
+            raise HTTPException(400, "Select a vision-capable model before sending image references.")
         sb = await get_started_sandbox(proj)
 
         ops = {
@@ -356,21 +395,23 @@ def build_coding_router(db):
         history = [{"role": d["role"], "content": d["content"]} for d in hist_docs]
 
         await db.code_messages.insert_one({"project_id": pid, "role": "user", "content": message,
-                                           "steps": [], "created_at": now_iso()})
+                                           "steps": [], "attachments": [{"name": a["name"], "mime_type": a["mime_type"], "size": a["size"]} for a in attachments], "created_at": now_iso()})
 
         async def gen():
             collected_steps = []
+            changed_files = []
             summary = "Done."
             try:
-                async for ev in coding_agent.run_agent(ops, model_id, history, message):
+                async for ev in coding_agent.run_agent(ops, model_id, history, message, attachments=attachments):
                     if ev.get("type") == "done":
                         collected_steps = ev.get("steps", [])
+                        changed_files = ev.get("changed_files", [])
                         summary = ev.get("summary", summary)
                     yield f"data: {json.dumps(ev)}\n\n"
             except Exception as e:
                 yield f"data: {json.dumps({'type':'error','message':str(e)[:200]})}\n\n"
             await db.code_messages.insert_one({"project_id": pid, "role": "assistant", "content": summary,
-                                               "steps": collected_steps, "model_id": model_id, "created_at": now_iso()})
+                                               "steps": collected_steps, "attachments": [], "changed_files": changed_files, "model_id": model_id, "created_at": now_iso()})
             yield "data: {\"type\":\"end\"}\n\n"
 
         return StreamingResponse(gen(), media_type="text/event-stream",

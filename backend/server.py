@@ -73,7 +73,22 @@ async def unique_slug(base):
 # ---------------- MODELS ----------------
 @api.get("/models")
 async def list_models():
-    return {"models": llm_service.MODELS, "default": llm_service.DEFAULT_MODEL}
+    def ready(provider):
+        if provider == "bedrock":
+            return bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or os.environ.get("AWS_ACCESS_KEY_ID"))
+        if provider == "openrouter":
+            return bool(os.environ.get("OPENROUTER_API_KEY"))
+        if provider == "nvidia":
+            return bool(os.environ.get("NVIDIA_NIM_API_KEY"))
+        return False
+
+    models = [{**m, "configured": ready(m.get("provider"))} for m in llm_service.MODELS]
+    return {"models": models, "default": llm_service.DEFAULT_MODEL,
+            "providers": {
+                "bedrock": {"configured": ready("bedrock"), "env": "AWS_BEARER_TOKEN_BEDROCK"},
+                "openrouter": {"configured": ready("openrouter"), "env": "OPENROUTER_API_KEY"},
+                "nvidia": {"configured": ready("nvidia"), "env": "NVIDIA_NIM_API_KEY"},
+            }}
 
 
 # ---------------- WORKSPACES ----------------
@@ -82,6 +97,8 @@ async def _build_brain_bg(ws_id, url, model_id):
     try:
         await db.workspaces.update_one({"_id": oid(ws_id)}, {"$set": {"brain_status": "building"}})
         crawl = await crawl_site(url)
+        if crawl.get("page_count", 0) == 0:
+            raise ValueError(f"No readable pages found while crawling {url}. The site may block crawlers or return no HTML content.")
         brain = await agents.build_brain(model_id, crawl)
         name = brain.get("business_profile", {}).get("company_name") or url
         await db.workspaces.update_one({"_id": oid(ws_id)},

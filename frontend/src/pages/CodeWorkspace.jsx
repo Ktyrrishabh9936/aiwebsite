@@ -24,6 +24,7 @@ export default function CodeWorkspace() {
   const [termInput, setTermInput] = useState("");
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState([]);
   const [streaming, setStreaming] = useState(false);
   const chatRef = useRef(null);
   const abortRef = useRef(null);
@@ -103,8 +104,14 @@ export default function CodeWorkspace() {
 
   const send = async (preset) => {
     const msg = (preset || input).trim(); if (!msg || streaming) return;
+    if (attachments.length && !currentModel?.vision) {
+      toast.error("Select a vision-capable model before sending image references.");
+      return;
+    }
     setInput("");
-    setMessages((m) => [...m, { role: "user", content: msg }, { role: "assistant", content: "", steps: [], working: true }]);
+    const sentAttachments = attachments;
+    setAttachments([]);
+    setMessages((m) => [...m, { role: "user", content: msg, attachments: sentAttachments.map(({ data_base64, ...rest }) => rest) }, { role: "assistant", content: "", steps: [], changed_files: [], working: true }]);
     setStreaming(true);
     const ctrl = new AbortController(); abortRef.current = ctrl;
     const updateLast = (fn) => setMessages((m) => { const c = [...m]; c[c.length - 1] = fn(c[c.length - 1]); return c; });
@@ -112,7 +119,7 @@ export default function CodeWorkspace() {
       const res = await fetch(`${API}/code/projects/${pid}/chat`, {
         method: "POST", signal: ctrl.signal,
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("arevei_token")}` },
-        body: JSON.stringify({ message: msg, model_id: project?.model_id }),
+        body: JSON.stringify({ message: msg, model_id: project?.model_id, attachments: sentAttachments.map(({ data_url, ...rest }) => rest) }),
       });
       const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
       while (true) {
@@ -122,15 +129,15 @@ export default function CodeWorkspace() {
         for (const part of parts) {
           const line = part.split("\n").find((l) => l.startsWith("data: ")); if (!line) continue;
           let ev; try { ev = JSON.parse(line.slice(6)); } catch { continue; }
-          if (ev.type === "text_delta") updateLast((a) => ({ ...a, content: (a.content || "") + ev.text, working: true }));
-          else if (ev.type === "summary") updateLast((a) => ({ ...a, content: ev.text }));
-          else if (ev.type === "done") updateLast((a) => ({ ...a, steps: ev.steps, working: false }));
+          if (ev.type === "assistant_delta" || ev.type === "text_delta") updateLast((a) => ({ ...a, content: (a.content || "") + ev.text, working: true }));
+          else if (ev.type === "final_summary" || ev.type === "summary") updateLast((a) => ({ ...a, content: ev.text, changed_files: ev.changed_files || a.changed_files || [] }));
+          else if (ev.type === "done") updateLast((a) => ({ ...a, steps: ev.steps, changed_files: ev.changed_files || a.changed_files || [], working: false }));
           else if (ev.type === "end") { /* persisted */ }
           else if (ev.type === "error") updateLast((a) => ({ ...a, content: `⚠️ ${ev.message}`, working: false }));
           else {
             updateLast((a) => ({ ...a, steps: [...(a.steps || []), ev] }));
-            if (ev.type === "file") { loadFiles(); if (activeFile?.path === ev.path) openFile(ev.path); }
-            if (ev.type === "terminal") setTermLines((l) => [...l, `$ ${ev.command}`, ev.output || ""]);
+            if (ev.type === "file" || ev.type === "file_changed") { loadFiles(); if (activeFile?.path === ev.path) openFile(ev.path); }
+            if (ev.type === "terminal" || ev.type === "terminal_result") setTermLines((l) => [...l, `$ ${ev.command}`, ev.output || ""]);
           }
         }
       }
@@ -167,7 +174,8 @@ export default function CodeWorkspace() {
       <TopBar project={project} onBack={backToProjects} onSync={sync} onRun={runDev} />
       <div className="flex-1 flex min-h-0">
         <AgentChat chatRef={chatRef} messages={messages} input={input} setInput={setInput} streaming={streaming}
-          onSend={send} onStop={stop} models={models} providers={providers} currentModel={currentModel} onModel={changeModel} turns={turns} />
+          onSend={send} onStop={stop} models={models} providers={providers} currentModel={currentModel} onModel={changeModel} turns={turns}
+          attachments={attachments} setAttachments={setAttachments} />
         <CenterBlock tab={tab} setTab={setTab} showFiles={showFiles} setShowFiles={setShowFiles}
           activeFile={activeFile} dirty={dirty} onSave={saveFile} theme={theme}
           onEditorChange={(v) => { setActiveFile((f) => ({ ...f, content: v ?? "" })); setDirty(true); }}

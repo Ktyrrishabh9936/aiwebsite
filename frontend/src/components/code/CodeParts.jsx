@@ -3,6 +3,7 @@ import {
   Folder, FolderOpen, File as FileIcon, RefreshCw, TerminalSquare, Search,
   FileEdit, Loader2, CheckCircle2, ChevronDown, Send, Sparkles, History,
   Code2, Monitor, Save, PanelRight, Play, ArrowLeft, Square, Wrench, PlugZap,
+  Plus, X, Image as ImageIcon, ExternalLink, RotateCcw,
 } from "lucide-react";
 import Editor from "@monaco-editor/react";
 import {
@@ -60,11 +61,12 @@ export function FilesPanel({ tree, activePath, onOpen, onRefresh }) {
 }
 
 function stepLabel(s) {
-  if (s.type === "file") return { icon: FileEdit, text: `Edited ${s.path}` };
-  if (s.type === "terminal") return { icon: TerminalSquare, text: `Ran ${s.command}` };
+  if (s.type === "file" || s.type === "file_changed") return { icon: FileEdit, text: s.label || `Edited ${s.path}` };
+  if (s.type === "terminal" || s.type === "terminal_result") return { icon: TerminalSquare, text: s.label || `Ran ${s.command}` };
+  if (s.type === "activity_finished") return { icon: s.kind === "read" ? Search : CheckCircle2, text: s.label || "Completed" };
   if (s.type === "tool" && s.name === "read_file") return { icon: Search, text: `Read ${s.args?.path || ""}` };
   if (s.type === "tool" && s.name === "list_files") return { icon: Search, text: "Scanned project" };
-  if (s.type === "tool" && s.name === "write_file") return { icon: FileEdit, text: `Will edit ${s.args?.path || "file"}` };
+  if (s.type === "tool" && s.name === "write_file") return null;
   if (s.type === "tool" && s.name === "run_command") return { icon: TerminalSquare, text: `Run ${s.args?.command || ""}` };
   return null;
 }
@@ -134,6 +136,7 @@ function StepRow({ step, label }) {
       <button type="button" onClick={() => setOpen((v) => !v)} className="flex w-full items-center gap-2 px-2.5 py-2 text-left text-xs text-muted-foreground">
         <Icon className="w-3.5 h-3.5 shrink-0 text-primary" />
         <span className="truncate font-mono">{label.text}</span>
+        {(step.added != null || step.removed != null) && <span className="ml-auto font-mono text-[11px] text-muted-foreground">+{step.added || 0} -{step.removed || 0}</span>}
         {step.exit_code != null && <span className={step.exit_code === 0 ? "ml-auto text-primary" : "ml-auto text-destructive"}>exit {step.exit_code}</span>}
       </button>
       {open && output && <pre className="max-h-52 overflow-auto border-t border-border p-2 text-[11px] font-mono whitespace-pre-wrap">{output}</pre>}
@@ -141,19 +144,59 @@ function StepRow({ step, label }) {
   );
 }
 
+function ChangedFilesCard({ files = [] }) {
+  if (!files.length) return null;
+  return (
+    <div className="mt-3 overflow-hidden rounded-lg border border-border bg-muted/30">
+      <div className="flex items-center gap-2 px-3 py-2 text-xs">
+        <span className="font-semibold">{files.length} file{files.length === 1 ? "" : "s"} changed</span>
+        <button disabled className="ml-auto inline-flex items-center gap-1 text-muted-foreground opacity-60" title="Undo will be available with project snapshots">
+          Undo <RotateCcw className="w-3 h-3" />
+        </button>
+        <button disabled className="inline-flex items-center gap-1 text-muted-foreground opacity-60" title="Diff view coming soon">
+          View changes <ExternalLink className="w-3 h-3" />
+        </button>
+      </div>
+      <div className="space-y-1 p-2 pt-0">
+        {files.map((file) => (
+          <div key={file.path} className="flex items-center gap-2 rounded-md bg-background px-2.5 py-2 text-xs">
+            <FileEdit className="w-3.5 h-3.5 text-primary" />
+            <span className="min-w-0 flex-1 truncate font-mono">{file.path}</span>
+            <span className="font-mono text-primary">+{file.added || 0}</span>
+            <span className="font-mono text-destructive">-{file.removed || 0}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AgentMessage({ m }) {
   if (m.role === "user") {
-    return <div className="rounded-md px-3.5 py-2.5 bg-primary text-primary-foreground text-sm">{m.content}</div>;
+    return (
+      <div className="ml-8 rounded-2xl px-3.5 py-2.5 bg-primary text-primary-foreground text-sm">
+        <div>{m.content}</div>
+        {m.attachments?.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {m.attachments.map((a, i) => (
+              a.data_url ? (
+                <img key={`${a.name}-${i}`} src={a.data_url} alt={a.name} className="h-14 w-14 rounded-md object-cover ring-1 ring-primary-foreground/25" />
+              ) : (
+                <div key={`${a.name}-${i}`} className="flex items-center gap-1.5 rounded-md bg-primary-foreground/15 px-2 py-1 text-xs">
+                  <ImageIcon className="w-3 h-3" /> <span className="max-w-[120px] truncate">{a.name}</span>
+                </div>
+              )
+            ))}
+          </div>
+        )}
+      </div>
+    );
   }
   const steps = (m.steps || []).map((s, i) => ({ s, l: stepLabel(s), i })).filter((x) => x.l);
   const lastStep = steps[steps.length - 1];
   return (
     <div className="rounded-md border border-border bg-card px-3.5 py-3">
-      {steps.length > 0 && (
-        <div className="space-y-1.5">
-          {steps.map(({ s, l, i }) => <StepRow key={i} step={s} label={l} />)}
-        </div>
-      )}
+      {steps.length > 0 && <div className="space-y-1.5">{steps.map(({ s, l, i }) => <StepRow key={i} step={s} label={l} />)}</div>}
       {m.working ? (
         <div className="mt-2">
           <div className="flex items-center gap-2 text-xs text-primary mb-1.5">
@@ -166,15 +209,45 @@ function AgentMessage({ m }) {
         <div className="mt-2">
           <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-bold text-primary mb-1"><CheckCircle2 className="w-3 h-3" /> Summary</div>
           <MarkdownBlock text={m.content} />
+          <ChangedFilesCard files={m.changed_files || []} />
         </div>
       )}
     </div>
   );
 }
 
-export function AgentChat({ chatRef, messages, input, setInput, streaming, onSend, onStop, models, providers, currentModel, onModel, turns }) {
+function attachmentWarning(attachments, currentModel) {
+  if (!attachments?.length) return "";
+  if (!currentModel?.vision) return "Select a vision-capable model to send image references.";
+  return "";
+}
+
+export function AgentChat({ chatRef, messages, input, setInput, streaming, onSend, onStop, models, providers, currentModel, onModel, turns, attachments = [], setAttachments }) {
   const suggestions = ["Build a landing page hero", "Add a contact form", "Make it dark mode", "Add a pricing section"];
   const groups = [...new Set(models.map((m) => m.tier || "other"))];
+  const warning = attachmentWarning(attachments, currentModel);
+
+  const addImages = async (files) => {
+    const selected = Array.from(files || []);
+    const allowed = new Set(["image/png", "image/jpeg", "image/webp"]);
+    const next = [];
+    for (const file of selected) {
+      if (!allowed.has(file.type) || file.size > 4 * 1024 * 1024) continue;
+      const dataUrl = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.readAsDataURL(file);
+      });
+      next.push({
+        name: file.name,
+        mime_type: file.type,
+        size: file.size,
+        data_url: dataUrl,
+        data_base64: String(dataUrl).split(",")[1] || "",
+      });
+    }
+    setAttachments((prev) => [...prev, ...next].slice(0, 3));
+  };
   return (
     <div className="w-[380px] shrink-0 border-r border-border flex flex-col min-h-0">
       <div className="h-11 px-4 flex items-center justify-between border-b border-border">
@@ -187,7 +260,7 @@ export function AgentChat({ chatRef, messages, input, setInput, streaming, onSen
             <div className="text-sm text-muted-foreground">Ask the agent to build or change anything. It edits files, runs commands, uses skills, and reports code plus terminal results.</div>
             <div className="grid grid-cols-2 gap-2 text-xs">
               <div className="rounded-md border border-border p-2"><Wrench className="w-3.5 h-3.5 text-primary mb-1" /> Skills ready</div>
-              <div className="rounded-md border border-border p-2"><PlugZap className="w-3.5 h-3.5 text-primary mb-1" /> {providers?.openrouter?.configured ? "Models connected" : "Add model keys"}</div>
+              <div className="rounded-md border border-border p-2"><PlugZap className="w-3.5 h-3.5 text-primary mb-1" /> {providers?.bedrock?.configured || providers?.openrouter?.configured ? "Models connected" : "Add model keys"}</div>
             </div>
             <div className="flex flex-wrap gap-1.5">
               {suggestions.map((s) => (
@@ -201,7 +274,24 @@ export function AgentChat({ chatRef, messages, input, setInput, streaming, onSen
       <div className="p-3 border-t border-border space-y-2">
         <div className="rounded-xl border border-border bg-background focus-within:ring-2 focus-within:ring-ring/60 transition-shadow">
           <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(); } }} placeholder="Ask the agent to build...  (Enter to send)" data-testid="agent-input" rows={2} className="w-full px-3 py-2.5 bg-transparent text-sm resize-none focus:outline-none" />
+          {attachments.length > 0 && (
+            <div className="flex flex-wrap gap-2 px-2 pb-2">
+              {attachments.map((a, i) => (
+                <div key={`${a.name}-${i}`} className="group relative h-14 w-14 overflow-hidden rounded-md border border-border bg-secondary">
+                  <img src={a.data_url} alt={a.name} className="h-full w-full object-cover" />
+                  <button type="button" onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-background/90 opacity-0 shadow group-hover:opacity-100" title="Remove image">
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {warning && <div className="px-3 pb-2 text-xs text-amber-500">{warning}</div>}
           <div className="flex items-center justify-between px-2 pb-2">
+            <label className="grid place-items-center w-8 h-8 rounded-full border border-border hover:bg-accent cursor-pointer" title="Attach reference images">
+              <Plus className="w-4 h-4" />
+              <input type="file" accept="image/png,image/jpeg,image/webp" multiple className="hidden" onChange={(e) => { addImages(e.target.files); e.target.value = ""; }} />
+            </label>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button data-testid="agent-model-picker" className="inline-flex items-center gap-1.5 px-2.5 h-7 rounded-full border border-border text-xs font-medium hover:bg-accent">
@@ -218,7 +308,7 @@ export function AgentChat({ chatRef, messages, input, setInput, streaming, onSen
                       {group.map((m) => (
                         <DropdownMenuItem key={m.id} onClick={() => onModel(m.id)} className="flex items-center justify-between gap-3 cursor-pointer">
                           <span>{m.label}</span>
-                          <span className={m.configured ? "text-[10px] px-1.5 rounded-full bg-emerald-500/15 text-emerald-500" : "text-[10px] px-1.5 rounded-full bg-amber-500/15 text-amber-500"}>{m.configured ? m.tier : "key needed"}</span>
+                          <span className={m.configured ? "text-[10px] px-1.5 rounded-full bg-emerald-500/15 text-emerald-500" : "text-[10px] px-1.5 rounded-full bg-amber-500/15 text-amber-500"}>{m.configured ? (m.vision ? "vision" : m.tier) : "key needed"}</span>
                         </DropdownMenuItem>
                       ))}
                     </div>

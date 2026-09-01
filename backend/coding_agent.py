@@ -2,20 +2,26 @@
 import os
 import json
 import logging
+import asyncio
+import base64
+import difflib
 from openai import AsyncOpenAI
 
 logger = logging.getLogger("coding_agent")
 
 # label = user-facing; real = provider model id; tier = speed grouping
 CODING_MODELS = [
-    {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "real": "gpt-4o", "provider": "openai", "tier": "premium", "capabilities": ["coding", "design", "terminal"]},
-    {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6", "real": "anthropic/claude-sonnet-4.5", "provider": "openrouter", "tier": "premium", "capabilities": ["coding", "reasoning", "design"]},
+    {"id": "bedrock-claude-sonnet", "label": "Bedrock Claude Sonnet", "real": os.environ.get("BEDROCK_CODE_MODEL_ID") or "us.anthropic.claude-sonnet-4-6", "provider": "bedrock", "tier": "premium", "capabilities": ["coding", "reasoning", "design"]},
+    {"id": "bedrock-vision", "label": "Bedrock Vision", "real": os.environ.get("BEDROCK_VISION_MODEL_ID") or os.environ.get("BEDROCK_CODE_MODEL_ID") or "us.anthropic.claude-sonnet-4-6", "provider": "bedrock", "tier": "premium", "capabilities": ["coding", "design", "vision"], "vision": True},
+    {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "real": "gpt-4o", "provider": "openai", "tier": "premium", "capabilities": ["coding", "design", "terminal", "vision"], "vision": True},
+    {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6", "real": "anthropic/claude-sonnet-4.5", "provider": "openrouter", "tier": "premium", "capabilities": ["coding", "reasoning", "design", "vision"], "vision": True},
     {"id": "deepseek-v3", "label": "DeepSeek V3", "real": "deepseek/deepseek-chat", "provider": "openrouter", "tier": "fast", "capabilities": ["coding", "cheap"]},
     {"id": "gpt-4o-mini", "label": "GPT-4o mini", "real": "gpt-4o-mini", "provider": "openai", "tier": "fast", "capabilities": ["coding", "cheap"]},
     {"id": "minimax-m1", "label": "MiniMax M1", "real": "minimax/minimax-m1", "provider": "openrouter", "tier": "cheap", "capabilities": ["coding", "cheap"]},
 ]
 CODING_MODEL_MAP = {m["id"]: m for m in CODING_MODELS}
 DEFAULT_CODING_MODEL = "gpt-5.6-terra"
+AWS_REGION = os.environ.get("AWS_REGION") or "us-east-1"
 
 
 def _client(provider):
@@ -24,6 +30,12 @@ def _client(provider):
     if provider == "nvidia":
         return AsyncOpenAI(api_key=os.environ["NVIDIA_NIM_API_KEY"], base_url="https://integrate.api.nvidia.com/v1")
     return AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+
+def _bedrock_client():
+    import boto3
+
+    return boto3.client("bedrock-runtime", region_name=AWS_REGION)
 
 
 TOOLS = [
@@ -35,6 +47,17 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
     {"type": "function", "function": {"name": "run_command", "description": "Run a shell command in the project root (e.g. npm install, ls). Avoid long-running dev servers.",
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+]
+
+BEDROCK_TOOLS = [
+    {
+        "toolSpec": {
+            "name": t["function"]["name"],
+            "description": t["function"]["description"],
+            "inputSchema": {"json": t["function"]["parameters"]},
+        }
+    }
+    for t in TOOLS
 ]
 
 SYSTEM = """You are Arevei Coding Agent, an expert full-stack engineer working inside a live Daytona Linux sandbox.
@@ -53,17 +76,168 @@ Rules:
 - When completely done, end with a SHORT summary (2-4 markdown bullets) of exactly what you changed."""
 
 
-async def run_agent(ops, model_id, history, user_message):
+def _openai_user_content(user_message, attachments):
+    content = [{"type": "text", "text": user_message}]
+    for item in attachments or []:
+        mime = item.get("mime_type") or ""
+        data = item.get("data_base64") or ""
+        if mime.startswith("image/") and data:
+            content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}})
+    return content if len(content) > 1 else user_message
+
+
+def _bedrock_user_content(user_message, attachments):
+    content = [{"text": user_message}]
+    for item in attachments or []:
+        mime = item.get("mime_type") or ""
+        data = item.get("data_base64") or ""
+        if not mime.startswith("image/") or not data:
+            continue
+        fmt = {"image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp"}.get(mime)
+        if not fmt:
+            continue
+        content.append({"image": {"format": fmt, "source": {"bytes": base64.b64decode(data)}}})
+    return content
+
+
+def _bedrock_messages(history, user_message, attachments):
+    messages = []
+    for h in history[-8:]:
+        role = "assistant" if h["role"] == "assistant" else "user"
+        messages.append({"role": role, "content": [{"text": h["content"] or ""}]})
+    messages.append({"role": "user", "content": _bedrock_user_content(user_message, attachments)})
+    return messages
+
+
+def _collect_bedrock_stream(client, **kwargs):
+    response = client.converse_stream(**kwargs)
+    message = {"role": "assistant", "content": []}
+    text_parts = []
+    tool_parts = {}
+    stop_reason = None
+    for event in response.get("stream", []):
+        if "contentBlockStart" in event:
+            start = event["contentBlockStart"].get("start", {})
+            if "toolUse" in start:
+                idx = event["contentBlockStart"]["contentBlockIndex"]
+                tool_parts[idx] = {"toolUseId": start["toolUse"]["toolUseId"], "name": start["toolUse"]["name"], "input": ""}
+        elif "contentBlockDelta" in event:
+            idx = event["contentBlockDelta"]["contentBlockIndex"]
+            delta = event["contentBlockDelta"].get("delta", {})
+            if delta.get("text"):
+                text_parts.append(delta["text"])
+            if delta.get("toolUse", {}).get("input") is not None:
+                tool_parts.setdefault(idx, {})["input"] = tool_parts.setdefault(idx, {}).get("input", "") + delta["toolUse"]["input"]
+        elif "messageStop" in event:
+            stop_reason = event["messageStop"].get("stopReason")
+    if text_parts:
+        message["content"].append({"text": "".join(text_parts)})
+    for idx in sorted(tool_parts):
+        tool = tool_parts[idx]
+        try:
+            parsed = json.loads(tool.get("input") or "{}")
+        except Exception:
+            parsed = {}
+        message["content"].append({"toolUse": {"toolUseId": tool.get("toolUseId"), "name": tool.get("name"), "input": parsed}})
+    return message, stop_reason
+
+
+async def _run_bedrock_agent(ops, m, history, user_message, attachments):
+    client = _bedrock_client()
+    messages = _bedrock_messages(history, user_message, attachments)
+    steps = []
+    changed_files = {}
+    summary = ""
+    try:
+        for _ in range(14):
+            response = await asyncio.to_thread(
+                lambda: client.converse_stream(
+                    modelId=m["real"],
+                    system=[{"text": SYSTEM}],
+                    messages=messages,
+                    toolConfig={"tools": BEDROCK_TOOLS},
+                    inferenceConfig={"temperature": 0.2, "maxTokens": 8000},
+                )
+            )
+            assistant_msg = {"role": "assistant", "content": []}
+            text_parts = []
+            tool_parts = {}
+            stop_reason = None
+            for event in response.get("stream", []):
+                if "contentBlockStart" in event:
+                    start = event["contentBlockStart"].get("start", {})
+                    if "toolUse" in start:
+                        idx = event["contentBlockStart"]["contentBlockIndex"]
+                        tool_parts[idx] = {"toolUseId": start["toolUse"]["toolUseId"], "name": start["toolUse"]["name"], "input": ""}
+                elif "contentBlockDelta" in event:
+                    idx = event["contentBlockDelta"]["contentBlockIndex"]
+                    delta = event["contentBlockDelta"].get("delta", {})
+                    if delta.get("text"):
+                        text_parts.append(delta["text"])
+                        yield {"type": "assistant_delta", "text": delta["text"]}
+                    if delta.get("toolUse", {}).get("input") is not None:
+                        tool_parts.setdefault(idx, {})["input"] = tool_parts.setdefault(idx, {}).get("input", "") + delta["toolUse"]["input"]
+                elif "messageStop" in event:
+                    stop_reason = event["messageStop"].get("stopReason")
+            if text_parts:
+                summary = "".join(text_parts)
+                assistant_msg["content"].append({"text": summary})
+            for idx in sorted(tool_parts):
+                tool = tool_parts[idx]
+                try:
+                    parsed = json.loads(tool.get("input") or "{}")
+                except Exception:
+                    parsed = {}
+                assistant_msg["content"].append({"toolUse": {"toolUseId": tool.get("toolUseId"), "name": tool.get("name"), "input": parsed}})
+            messages.append(assistant_msg)
+            tool_uses = [part["toolUse"] for part in assistant_msg.get("content", []) if "toolUse" in part]
+            if not tool_uses:
+                break
+            results = []
+            for tool_use in tool_uses:
+                result, extra = await _execute(ops, tool_use.get("name"), tool_use.get("input") or {})
+                if extra:
+                    steps.append(extra)
+                    if extra["type"] == "file_changed":
+                        changed_files[extra["path"]] = extra
+                    yield extra
+                results.append({
+                    "toolResult": {
+                        "toolUseId": tool_use["toolUseId"],
+                        "content": [{"text": result[:20000]}],
+                    }
+                })
+            messages.append({"role": "user", "content": results})
+            if stop_reason != "tool_use":
+                break
+        else:
+            summary = "Reached step limit. Partial changes applied."
+    except Exception as e:
+        logger.exception("bedrock agent failed")
+        yield {"type": "error", "message": str(e)[:300]}
+        summary = summary or f"Could not complete: {str(e)[:300]}"
+
+    final = {"type": "final_summary", "text": summary or "Done.", "changed_files": list(changed_files.values())}
+    yield final
+    yield {"type": "done", "steps": steps, "summary": final["text"], "changed_files": final["changed_files"]}
+
+
+async def run_agent(ops, model_id, history, user_message, attachments=None):
     """Async generator yielding SSE event dicts with token-level streaming."""
     m = CODING_MODEL_MAP.get(model_id) or CODING_MODEL_MAP[DEFAULT_CODING_MODEL]
+    if m["provider"] == "bedrock":
+        async for ev in _run_bedrock_agent(ops, m, history, user_message, attachments or []):
+            yield ev
+        return
     client = _client(m["provider"])
 
     messages = [{"role": "system", "content": SYSTEM}]
     for h in history[-8:]:
         messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "user", "content": _openai_user_content(user_message, attachments or [])})
 
     steps = []
+    changed_files = {}
     summary = ""
     try:
         for _ in range(14):
@@ -79,7 +253,7 @@ async def run_agent(ops, model_id, history, user_message):
                 delta = chunk.choices[0].delta
                 if getattr(delta, "content", None):
                     content_buf += delta.content
-                    yield {"type": "text_delta", "text": delta.content}
+                    yield {"type": "assistant_delta", "text": delta.content}
                 if getattr(delta, "tool_calls", None):
                     for tc in delta.tool_calls:
                         slot = tool_calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
@@ -106,12 +280,11 @@ async def run_agent(ops, model_id, history, user_message):
                     args = json.loads(s["args"] or "{}")
                 except Exception:
                     args = {}
-                start_ev = {"type": "tool", "name": name, "args": args}
-                steps.append(start_ev)
-                yield start_ev
                 result, extra = await _execute(ops, name, args)
                 if extra:
                     steps.append(extra)
+                    if extra["type"] == "file_changed":
+                        changed_files[extra["path"]] = extra
                     yield extra
                 messages.append({"role": "tool", "tool_call_id": s["id"] or f"call_{i}", "content": result[:20000]})
         else:
@@ -128,26 +301,56 @@ async def run_agent(ops, model_id, history, user_message):
         yield {"type": "error", "message": msg}
         summary = summary or f"Could not complete: {msg}"
 
-    yield {"type": "summary", "text": summary}
-    yield {"type": "done", "steps": steps, "summary": summary}
+    final = {"type": "final_summary", "text": summary, "changed_files": list(changed_files.values())}
+    yield final
+    yield {"type": "done", "steps": steps, "summary": summary, "changed_files": final["changed_files"]}
 
 
 async def _execute(ops, name, args):
     try:
         if name == "list_files":
             tree = await ops["list_files"]()
-            return json.dumps(tree)[:8000], {"type": "files_changed"}
+            count = _count_files(tree)
+            return json.dumps(tree)[:8000], {"type": "activity_finished", "kind": "explore", "label": f"Explored {count} files", "count": count}
         if name == "read_file":
-            content = await ops["read_file"](args.get("path", ""))
-            return content[:16000], None
+            path = args.get("path", "")
+            content = await ops["read_file"](path)
+            return content[:16000], {"type": "activity_finished", "kind": "read", "path": path, "label": f"Read {path}"}
         if name == "write_file":
             path = args.get("path", "")
+            before = ""
+            try:
+                before = await ops["read_file"](path)
+            except Exception:
+                before = ""
             await ops["write_file"](path, args.get("content", ""))
-            return f"wrote {path}", {"type": "file", "path": path}
+            stats = _diff_stats(before, args.get("content", ""))
+            return f"wrote {path}", {"type": "file_changed", "path": path, "label": f"Edited {path}", **stats}
         if name == "run_command":
             cmd = args.get("command", "")
             res = await ops["run_command"](cmd)
-            return f"exit={res['exit_code']}\n{res['output'][:8000]}", {"type": "terminal", "command": cmd, "output": res["output"][:8000], "exit_code": res["exit_code"]}
+            return f"exit={res['exit_code']}\n{res['output'][:8000]}", {"type": "terminal_result", "command": cmd, "label": f"Ran {cmd}", "output": res["output"][:8000], "exit_code": res["exit_code"]}
         return "unknown tool", None
     except Exception as e:
         return f"tool error: {str(e)[:400]}", None
+
+
+def _count_files(nodes):
+    total = 0
+    for node in nodes or []:
+        if node.get("type") == "dir":
+            total += _count_files(node.get("children") or [])
+        else:
+            total += 1
+    return total
+
+
+def _diff_stats(before, after):
+    added = 0
+    removed = 0
+    for line in difflib.ndiff((before or "").splitlines(), (after or "").splitlines()):
+        if line.startswith("+ "):
+            added += 1
+        elif line.startswith("- "):
+            removed += 1
+    return {"added": added, "removed": removed}

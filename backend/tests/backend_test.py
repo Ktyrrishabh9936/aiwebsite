@@ -69,10 +69,11 @@ class TestModels:
         data = r.json()
         assert "models" in data and "default" in data
         ids = [m["id"] for m in data["models"]]
-        assert len(ids) == 3, f"expected 3 models, got {len(ids)}: {ids}"
-        for expected in ["gemini-3-flash-preview", "deepseek/deepseek-chat",
+        assert len(ids) >= 5, f"expected Bedrock plus existing models, got {len(ids)}: {ids}"
+        for expected in ["bedrock-claude-sonnet", "bedrock-vision", "gemini-3-flash-preview", "deepseek/deepseek-chat",
                          "meta-llama/llama-3.3-70b-instruct"]:
             assert expected in ids, f"model {expected} missing"
+        assert any(m["id"] == "bedrock-vision" and m.get("vision") for m in data["models"])
 
 
 # -------------------- WORKSPACE + BRAIN --------------------
