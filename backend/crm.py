@@ -3,7 +3,7 @@ import re
 from copy import deepcopy
 
 from bson import ObjectId
-from fastapi import APIRouter, Body, HTTPException, Query, Request
+from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
 
 from models import now_iso
@@ -70,10 +70,10 @@ DEFAULT_ORGANIZATION = {
     "authorized_signatory": "Authorized Signatory",
     "receipt_prefix": "REC",
     "invoice_prefix": "INV",
-    "document_accent_color": "#f5c400",
-    "document_text_color": "#111827",
-    "document_muted_color": "#6b7280",
-    "document_table_header_color": "#1f2937",
+    "document_accent_color": "#000000",
+    "document_text_color": "#000000",
+    "document_muted_color": "#000000",
+    "document_table_header_color": "#000000",
 }
 
 
@@ -342,6 +342,13 @@ def payments_total(receipts, stage_id=None):
     return total
 
 
+def payment_stage_remaining_amount(stage, receipts):
+    stage_amount = money_value(stage.get("amount"))
+    if stage_amount <= 0:
+        return money_value(stage.get("due_amount"))
+    return max(stage_amount - payments_total(receipts, stage.get("id")), 0)
+
+
 def ensure_first_stage(plan):
     total = money_value(plan.get("total_amount"))
     stages = plan.get("stages") if isinstance(plan.get("stages"), list) else []
@@ -376,15 +383,16 @@ def recalculate_payment_plan(plan, receipts):
         stage_paid = payments_total(receipts, stage.get("id"))
         stage_amount = money_value(stage.get("amount"))
         running_paid += stage_paid
-        balance_after_stage = max(total_amount - running_paid, 0)
+        stage_status = status_from_due(stage_amount, stage_paid)
+        stage_due = 0 if stage_status == "paid" else max(total_amount - running_paid, 0)
         stage_receipts = [r for r in receipts or [] if r.get("stage_id") == stage.get("id")]
         latest_receipt = stage_receipts[-1] if stage_receipts else {}
         recalculated.append({
             **stage,
             "name": stage.get("name") or f"Payment {index + 1}",
             "paid_amount": money_text(stage_paid) if stage_paid else "",
-            "due_amount": money_text(balance_after_stage if stage_paid else max(total_amount - (running_paid - stage_paid), 0)),
-            "status": status_from_due(stage_amount, stage_paid),
+            "due_amount": money_text(stage_due),
+            "status": stage_status,
             "transaction_id": latest_receipt.get("transaction_id", stage.get("transaction_id", "")),
             "payment_date": latest_receipt.get("payment_date", stage.get("payment_date", "")),
             "payment_method": latest_receipt.get("payment_method", stage.get("payment_method", "")),
@@ -393,11 +401,11 @@ def recalculate_payment_plan(plan, receipts):
         })
 
     plan_due = max(total_amount - total_paid, 0)
-    if recalculated and recalculated[-1]["paid_amount"] and plan_due > 0:
+    if recalculated and recalculated[-1]["status"] == "paid" and plan_due > 0:
         recalculated.append({
             "id": str(ObjectId()),
             "name": f"Payment {len(recalculated) + 1}",
-            "amount": "",
+            "amount": money_text(plan_due),
             "paid_amount": "",
             "due_timing": "",
             "status": "pending",
@@ -462,9 +470,27 @@ def clean_organization_values(values):
 
 def effective_organization(settings, workspace=None):
     brain = (workspace or {}).get("brain") or {}
+    business_profile = brain.get("business_profile") or {}
     crm_org = clean_organization_values((settings or {}).get("organization") or {})
-    brain_org = clean_organization_values(brain.get("organization") or {})
+    brain_org = clean_organization_values({
+        "company_name": business_profile.get("company_name", ""),
+        "website": brain.get("_source_url") or (workspace or {}).get("website_url", ""),
+        **(brain.get("organization") or {}),
+    })
     return {**deepcopy(DEFAULT_ORGANIZATION), **crm_org, **brain_org}
+
+
+async def current_document_organization(db, ws_id):
+    settings = await ensure_crm_settings(db, ws_id)
+    workspace = await db.workspaces.find_one({"_id": oid(ws_id)})
+    return settings, effective_organization(settings, workspace)
+
+
+def with_document_organization(doc, organization):
+    out = {**(doc or {}), "organization": organization}
+    if isinstance(out.get("receipts"), list):
+        out["receipts"] = [{**receipt, "organization": organization} for receipt in out["receipts"]]
+    return out
 
 
 def brand_initials(name):
@@ -489,14 +515,198 @@ def css_color(value, fallback):
     return fallback
 
 
+def pdf_rgb(value, fallback="#111827"):
+    value = css_color(value, fallback)
+    if not value.startswith("#"):
+        value = fallback
+    raw = value[1:]
+    if len(raw) == 3:
+        raw = "".join(ch * 2 for ch in raw)
+    try:
+        return tuple(int(raw[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    except Exception:
+        return pdf_rgb(fallback, "#111827") if fallback != "#111827" else (0.067, 0.094, 0.153)
+
+
+def pdf_contrast(rgb):
+    r, g, b = rgb
+    luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return (0, 0, 0) if luminance > 0.55 else (1, 1, 1)
+
+
+def css_contrast(value):
+    r, g, b = pdf_rgb(value, "#000000")
+    return "#000000" if (0.2126 * r + 0.7152 * g + 0.0722 * b) > 0.55 else "#ffffff"
+
+
+def pdf_escape(value):
+    text = str(value or "")
+    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def wrap_pdf_text(text, max_chars):
+    words = str(text or "").split()
+    lines = []
+    current = ""
+    for word in words:
+        next_line = f"{current} {word}".strip()
+        if len(next_line) > max_chars and current:
+            lines.append(current)
+            current = word
+        else:
+            current = next_line
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+class SimplePdf:
+    def __init__(self):
+        self.ops = []
+
+    def color(self, rgb):
+        r, g, b = rgb
+        self.ops.append(f"{r:.3f} {g:.3f} {b:.3f} rg {r:.3f} {g:.3f} {b:.3f} RG")
+
+    def rect(self, x, y, w, h, fill):
+        self.color(fill)
+        self.ops.append(f"{x:.2f} {y:.2f} {w:.2f} {h:.2f} re f")
+
+    def stroke_rect(self, x, y, w, h, stroke=(0.898, 0.906, 0.922)):
+        self.color(stroke)
+        self.ops.append(f"{x:.2f} {y:.2f} {w:.2f} {h:.2f} re S")
+
+    def line(self, x1, y1, x2, y2, stroke=(0.612, 0.639, 0.686), width=1):
+        self.color(stroke)
+        self.ops.append(f"{width:.2f} w {x1:.2f} {y1:.2f} m {x2:.2f} {y2:.2f} l S")
+
+    def text(self, x, y, text, size=10, bold=False, fill=(0.067, 0.094, 0.153)):
+        self.color(fill)
+        font = "F2" if bold else "F1"
+        self.ops.append(f"BT /{font} {size:.2f} Tf {x:.2f} {y:.2f} Td ({pdf_escape(text)}) Tj ET")
+
+    def right_text(self, x, y, text, size=10, bold=False, fill=(0.067, 0.094, 0.153)):
+        approx_width = len(str(text or "")) * size * 0.52
+        self.text(x - approx_width, y, text, size, bold, fill)
+
+    def build(self):
+        stream = "\n".join(self.ops).encode("latin-1", errors="replace")
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+            b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+        ]
+        out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+        offsets = [0]
+        for index, obj in enumerate(objects, 1):
+            offsets.append(len(out))
+            out.extend(f"{index} 0 obj\n".encode())
+            out.extend(obj)
+            out.extend(b"\nendobj\n")
+        xref = len(out)
+        out.extend(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode())
+        for offset in offsets[1:]:
+            out.extend(f"{offset:010d} 00000 n \n".encode())
+        out.extend(f"trailer << /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+        return bytes(out)
+
+
+def receipt_pdf(receipt):
+    org = receipt.get("organization", {})
+    customer = receipt.get("customer", {})
+    accent = pdf_rgb(org.get("document_accent_color"), "#000000")
+    ink = pdf_rgb(org.get("document_text_color"), "#000000")
+    muted = pdf_rgb(org.get("document_muted_color"), "#000000")
+    table_head = pdf_rgb(org.get("document_table_header_color"), "#000000")
+    accent_text = pdf_contrast(accent)
+    line = pdf_rgb("#e5e7eb")
+    pdf = SimplePdf()
+    pdf.rect(0, 0, 595, 842, (0.953, 0.957, 0.965))
+    pdf.rect(42, 0, 511, 842, (1, 1, 1))
+    pdf.rect(42, 833, 511, 9, accent)
+    left, right = 64, 531
+    content_w = right - left
+    top = 760
+
+    pdf.rect(left, top - 8, 44, 44, ink)
+    pdf.text(left + 10, top + 8, brand_initials(org.get("company_name")), 17, True, (1, 1, 1))
+    pdf.text(left + 58, top + 30, org.get("company_name", ""), 13, True, ink)
+    org_lines = [org.get("address", ""), f"{org.get('phone', '')} {org.get('email', '')}".strip(), org.get("tax_number", "")]
+    for i, line_text in enumerate([x for x in org_lines if x]):
+        pdf.text(left + 58, top + 13 - i * 13, line_text, 9.5, False, muted)
+
+    pdf.rect(332, top + 16, 26, 13, accent)
+    pdf.text(370, top + 11, "RECEIPT", 29, True, ink)
+    pdf.rect(507, top + 16, 26, 13, accent)
+    pdf.text(332, top - 28, "Receipt#", 9.5, True, ink)
+    pdf.text(390, top - 28, receipt.get("receipt_number", ""), 9.5, False, ink)
+    pdf.text(332, top - 45, "Date", 9.5, True, ink)
+    pdf.text(390, top - 45, receipt.get("payment_date", ""), 9.5, False, ink)
+    pdf.rect(left, 666, content_w, 8, accent)
+
+    pdf.text(left, 624, "RECEIPT TO", 12, True, ink)
+    for i, line_text in enumerate([customer.get("name", ""), customer.get("email", ""), customer.get("phone", ""), customer.get("address", "")]):
+        if line_text:
+            pdf.text(left, 602 - i * 14, line_text, 10.5, False, muted)
+
+    payment_x = left + 260
+    pdf.text(payment_x, 624, "PAYMENT INFO", 12, True, ink)
+    payment_lines = [
+        f"Stage: {receipt.get('payment_stage', '')}",
+        f"Transaction ID: {receipt.get('transaction_id', '')}",
+        f"Method: {receipt.get('payment_method', '')}",
+        f"Status: {receipt.get('status', '')}",
+    ]
+    for i, line_text in enumerate(payment_lines):
+        pdf.text(payment_x, 602 - i * 14, line_text, 10.5, False, muted)
+
+    table_y = 500
+    widths = [38, 168, 136, 60, 65]
+    headers = ["Sl.", "Description", "Transaction ID", "Amount", "Due Amount"]
+    x = left
+    pdf.rect(left, table_y, sum(widths), 32, table_head)
+    for i, header in enumerate(headers):
+        pdf.text(x + 8, table_y + 13, header, 8.5, True, (1, 1, 1))
+        pdf.stroke_rect(x, table_y - 32, widths[i], 64, line)
+        x += widths[i]
+    pdf.text(left + 8, table_y - 20, "1", 9, False, ink)
+    desc = " ".join(wrap_pdf_text(receipt.get("description", "") or receipt.get("payment_stage", ""), 34)[:1])
+    pdf.text(left + widths[0] + 8, table_y - 20, desc, 9, False, ink)
+    pdf.text(left + widths[0] + widths[1] + 8, table_y - 20, receipt.get("transaction_id", ""), 9, False, ink)
+    pdf.right_text(left + sum(widths[:4]) - 8, table_y - 20, receipt.get("amount", ""), 9, False, ink)
+    pdf.right_text(left + sum(widths) - 8, table_y - 20, receipt.get("due_amount", ""), 9, False, ink)
+
+    total_x, total_y, total_w = right - 190, 390, 190
+    pdf.stroke_rect(total_x, total_y, total_w, 66, line)
+    pdf.text(total_x + 12, total_y + 43, "Paid Amount", 10, False, ink)
+    pdf.right_text(total_x + total_w - 12, total_y + 43, receipt.get("amount", ""), 10, True, ink)
+    pdf.rect(total_x, total_y, total_w, 33, accent)
+    pdf.text(total_x + 12, total_y + 12, "Balance Due", 11, True, accent_text)
+    pdf.right_text(total_x + total_w - 12, total_y + 12, receipt.get("due_amount", ""), 11, True, accent_text)
+
+    for i, line_text in enumerate(wrap_pdf_text(org.get("bank_details", ""), 42)[:3]):
+        pdf.text(left, 330 - i * 13, line_text, 9, False, muted)
+    pdf.line(right - 150, 260, right, 260)
+    pdf.text(right - 111, 244, org.get("authorized_signatory", "Authorized Signatory"), 9, True, ink)
+    pdf.line(left, 34, right, 34, accent, 3)
+    pdf.text(left, 18, org.get("phone", ""), 8, False, ink)
+    pdf.text(left + 160, 18, org.get("address", ""), 8, False, ink)
+    pdf.text(right - 120, 18, org.get("website", ""), 8, False, ink)
+    return pdf.build()
+
+
 def document_styles(org=None):
     org = org or {}
-    accent = css_color(org.get("document_accent_color"), "#f5c400")
-    ink = css_color(org.get("document_text_color"), "#111827")
-    muted = css_color(org.get("document_muted_color"), "#6b7280")
-    table_header = css_color(org.get("document_table_header_color"), "#1f2937")
+    accent = css_color(org.get("document_accent_color"), "#000000")
+    ink = css_color(org.get("document_text_color"), "#000000")
+    muted = css_color(org.get("document_muted_color"), "#000000")
+    table_header = css_color(org.get("document_table_header_color"), "#000000")
+    accent_text = css_contrast(accent)
     return f"""
-    :root{{--ink:{ink};--muted:{muted};--line:#e5e7eb;--soft:#f8fafc;--accent:{accent};--table-head:{table_header}}}
+    :root{{--ink:{ink};--muted:{muted};--line:#e5e7eb;--soft:#f8fafc;--accent:{accent};--accent-text:{accent_text};--table-head:{table_header}}}
     *{{box-sizing:border-box}}body{{font-family:Inter,Arial,sans-serif;margin:0;background:#f3f4f6;color:var(--ink)}}
     .page{{width:794px;min-height:1123px;margin:24px auto;background:#fff;padding:42px 48px;box-shadow:0 20px 55px rgba(15,23,42,.14);position:relative;overflow:hidden}}
     .page:before{{content:"";position:absolute;left:0;right:0;top:0;height:10px;background:var(--accent)}}
@@ -507,9 +717,9 @@ def document_styles(org=None):
     .muted{{color:var(--muted);font-size:12px;line-height:1.55}}.meta{{display:grid;grid-template-columns:auto 1fr;gap:7px 16px;margin-top:28px;font-size:12px}}.meta b{{font-size:12px}}
     .grid{{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:34px}}.box{{min-height:112px}}.section-line{{height:8px;background:var(--accent);width:100%;margin:18px 0 20px}}
     table{{width:100%;border-collapse:collapse;margin-top:24px;font-size:12px}}th{{background:var(--table-head);color:#fff;text-align:left;text-transform:uppercase;font-size:11px;font-weight:800}}td,th{{border:1px solid var(--line);padding:12px}}tbody tr:nth-child(even){{background:var(--soft)}}
-    .right{{text-align:right}}.total{{margin-left:auto;margin-top:22px;width:315px;border:1px solid var(--line)}}.row{{display:flex;justify-content:space-between;gap:16px;padding:12px 14px;border-bottom:1px solid var(--line);font-size:13px}}.row:last-child{{border-bottom:0;background:var(--accent);font-weight:900}}
+    .right{{text-align:right}}.receipt-link{{color:var(--ink);font-weight:800;text-decoration:underline;text-underline-offset:2px}}.total{{margin-left:auto;margin-top:22px;width:315px;border:1px solid var(--line)}}.row{{display:flex;justify-content:space-between;gap:16px;padding:12px 14px;border-bottom:1px solid var(--line);font-size:13px}}.row:last-child{{border-bottom:0;background:var(--accent);color:var(--accent-text);font-weight:900}}
     .footer{{display:grid;grid-template-columns:1fr 220px;gap:32px;margin-top:44px;align-items:end}}.sign{{border-top:1px solid #9ca3af;padding-top:10px;text-align:center;font-size:12px;font-weight:700}}.footbar{{position:absolute;left:48px;right:48px;bottom:28px;border-top:3px solid var(--accent);padding-top:12px;display:flex;gap:18px;font-size:11px;color:var(--ink)}}
-    button{{position:fixed;right:24px;top:24px;padding:10px 14px;border:0;border-radius:6px;background:var(--ink);color:white;font-weight:800}}@media print{{body{{background:white}}.page{{box-shadow:none;margin:0;width:auto;min-height:1123px}}button{{display:none}}}}
+    button,.download-btn{{position:fixed;right:24px;top:24px;padding:10px 14px;border:0;border-radius:6px;background:var(--ink);color:white;font-weight:800;text-decoration:none}}@media print{{body{{background:white}}.page{{box-shadow:none;margin:0;width:auto;min-height:1123px}}button,.download-btn{{display:none}}}}
     """
 
 
@@ -529,6 +739,7 @@ def normalize_lead_note(body):
 def receipt_html(receipt):
     org = receipt.get("organization", {})
     customer = receipt.get("customer", {})
+    pdf_url = f"./pdf"
     return f"""<!doctype html>
 <html>
 <head>
@@ -536,7 +747,7 @@ def receipt_html(receipt):
   <title>{html.escape(receipt.get("receipt_number", "Receipt"))}</title>
   <style>{document_styles(org)}</style>
 </head>
-<body><button onclick="window.print()">Print / Save PDF</button><main class="page">
+<body><a class="download-btn" href="{pdf_url}">Download PDF</a><main class="page">
   <section class="top"><div class="brand">{logo_html(org)}<div><h2>{html.escape(org.get("company_name", ""))}</h2><div class="muted">{html.escape(org.get("address", ""))}<br>{html.escape(org.get("phone", ""))} {html.escape(org.get("email", ""))}<br>{html.escape(org.get("tax_number", ""))}</div></div></div><div><div class="doc-title"><span class="bar small"></span><h1>Receipt</h1><span class="bar small"></span></div><div class="meta"><b>Receipt#</b><span>{html.escape(receipt.get("receipt_number", ""))}</span><b>Date</b><span>{html.escape(receipt.get("payment_date", ""))}</span></div></div></section>
   <div class="section-line"></div>
   <section class="grid"><div class="box"><h2>Receipt To</h2><div class="muted">{html.escape(customer.get("name", ""))}<br>{html.escape(customer.get("email", ""))}<br>{html.escape(customer.get("phone", ""))}<br>{html.escape(customer.get("address", ""))}</div></div><div class="box"><h2>Payment Info</h2><div class="muted">Stage: {html.escape(receipt.get("payment_stage", ""))}<br>Transaction ID: {html.escape(receipt.get("transaction_id", ""))}<br>Method: {html.escape(receipt.get("payment_method", ""))}<br>Status: {html.escape(receipt.get("status", ""))}</div></div></section>
@@ -547,23 +758,121 @@ def receipt_html(receipt):
 </main></body></html>"""
 
 
+def receipt_download_link(receipt):
+    receipt_id = str(receipt.get("id") or "").strip()
+    if not receipt_id:
+        return ""
+    return f'<a class="receipt-link" href="../receipts/{html.escape(receipt_id)}/pdf">Download Receipt</a>'
+
+
 def invoice_html(invoice):
     org = invoice.get("organization", {})
     customer = invoice.get("customer", {})
     receipts = invoice.get("receipts", [])
     rows = "".join(
-        f"<tr><td>{i}</td><td>{html.escape(r.get('receipt_number',''))}</td><td>{html.escape(r.get('payment_stage',''))}</td><td>{html.escape(r.get('payment_date',''))}</td><td>{html.escape(r.get('transaction_id',''))}</td><td class='right'>{html.escape(str(r.get('amount','')))}</td></tr>"
+        f"<tr><td>{i}</td><td>{html.escape(r.get('receipt_number',''))}</td><td>{html.escape(r.get('payment_stage',''))}</td><td>{html.escape(r.get('payment_date',''))}</td><td>{html.escape(r.get('transaction_id',''))}</td><td class='right'>{html.escape(str(r.get('amount','')))}</td><td>{receipt_download_link(r)}</td></tr>"
         for i, r in enumerate(receipts, 1)
     )
-    return f"""<!doctype html><html><head><meta charset="utf-8"><title>{html.escape(invoice.get("invoice_number", "Final Invoice"))}</title><style>{document_styles(org)}</style></head><body><button onclick="window.print()">Print / Save PDF</button><main class="page">
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>{html.escape(invoice.get("invoice_number", "Final Invoice"))}</title><style>{document_styles(org)}</style></head><body><a class="download-btn" href="./pdf">Download PDF</a><main class="page">
 <section class="top"><div class="brand">{logo_html(org)}<div><h2>{html.escape(org.get("company_name",""))}</h2><div class="muted">{html.escape(org.get("address",""))}<br>{html.escape(org.get("phone",""))} {html.escape(org.get("email",""))}<br>{html.escape(org.get("tax_number",""))}</div></div></div><div><div class="doc-title"><span class="bar"></span><h1>Invoice</h1><span class="bar small"></span></div><div class="meta"><b>Invoice#</b><span>{html.escape(invoice.get("invoice_number",""))}</span><b>Date</b><span>{html.escape(invoice.get("generated_at",""))}</span></div></div></section>
 <div class="section-line"></div>
 <section class="grid"><div class="box"><h2>Invoice To</h2><div class="muted">{html.escape(customer.get("name",""))}<br>{html.escape(customer.get("email",""))}<br>{html.escape(customer.get("phone",""))}<br>{html.escape(customer.get("address",""))}</div></div><div class="box"><h2>Payment Info</h2><div class="muted">Status: Completed<br>Receipts: {len(receipts)}<br>Tax Number: {html.escape(org.get("tax_number",""))}</div></div></section>
-<table><thead><tr><th>Sl.</th><th>Receipt</th><th>Stage</th><th>Date</th><th>Transaction ID</th><th class="right">Amount</th></tr></thead><tbody>{rows}</tbody></table>
+<table><thead><tr><th>Sl.</th><th>Receipt</th><th>Stage</th><th>Date</th><th>Transaction ID</th><th class="right">Amount</th><th>Download</th></tr></thead><tbody>{rows}</tbody></table>
 <section class="total"><div class="row"><span>Total Paid</span><strong>{html.escape(str(invoice.get("total_paid","")))}</strong></div><div class="row"><span>Final Due</span><strong>{html.escape(str(invoice.get("due_amount","")))}</strong></div></section>
 <section class="footer"><div class="muted">{html.escape(invoice.get("description",""))}<br><br>{html.escape(org.get("bank_details",""))}</div><div class="sign">{html.escape(org.get("authorized_signatory","Authorized Signatory"))}</div></section>
 <section class="footbar"><span>{html.escape(org.get("phone",""))}</span><span>{html.escape(org.get("address",""))}</span><span>{html.escape(org.get("website",""))}</span></section>
 </main></body></html>"""
+
+
+def invoice_pdf(invoice):
+    org = invoice.get("organization", {})
+    customer = invoice.get("customer", {})
+    receipts = invoice.get("receipts", [])
+    accent = pdf_rgb(org.get("document_accent_color"), "#000000")
+    ink = pdf_rgb(org.get("document_text_color"), "#000000")
+    muted = pdf_rgb(org.get("document_muted_color"), "#000000")
+    table_head = pdf_rgb(org.get("document_table_header_color"), "#000000")
+    accent_text = pdf_contrast(accent)
+    line = pdf_rgb("#e5e7eb")
+    pdf = SimplePdf()
+    pdf.rect(0, 0, 595, 842, (0.953, 0.957, 0.965))
+    pdf.rect(42, 0, 511, 842, (1, 1, 1))
+    pdf.rect(42, 833, 511, 9, accent)
+    left, right = 64, 531
+    content_w = right - left
+    top = 760
+
+    pdf.rect(left, top - 8, 44, 44, ink)
+    pdf.text(left + 10, top + 8, brand_initials(org.get("company_name")), 17, True, (1, 1, 1))
+    pdf.text(left + 58, top + 30, org.get("company_name", ""), 13, True, ink)
+    org_lines = [org.get("address", ""), f"{org.get('phone', '')} {org.get('email', '')}".strip(), org.get("tax_number", "")]
+    for i, line_text in enumerate([x for x in org_lines if x]):
+        pdf.text(left + 58, top + 13 - i * 13, line_text, 9.5, False, muted)
+
+    pdf.rect(332, top + 16, 26, 13, accent)
+    pdf.text(370, top + 11, "INVOICE", 29, True, ink)
+    pdf.rect(507, top + 16, 26, 13, accent)
+    pdf.text(332, top - 28, "Invoice#", 9.5, True, ink)
+    pdf.text(390, top - 28, invoice.get("invoice_number", ""), 9.5, False, ink)
+    pdf.text(332, top - 45, "Date", 9.5, True, ink)
+    pdf.text(390, top - 45, invoice.get("generated_at", ""), 9.5, False, ink)
+    pdf.rect(left, 666, content_w, 8, accent)
+
+    pdf.text(left, 624, "INVOICE TO", 12, True, ink)
+    for i, line_text in enumerate([customer.get("name", ""), customer.get("email", ""), customer.get("phone", ""), customer.get("address", "")]):
+        if line_text:
+            pdf.text(left, 602 - i * 14, line_text, 10.5, False, muted)
+
+    payment_x = left + 260
+    pdf.text(payment_x, 624, "PAYMENT INFO", 12, True, ink)
+    for i, line_text in enumerate(["Status: Completed", f"Receipts: {len(receipts)}", f"Tax Number: {org.get('tax_number', '')}"]):
+        pdf.text(payment_x, 602 - i * 14, line_text, 10.5, False, muted)
+
+    table_y = 500
+    widths = [28, 72, 76, 66, 112, 76]
+    headers = ["Sl.", "Receipt", "Stage", "Date", "Transaction ID", "Amount"]
+    pdf.rect(left, table_y, sum(widths), 32, table_head)
+    x = left
+    for i, header in enumerate(headers):
+        pdf.text(x + 6, table_y + 13, header, 7.5, True, (1, 1, 1))
+        pdf.stroke_rect(x, table_y - 28 * max(len(receipts), 1), widths[i], 32 + 28 * max(len(receipts), 1), line)
+        x += widths[i]
+    for row_index, receipt in enumerate(receipts[:10], 1):
+        y = table_y - 20 - ((row_index - 1) * 28)
+        x = left
+        values = [
+            str(row_index),
+            receipt.get("receipt_number", ""),
+            receipt.get("payment_stage", ""),
+            receipt.get("payment_date", ""),
+            receipt.get("transaction_id", ""),
+            str(receipt.get("amount", "")),
+        ]
+        for col_index, value in enumerate(values):
+            text = " ".join(wrap_pdf_text(value, 16)[:1])
+            if col_index == 5:
+                pdf.right_text(x + widths[col_index] - 6, y, text, 8.2, False, ink)
+            else:
+                pdf.text(x + 6, y, text, 8.2, False, ink)
+            x += widths[col_index]
+
+    total_x, total_y, total_w = right - 235, 210, 235
+    pdf.stroke_rect(total_x, total_y, total_w, 66, line)
+    pdf.text(total_x + 12, total_y + 43, "Total Paid", 10, False, ink)
+    pdf.right_text(total_x + total_w - 12, total_y + 43, invoice.get("total_paid", ""), 10, True, ink)
+    pdf.rect(total_x, total_y, total_w, 33, accent)
+    pdf.text(total_x + 12, total_y + 12, "Final Due", 11, True, accent_text)
+    pdf.right_text(total_x + total_w - 12, total_y + 12, invoice.get("due_amount", ""), 11, True, accent_text)
+
+    for i, line_text in enumerate(wrap_pdf_text(invoice.get("description", "") or org.get("bank_details", ""), 46)[:3]):
+        pdf.text(left, 160 - i * 13, line_text, 9, False, muted)
+    pdf.line(right - 150, 110, right, 110)
+    pdf.text(right - 111, 94, org.get("authorized_signatory", "Authorized Signatory"), 9, True, ink)
+    pdf.line(left, 34, right, 34, accent, 3)
+    pdf.text(left, 18, org.get("phone", ""), 8, False, ink)
+    pdf.text(left + 160, 18, org.get("address", ""), 8, False, ink)
+    pdf.text(right - 120, 18, org.get("website", ""), 8, False, ink)
+    return pdf.build()
 
 
 @router.get("/settings")
@@ -837,11 +1146,11 @@ async def create_receipt(ws_id: str, lead_id: str, request: Request, body: dict 
         target_index = next(i for i, s in enumerate(stages) if s.get("id") == stage_id)
         if target_index > 0 and stages[target_index - 1].get("status") != "paid":
             raise HTTPException(status_code=400, detail="Complete the previous payment stage first")
-        stage_due = money_value(stages[target_index].get("due_amount"))
+        stage_due = payment_stage_remaining_amount(stages[target_index], receipts)
         if stage_due <= 0:
             raise HTTPException(status_code=400, detail="Payment stage is already complete")
         if amount_value > stage_due:
-            raise HTTPException(status_code=400, detail="Payment amount cannot exceed stage due amount")
+            raise HTTPException(status_code=400, detail="Payment amount cannot exceed this payment stage amount")
         plan = current_plan
         due_amount = str(body.get("due_amount") or "0").strip()
     receipt = {
@@ -879,13 +1188,50 @@ async def create_receipt(ws_id: str, lead_id: str, request: Request, body: dict 
 @router.get("/leads/{lead_id}/receipts/{receipt_id}/html")
 async def render_receipt(ws_id: str, lead_id: str, receipt_id: str, request: Request):
     db = db_from(request)
+    _, org = await current_document_organization(db, ws_id)
     lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
     receipt = next((r for r in lead.get("receipts", []) if r.get("id") == receipt_id), None)
     if not receipt:
         raise HTTPException(status_code=404, detail="Receipt not found")
-    return HTMLResponse(receipt_html(receipt))
+    return HTMLResponse(receipt_html(with_document_organization(receipt, org)))
+
+
+@router.get("/leads/{lead_id}/receipts/{receipt_id}/pdf")
+async def render_receipt_pdf(ws_id: str, lead_id: str, receipt_id: str, request: Request):
+    db = db_from(request)
+    _, org = await current_document_organization(db, ws_id)
+    lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    receipt = next((r for r in lead.get("receipts", []) if r.get("id") == receipt_id), None)
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", receipt.get("receipt_number") or "receipt").strip("-") or "receipt"
+    return Response(
+        content=receipt_pdf(with_document_organization(receipt, org)),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.pdf"'},
+    )
+
+
+@router.get("/leads/{lead_id}/receipts/{receipt_id}/download")
+async def download_receipt(ws_id: str, lead_id: str, receipt_id: str, request: Request):
+    db = db_from(request)
+    _, org = await current_document_organization(db, ws_id)
+    lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    receipt = next((r for r in lead.get("receipts", []) if r.get("id") == receipt_id), None)
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", receipt.get("receipt_number") or "receipt").strip("-") or "receipt"
+    return Response(
+        content=receipt_html(with_document_organization(receipt, org)),
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.html"'},
+    )
 
 
 @router.post("/leads/{lead_id}/final-invoice")
@@ -940,13 +1286,32 @@ async def create_final_invoice(ws_id: str, lead_id: str, request: Request, body:
 @router.get("/leads/{lead_id}/final-invoice/html")
 async def render_final_invoice(ws_id: str, lead_id: str, request: Request):
     db = db_from(request)
+    _, org = await current_document_organization(db, ws_id)
     lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
     invoice = lead.get("final_invoice")
     if not invoice:
         raise HTTPException(status_code=404, detail="Final invoice not found")
-    return HTMLResponse(invoice_html(invoice))
+    return HTMLResponse(invoice_html(with_document_organization(invoice, org)))
+
+
+@router.get("/leads/{lead_id}/final-invoice/pdf")
+async def render_final_invoice_pdf(ws_id: str, lead_id: str, request: Request):
+    db = db_from(request)
+    _, org = await current_document_organization(db, ws_id)
+    lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    invoice = lead.get("final_invoice")
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Final invoice not found")
+    filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", invoice.get("invoice_number") or "final-invoice").strip("-") or "final-invoice"
+    return Response(
+        content=invoice_pdf(with_document_organization(invoice, org)),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.pdf"'},
+    )
 
 
 @router.patch("/leads/{lead_id}/payment-plan")

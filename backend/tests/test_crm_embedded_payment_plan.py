@@ -11,12 +11,15 @@ from crm import (  # noqa: E402
     DEFAULT_STATES,
     effective_organization,
     invoice_html,
+    invoice_pdf,
     normalize_field,
     normalize_lead_note,
     normalize_payment_plan,
+    payment_stage_remaining_amount,
     payment_plan_ready_for_final_invoice,
     recalculate_payment_plan,
     receipt_html,
+    receipt_pdf,
     render_template_html,
     single_payment_summary,
     validate_field_values,
@@ -156,6 +159,20 @@ def test_final_invoice_requires_every_payment_stage_paid_even_when_due_is_zero()
     assert payment_plan_ready_for_final_invoice(recalculated) is False
 
 
+def test_payment_stage_remaining_amount_is_limited_to_stage_total():
+    plan = normalize_payment_plan({
+        "total_amount": "10000",
+        "stages": [
+            {"id": "stage-1", "name": "Payment 1", "amount": "4000"},
+            {"id": "stage-2", "name": "Payment 2", "amount": "6000"},
+        ],
+    })
+    stage = plan["stages"][0]
+
+    assert payment_stage_remaining_amount(stage, []) == 4000
+    assert payment_stage_remaining_amount(stage, [{"stage_id": "stage-1", "amount": "1500"}]) == 2500
+
+
 def test_template_render_uses_configured_field_values_and_payment_plan():
     settings = {"fields": DEFAULT_FIELDS, "states": DEFAULT_STATES}
     lead = {
@@ -191,7 +208,7 @@ def test_default_receipt_and_invoice_html_include_snapshots():
         "generated_at": "2026-08-29",
         "organization": receipt["organization"],
         "customer": receipt["customer"],
-        "receipts": [receipt],
+        "receipts": [{**receipt, "id": "receipt-1"}],
         "total_paid": "100000",
         "due_amount": "0",
         "salesperson": "Riya",
@@ -204,10 +221,21 @@ def test_default_receipt_and_invoice_html_include_snapshots():
     assert "https://example.com/logo.png" in receipt_html(receipt)
     assert "Bank XYZ" in receipt_html(receipt)
     assert "Riya Sen" in receipt_html(receipt)
+    assert "Download PDF" in receipt_html(receipt)
+    assert 'href="./pdf"' in receipt_html(receipt)
+    assert receipt_pdf(receipt).startswith(b"%PDF-1.4")
+    assert DEFAULT_ORGANIZATION["document_accent_color"] == "#000000"
+    assert "--accent:#000000" in receipt_html({"organization": DEFAULT_ORGANIZATION, "customer": {}})
+    assert "--accent-text:#ffffff" in receipt_html({"organization": DEFAULT_ORGANIZATION, "customer": {}})
     assert "INV-0001" in invoice_html(invoice)
     assert "REC-0001" in invoice_html(invoice)
     assert "TXN-001" in invoice_html(invoice)
     assert "Arevei Realty" in invoice_html(invoice)
+    assert "Download PDF" in invoice_html(invoice)
+    assert 'href="./pdf"' in invoice_html(invoice)
+    assert "Download Receipt" in invoice_html(invoice)
+    assert 'href="../receipts/receipt-1/pdf"' in invoice_html(invoice)
+    assert invoice_pdf(invoice).startswith(b"%PDF-1.4")
 
 
 def test_brain_organization_overrides_crm_settings_for_documents():
@@ -222,3 +250,20 @@ def test_brain_organization_overrides_crm_settings_for_documents():
     assert org["invoice_prefix"] == "BINV"
     assert org["document_accent_color"] == "#ffcc00"
     assert "--accent:#ffcc00" in receipt_html({"organization": org, "customer": {}})
+
+
+def test_brain_business_profile_fills_legacy_organization_fields():
+    settings = {"organization": {"company_name": "CRM Co", "website": "https://crm.example", "receipt_prefix": "CRM"}}
+    workspace = {
+        "website_url": "https://workspace.example",
+        "brain": {
+            "_source_url": "https://brain.example",
+            "business_profile": {"company_name": "Brain Profile Co"},
+        },
+    }
+
+    org = effective_organization(settings, workspace)
+
+    assert org["company_name"] == "Brain Profile Co"
+    assert org["website"] == "https://brain.example"
+    assert org["receipt_prefix"] == "CRM"

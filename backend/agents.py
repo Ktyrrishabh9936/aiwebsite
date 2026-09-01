@@ -28,6 +28,31 @@ BRAIN_SYSTEM = (
 )
 
 
+def normalize_brain_organization(brain, crawl):
+    organization = brain.get("organization") if isinstance(brain.get("organization"), dict) else {}
+    business_profile = brain.get("business_profile") if isinstance(brain.get("business_profile"), dict) else {}
+    source_url = crawl.get("origin", "")
+    normalized = {
+        "company_name": organization.get("company_name") or business_profile.get("company_name") or "",
+        "logo_url": organization.get("logo_url") or "",
+        "address": organization.get("address") or "",
+        "phone": organization.get("phone") or "",
+        "email": organization.get("email") or "",
+        "website": organization.get("website") or source_url,
+        "tax_number": organization.get("tax_number") or "",
+        "bank_details": organization.get("bank_details") or "",
+        "authorized_signatory": organization.get("authorized_signatory") or "",
+        "receipt_prefix": organization.get("receipt_prefix") or "",
+        "invoice_prefix": organization.get("invoice_prefix") or "",
+        "document_accent_color": organization.get("document_accent_color") or "",
+        "document_text_color": organization.get("document_text_color") or "",
+        "document_muted_color": organization.get("document_muted_color") or "",
+        "document_table_header_color": organization.get("document_table_header_color") or "",
+    }
+    brain["organization"] = normalized
+    return brain
+
+
 async def build_brain(model_id, crawl):
     prompt = f"""Analyse this crawled website content and produce the business Brain.
 
@@ -37,13 +62,17 @@ CRAWLED CONTENT (from {crawl['page_count']} pages):
 Return JSON with EXACTLY this shape:
 {{
   "business_profile": {{"company_name": "", "industry": "", "description": "", "offers": ["..."], "pricing_summary": "", "locations": ["..."], "founders": ["..."]}},
+  "organization": {{"company_name": "", "logo_url": "", "address": "", "phone": "", "email": "", "website": "", "tax_number": "", "bank_details": "", "authorized_signatory": "", "receipt_prefix": "", "invoice_prefix": "", "document_accent_color": "", "document_text_color": "", "document_muted_color": "", "document_table_header_color": ""}},
   "brand_identity": {{"voice": "", "personality": "", "tone_words": ["..."], "approved_wording": ["..."]}},
   "audience": {{"icps": [{{"name": "", "pains": ["..."], "motivations": ["..."], "objections": ["..."]}}], "buying_triggers": ["..."]}},
   "goals_constraints": {{"kpis": ["..."], "priorities": ["..."], "restrictions": ["..."], "publishing_cadence": "e.g. 2 blogs/week"}},
   "evidence": {{"summary": "", "testimonials": ["..."], "differentiators": ["..."]}},
   "decision_memory": {{"approved": [], "rejected": [], "notes": []}}
-}}"""
+}}
+
+For organization, extract only details visible in the crawled content. Use business_profile.company_name for organization.company_name when the same company is clear, and use the crawled origin URL for organization.website when no better website value appears. Leave tax, bank, prefix, signatory, and color fields empty unless the content explicitly provides them."""
     brain = await generate_json(model_id, BRAIN_SYSTEM, prompt, temperature=0.4, max_tokens=4000)
+    brain = normalize_brain_organization(brain, crawl)
     brain["_source_url"] = crawl["origin"]
     brain["_pages_crawled"] = crawl["pages"]
     return brain

@@ -91,6 +91,20 @@ function mergeTemplate(template, source) {
   return source == null ? template : source;
 }
 
+function withOrganizationFallback(brain, websiteUrl = "") {
+  const source = brain || {};
+  const businessProfile = source.business_profile || {};
+  const organization = source.organization || {};
+  return {
+    ...source,
+    organization: {
+      ...organization,
+      company_name: organization.company_name || businessProfile.company_name || "",
+      website: organization.website || source._source_url || websiteUrl || "",
+    },
+  };
+}
+
 function emptyLike(sample) {
   if (Array.isArray(sample)) return [emptyLike(sample[0] ?? "")];
   if (sample && typeof sample === "object") return Object.fromEntries(Object.entries(sample).map(([key, val]) => [key, emptyLike(val)]));
@@ -131,8 +145,8 @@ function TextField({ label, value, path, onChange, multiline = false }) {
         <textarea value={value ?? ""} onChange={(e) => setValue(e.target.value)} rows={3} className="w-full px-3 py-2 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
       ) : COLOR_FIELDS.has(key) ? (
         <div className="flex gap-2">
-          <input type="color" value={/^#[0-9a-f]{6}$/i.test(value || "") ? value : "#111827"} onChange={(e) => setValue(e.target.value)} className="h-10 w-12 rounded-lg border bg-background p-1" />
-          <input value={value ?? ""} onChange={(e) => setValue(e.target.value)} placeholder="#111827" className="w-full h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
+          <input type="color" value={/^#[0-9a-f]{6}$/i.test(value || "") ? value : "#000000"} onChange={(e) => setValue(e.target.value)} className="h-10 w-12 rounded-lg border bg-background p-1" />
+          <input value={value ?? ""} onChange={(e) => setValue(e.target.value)} placeholder="#000000" className="w-full h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
         </div>
       ) : (
         <input value={value ?? ""} onChange={(e) => setValue(e.target.value)} className="w-full h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
@@ -302,7 +316,7 @@ function stripEmpty(value) {
 
 export default function BrainView() {
   const { ws, refresh } = useOutletContext();
-  const brain = useMemo(() => ws.brain || {}, [ws.brain]);
+  const brain = useMemo(() => withOrganizationFallback(ws.brain || {}, ws.website_url), [ws.brain, ws.website_url]);
   const [editOpen, setEditOpen] = useState(false);
   const [json, setJson] = useState("");
   const [saving, setSaving] = useState(false);

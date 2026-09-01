@@ -104,6 +104,11 @@ export default function CodeWorkspace() {
 
   const send = async (preset) => {
     const msg = (preset || input).trim(); if (!msg || streaming) return;
+    const selectedModel = currentModel || models.find((m) => m.id === project?.model_id);
+    if (selectedModel?.configured === false) {
+      toast.error(`${selectedModel.label} is not configured on the backend.`);
+      return;
+    }
     if (attachments.length && !currentModel?.vision) {
       toast.error("Select a vision-capable model before sending image references.");
       return;

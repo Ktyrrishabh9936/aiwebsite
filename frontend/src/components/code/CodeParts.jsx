@@ -144,6 +144,32 @@ function StepRow({ step, label }) {
   );
 }
 
+function dedupeSteps(steps = []) {
+  let seenExplore = false;
+  const seenReads = new Set();
+  const seenTerminals = new Set();
+  return steps.filter((step) => {
+    if (step.type === "activity_finished" && step.kind === "explore") {
+      if (seenExplore) return false;
+      seenExplore = true;
+      return true;
+    }
+    if (step.type === "activity_finished" && step.kind === "read") {
+      const key = step.path || step.label;
+      if (seenReads.has(key)) return false;
+      seenReads.add(key);
+      return true;
+    }
+    if (step.type === "terminal_result") {
+      const key = `${step.command || ""}:${step.exit_code ?? ""}`;
+      if (seenTerminals.has(key)) return false;
+      seenTerminals.add(key);
+      return true;
+    }
+    return true;
+  });
+}
+
 function ChangedFilesCard({ files = [] }) {
   if (!files.length) return null;
   return (
@@ -192,7 +218,7 @@ function AgentMessage({ m }) {
       </div>
     );
   }
-  const steps = (m.steps || []).map((s, i) => ({ s, l: stepLabel(s), i })).filter((x) => x.l);
+  const steps = dedupeSteps(m.steps || []).map((s, i) => ({ s, l: stepLabel(s), i })).filter((x) => x.l);
   const lastStep = steps[steps.length - 1];
   return (
     <div className="rounded-md border border-border bg-card px-3.5 py-3">
@@ -306,9 +332,9 @@ export function AgentChat({ chatRef, messages, input, setInput, streaming, onSen
                     <div key={tier}>
                       <div className="px-2 py-1 text-[10px] uppercase tracking-wider font-bold text-muted-foreground">{tier}</div>
                       {group.map((m) => (
-                        <DropdownMenuItem key={m.id} onClick={() => onModel(m.id)} className="flex items-center justify-between gap-3 cursor-pointer">
+                        <DropdownMenuItem key={m.id} disabled={!m.configured} onClick={() => onModel(m.id)} title={m.reason || ""} className="flex items-center justify-between gap-3 cursor-pointer">
                           <span>{m.label}</span>
-                          <span className={m.configured ? "text-[10px] px-1.5 rounded-full bg-emerald-500/15 text-emerald-500" : "text-[10px] px-1.5 rounded-full bg-amber-500/15 text-amber-500"}>{m.configured ? (m.vision ? "vision" : m.tier) : "key needed"}</span>
+                          <span className={m.configured ? "text-[10px] px-1.5 rounded-full bg-emerald-500/15 text-emerald-500" : "text-[10px] px-1.5 rounded-full bg-amber-500/15 text-amber-500"}>{m.configured ? (m.vision ? "vision" : m.tier) : "setup needed"}</span>
                         </DropdownMenuItem>
                       ))}
                     </div>

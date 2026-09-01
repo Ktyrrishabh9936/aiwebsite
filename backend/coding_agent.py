@@ -13,7 +13,7 @@ logger = logging.getLogger("coding_agent")
 CODING_MODELS = [
     {"id": "bedrock-claude-sonnet", "label": "Bedrock Claude Sonnet", "real": os.environ.get("BEDROCK_CODE_MODEL_ID") or "us.anthropic.claude-sonnet-4-6", "provider": "bedrock", "tier": "premium", "capabilities": ["coding", "reasoning", "design"]},
     {"id": "bedrock-vision", "label": "Bedrock Vision", "real": os.environ.get("BEDROCK_VISION_MODEL_ID") or os.environ.get("BEDROCK_CODE_MODEL_ID") or "us.anthropic.claude-sonnet-4-6", "provider": "bedrock", "tier": "premium", "capabilities": ["coding", "design", "vision"], "vision": True},
-    {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "real": "gpt-4o", "provider": "openai", "tier": "premium", "capabilities": ["coding", "design", "terminal", "vision"], "vision": True},
+    {"id": "gpt-5.6-terra", "label": "GPT-4o Terra", "real": "gpt-4o", "provider": "openai", "tier": "premium", "capabilities": ["coding", "design", "terminal", "vision"], "vision": True},
     {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6", "real": "anthropic/claude-sonnet-4.5", "provider": "openrouter", "tier": "premium", "capabilities": ["coding", "reasoning", "design", "vision"], "vision": True},
     {"id": "deepseek-v3", "label": "DeepSeek V3", "real": "deepseek/deepseek-chat", "provider": "openrouter", "tier": "fast", "capabilities": ["coding", "cheap"]},
     {"id": "gpt-4o-mini", "label": "GPT-4o mini", "real": "gpt-4o-mini", "provider": "openai", "tier": "fast", "capabilities": ["coding", "cheap"]},
@@ -22,6 +22,11 @@ CODING_MODELS = [
 CODING_MODEL_MAP = {m["id"]: m for m in CODING_MODELS}
 DEFAULT_CODING_MODEL = "gpt-5.6-terra"
 AWS_REGION = os.environ.get("AWS_REGION") or "us-east-1"
+TREE_HINT_FILES = {
+    "package.json", "vite.config.js", "vite.config.ts", "next.config.js", "next.config.mjs",
+    "src/App.jsx", "src/App.tsx", "src/main.jsx", "src/main.tsx", "src/index.js",
+    "app/page.tsx", "pages/index.js", "pages/index.tsx", "index.html", "README.md",
+}
 
 
 def _client(provider):
@@ -33,7 +38,13 @@ def _client(provider):
 
 
 def _bedrock_client():
-    import boto3
+    try:
+        import boto3
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Amazon Bedrock needs the boto3 Python package. Start the backend with scripts/start-backend.ps1, "
+            "or install backend requirements into the Python environment that runs uvicorn."
+        ) from exc
 
     return boto3.client("bedrock-runtime", region_name=AWS_REGION)
 
@@ -63,14 +74,13 @@ BEDROCK_TOOLS = [
 SYSTEM = """You are Arevei Coding Agent, an expert full-stack engineer working inside a live Daytona Linux sandbox.
 The project lives at the project root (all paths are relative to it). It may be ANY language or framework — inspect the files first to learn the stack. A dev/web server, when relevant, listens on port 5173.
 
-Narrate briefly what you are about to do BEFORE each tool call (one short sentence), so the user sees live progress.
-
 Rules:
 - Use the tools to inspect and edit the real filesystem. Always write COMPLETE file contents with write_file (never partial diffs).
-- Before editing, list or read files to understand the current stack and state. Do not assume a fixed template or config.
+- Inspect the file tree at most once per user request. After list_files, read specific likely entry files instead of listing again.
+- Before editing, read files to understand the current stack and state. Do not assume a fixed template or config.
 - When building from a blank or starter app, make the UI feel polished by default: responsive layout, clear hierarchy, refined spacing, usable states, and real content. Do not leave generic placeholder pages unless the user explicitly asks for basic scaffolding.
 - For website/app requests, plan the design, implement it, run the relevant install/build/test command when available, and summarize the result.
-- If you need to use code or terminal tools, say what operation you are about to perform before the tool call.
+- Keep progress narration brief and only when it adds useful context. Do not narrate repeated exploration.
 - Keep changes focused on the user's request while still delivering a complete product-quality surface.
 - Do NOT start a long-running dev server yourself (the platform manages it). You may run install commands.
 - When completely done, end with a SHORT summary (2-4 markdown bullets) of exactly what you changed."""
@@ -107,6 +117,13 @@ def _bedrock_messages(history, user_message, attachments):
         messages.append({"role": role, "content": [{"text": h["content"] or ""}]})
     messages.append({"role": "user", "content": _bedrock_user_content(user_message, attachments)})
     return messages
+
+
+class AgentTurnState:
+    def __init__(self):
+        self.file_tree_listed = False
+        self.file_tree_summary = ""
+        self.file_count = 0
 
 
 def _collect_bedrock_stream(client, **kwargs):
@@ -148,6 +165,7 @@ async def _run_bedrock_agent(ops, m, history, user_message, attachments):
     steps = []
     changed_files = {}
     summary = ""
+    state = AgentTurnState()
     try:
         for _ in range(14):
             response = await asyncio.to_thread(
@@ -195,7 +213,7 @@ async def _run_bedrock_agent(ops, m, history, user_message, attachments):
                 break
             results = []
             for tool_use in tool_uses:
-                result, extra = await _execute(ops, tool_use.get("name"), tool_use.get("input") or {})
+                result, extra = await _execute(ops, tool_use.get("name"), tool_use.get("input") or {}, state)
                 if extra:
                     steps.append(extra)
                     if extra["type"] == "file_changed":
@@ -239,6 +257,7 @@ async def run_agent(ops, model_id, history, user_message, attachments=None):
     steps = []
     changed_files = {}
     summary = ""
+    state = AgentTurnState()
     try:
         for _ in range(14):
             stream = await client.chat.completions.create(
@@ -280,7 +299,7 @@ async def run_agent(ops, model_id, history, user_message, attachments=None):
                     args = json.loads(s["args"] or "{}")
                 except Exception:
                     args = {}
-                result, extra = await _execute(ops, name, args)
+                result, extra = await _execute(ops, name, args, state)
                 if extra:
                     steps.append(extra)
                     if extra["type"] == "file_changed":
@@ -293,7 +312,7 @@ async def run_agent(ops, model_id, history, user_message, attachments=None):
         logger.exception("agent failed")
         raw = str(e)
         if "402" in raw or "more credits" in raw or "insufficient" in raw.lower():
-            msg = f"The model '{m['label']}' needs OpenRouter credits (your OpenRouter account balance is too low). Add credits at openrouter.ai/settings/credits, or switch to an OpenAI-backed model like GPT-5.6 Terra or GPT-4o mini."
+            msg = f"The model '{m['label']}' needs OpenRouter credits (your OpenRouter account balance is too low). Add credits at openrouter.ai/settings/credits, or switch to an OpenAI-backed model like GPT-4o Terra or GPT-4o mini."
         elif "401" in raw or "invalid api key" in raw.lower():
             msg = f"Auth failed for '{m['label']}'. Check the provider API key."
         else:
@@ -306,12 +325,19 @@ async def run_agent(ops, model_id, history, user_message, attachments=None):
     yield {"type": "done", "steps": steps, "summary": summary, "changed_files": final["changed_files"]}
 
 
-async def _execute(ops, name, args):
+async def _execute(ops, name, args, state=None):
     try:
         if name == "list_files":
+            if state and state.file_tree_listed:
+                return "File tree already listed. Read specific files next, such as package.json, routing files, or likely entry files.", None
             tree = await ops["list_files"]()
             count = _count_files(tree)
-            return json.dumps(tree)[:8000], {"type": "activity_finished", "kind": "explore", "label": f"Explored {count} files", "count": count}
+            summary = _summarize_tree(tree)
+            if state:
+                state.file_tree_listed = True
+                state.file_tree_summary = summary
+                state.file_count = count
+            return summary, {"type": "activity_finished", "kind": "explore", "label": f"Explored {count} files", "count": count}
         if name == "read_file":
             path = args.get("path", "")
             content = await ops["read_file"](path)
@@ -343,6 +369,52 @@ def _count_files(nodes):
         else:
             total += 1
     return total
+
+
+def _flatten_tree(nodes):
+    paths = []
+    for node in nodes or []:
+        path = node.get("path") or node.get("name") or ""
+        if node.get("type") == "dir":
+            paths.extend(_flatten_tree(node.get("children") or []))
+        elif path:
+            paths.append(path)
+    return paths
+
+
+def _summarize_tree(tree):
+    paths = sorted(_flatten_tree(tree))
+    top_dirs = []
+    top_files = []
+    for node in tree or []:
+        name = node.get("name") or node.get("path") or ""
+        if not name:
+            continue
+        if node.get("type") == "dir":
+            top_dirs.append(name)
+        else:
+            top_files.append(name)
+    key_files = [path for path in paths if path in TREE_HINT_FILES]
+    if len(key_files) < 24:
+        key_files.extend(path for path in paths if path not in key_files and _looks_like_entry_file(path))
+    key_files = key_files[:30]
+    return json.dumps({
+        "summary": "Project file tree summarized. Read specific files next; do not call list_files again.",
+        "file_count": len(paths),
+        "top_level_dirs": top_dirs[:30],
+        "top_level_files": top_files[:30],
+        "key_files": key_files,
+    }, ensure_ascii=False)
+
+
+def _looks_like_entry_file(path):
+    lowered = path.lower()
+    name = lowered.rsplit("/", 1)[-1]
+    if name in {"app.jsx", "app.tsx", "main.jsx", "main.tsx", "index.jsx", "index.tsx", "router.jsx", "router.tsx"}:
+        return True
+    if lowered.endswith(("/routes.jsx", "/routes.tsx", "/layout.tsx", "/page.tsx")):
+        return True
+    return False
 
 
 def _diff_stats(before, after):

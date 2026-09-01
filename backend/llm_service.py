@@ -7,7 +7,7 @@ import asyncio
 from dotenv import load_dotenv
 from pathlib import Path
 
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(Path(__file__).parent / ".env", override=True)
 
 logger = logging.getLogger("llm")
 
@@ -57,7 +57,13 @@ async def _openai_compatible(url, key, model, system, prompt, temperature, max_t
 
 
 def _bedrock_client():
-    import boto3
+    try:
+        import boto3
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Amazon Bedrock needs the boto3 Python package. Start the backend with scripts/start-backend.ps1, "
+            "or install backend requirements into the Python environment that runs uvicorn."
+        ) from exc
 
     return boto3.client("bedrock-runtime", region_name=AWS_REGION)
 

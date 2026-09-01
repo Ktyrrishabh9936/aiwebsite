@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import base64
+import importlib.util
 from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import APIRouter, Request, HTTPException, Body
@@ -17,6 +18,10 @@ logger = logging.getLogger("coding")
 MAX_ATTACHMENTS = 3
 MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
 ALLOWED_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
+
+
+def has_python_package(name):
+    return importlib.util.find_spec(name) is not None
 
 
 def now_iso():
@@ -182,24 +187,35 @@ def build_coding_router(db):
     # ---------- models ----------
     @router.get("/models")
     async def models():
-        def ready(provider):
+        def provider_status(provider):
             if provider == "openai":
-                return bool(os.environ.get("OPENAI_API_KEY"))
+                ok = bool(os.environ.get("OPENAI_API_KEY"))
+                return {"configured": ok, "reason": "" if ok else "OPENAI_API_KEY is missing"}
             if provider == "openrouter":
-                return bool(os.environ.get("OPENROUTER_API_KEY"))
+                ok = bool(os.environ.get("OPENROUTER_API_KEY"))
+                return {"configured": ok, "reason": "" if ok else "OPENROUTER_API_KEY is missing"}
             if provider == "nvidia":
-                return bool(os.environ.get("NVIDIA_NIM_API_KEY"))
+                ok = bool(os.environ.get("NVIDIA_NIM_API_KEY"))
+                return {"configured": ok, "reason": "" if ok else "NVIDIA_NIM_API_KEY is missing"}
             if provider == "bedrock":
-                return bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or os.environ.get("AWS_ACCESS_KEY_ID"))
-            return False
+                has_creds = bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or os.environ.get("AWS_ACCESS_KEY_ID"))
+                has_boto3 = has_python_package("boto3")
+                reason = ""
+                if not has_boto3:
+                    reason = "boto3 is missing in the backend Python environment"
+                elif not has_creds:
+                    reason = "AWS_BEARER_TOKEN_BEDROCK or AWS_ACCESS_KEY_ID is missing"
+                return {"configured": has_boto3 and has_creds, "reason": reason}
+            return {"configured": False, "reason": "Unknown provider"}
 
-        models = [{**m, "configured": ready(m.get("provider"))} for m in coding_agent.CODING_MODELS]
+        statuses = {provider: provider_status(provider) for provider in ("openai", "openrouter", "nvidia", "bedrock")}
+        models = [{**m, **provider_status(m.get("provider"))} for m in coding_agent.CODING_MODELS]
         return {"models": models, "default": coding_agent.DEFAULT_CODING_MODEL,
                 "providers": {
-                    "openai": {"configured": ready("openai"), "env": "OPENAI_API_KEY"},
-                    "openrouter": {"configured": ready("openrouter"), "env": "OPENROUTER_API_KEY"},
-                    "nvidia": {"configured": ready("nvidia"), "env": "NVIDIA_NIM_API_KEY"},
-                    "bedrock": {"configured": ready("bedrock"), "env": "AWS_BEARER_TOKEN_BEDROCK"},
+                    "openai": {**statuses["openai"], "env": "OPENAI_API_KEY"},
+                    "openrouter": {**statuses["openrouter"], "env": "OPENROUTER_API_KEY"},
+                    "nvidia": {**statuses["nvidia"], "env": "NVIDIA_NIM_API_KEY"},
+                    "bedrock": {**statuses["bedrock"], "env": "AWS_BEARER_TOKEN_BEDROCK"},
                     "github": {"configured": bool(os.environ.get("GITHUB_TOKEN")), "env": "GITHUB_TOKEN"},
                     "skills": {"configured": True, "env": "Built-in coding, design, terminal, file, and testing skills"},
                 },

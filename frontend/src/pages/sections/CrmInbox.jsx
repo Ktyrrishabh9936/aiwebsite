@@ -3,7 +3,8 @@ import { useParams } from "react-router-dom";
 import {
   Users, Calendar, Info, Search, ChevronRight, XCircle, Save, BadgeIndianRupee,
   Plus, CheckCircle2, Settings, Trash2, Columns3, Palette, Building2,
-  ReceiptText, FileText, ExternalLink, RefreshCw, FileCode2, MessageSquare, Send
+  ReceiptText, FileText, ExternalLink, RefreshCw, FileCode2, MessageSquare, Send,
+  Download
 } from "lucide-react";
 import { toast } from "sonner";
 import api, { API, formatError } from "../../lib/api";
@@ -66,9 +67,10 @@ function autoDueForStages(stages, totalAmount) {
   let runningPaid = 0;
   return stages.map((stage) => {
     const paid = numericAmount(stage.paid_amount);
+    const stageAmount = numericAmount(stage.amount);
     runningPaid += paid;
-    const stageDue = Math.max(0, numericAmount(totalAmount) - runningPaid);
-    const status = paid <= 0 ? "pending" : "paid";
+    const status = paid <= 0 ? "pending" : stageAmount > 0 && paid < stageAmount ? "partially_paid" : "paid";
+    const stageDue = status === "paid" ? 0 : Math.max(0, numericAmount(totalAmount) - runningPaid);
     return { ...stage, status, due_amount: String(stageDue) };
   });
 }
@@ -110,8 +112,22 @@ function statusForPayment(amount, balance) {
   return "Paid";
 }
 
+function stageRemainingAmount(stage) {
+  const stageAmount = numericAmount(stage?.amount);
+  if (stageAmount <= 0) return numericAmount(stage?.due_amount);
+  return Math.max(0, stageAmount - numericAmount(stage?.paid_amount));
+}
+
 function titleStatus(status) {
   return String(status || "pending").toLowerCase() === "paid" ? "Paid" : "Pending";
+}
+
+function receiptDownloadUrl(wsId, leadId, receiptId) {
+  return `${API}/workspaces/${wsId}/crm/leads/${leadId}/receipts/${receiptId}/pdf`;
+}
+
+function finalInvoiceDownloadUrl(wsId, leadId) {
+  return `${API}/workspaces/${wsId}/crm/leads/${leadId}/final-invoice/pdf`;
 }
 
 export default function CrmInbox() {
@@ -535,10 +551,11 @@ function LeadDetail(props) {
   const activeStage = (paymentPlan.stages || [])[activeStageIndex];
   const stageCount = (paymentPlan.stages || []).length;
   const canAddStage = isCustomer && lead.conversion_type !== "single_payment";
-  const activeBalance = numericAmount(paymentPlan.due_amount || activeStage?.due_amount || paymentPlan.total_amount);
-  const activeDueAmount = Math.max(0, activeBalance - numericAmount(activeStage?.amount));
+  const activeBalance = stageRemainingAmount(activeStage);
+  const activeDueAmount = Math.max(0, planDue - numericAmount(activeStage?.amount));
   const activeStageReceipt = stageReceipt(activeStage);
   const singlePaymentReceipt = [...(lead.receipts || [])].reverse().find((receipt) => !receipt.stage_id);
+  const invoiceReceipts = lead.final_invoice?.receipts?.length ? lead.final_invoice.receipts : (lead.receipts || []);
   const updateActiveAmount = (value) => {
     updateStagePatch(activeStageIndex, { amount: value, status: statusForPayment(value, activeBalance).toLowerCase().replaceAll(" ", "_") });
   };
@@ -636,6 +653,7 @@ function LeadDetail(props) {
                     <div className="flex flex-wrap gap-2">
                       <button onClick={() => makeStageReceipt(activeStage)} disabled={saving || activeStage.status === "paid" || (activeStageIndex > 0 && paymentPlan.stages[activeStageIndex - 1]?.status !== "paid") || !numericAmount(activeStage.amount) || numericAmount(activeStage.amount) > activeBalance} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><ReceiptText className="w-4 h-4" /> Generate Receipt & Continue</button>
                       {activeStageReceipt && <a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${activeStageReceipt.id}/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Receipt</a>}
+                      {activeStageReceipt && <a href={receiptDownloadUrl(wsId, lead.id, activeStageReceipt.id)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download Receipt</a>}
                     </div>
                   </div>
                 )}
@@ -663,6 +681,7 @@ function LeadDetail(props) {
             <div className="flex flex-wrap gap-2">
               <button onClick={() => createReceipt({ ...receiptForm, amount: receiptForm.paid_amount, payment_stage: "Single Payment" })} disabled={saving || !numericAmount(receiptForm.total_amount) || !numericAmount(receiptForm.paid_amount) || numericAmount(receiptForm.paid_amount) > numericAmount(receiptForm.total_amount) - numericAmount(receiptForm.existing_paid)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><ReceiptText className="w-4 h-4" /> Generate Receipt</button>
               {singlePaymentReceipt && <a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${singlePaymentReceipt.id}/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Receipt</a>}
+              {singlePaymentReceipt && <a href={receiptDownloadUrl(wsId, lead.id, singlePaymentReceipt.id)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download Receipt</a>}
             </div>
           </section>
         )}
@@ -670,7 +689,7 @@ function LeadDetail(props) {
         {detailTab === "Receipts" && isCustomer && (
           <section className="space-y-3">
             <h4 className="font-bold flex items-center gap-2"><ReceiptText className="w-4 h-4 text-primary" /> Receipt History</h4>
-            <div className="grid gap-2">{(lead.receipts || []).length === 0 ? <div className="text-xs text-muted-foreground p-3 rounded-lg border border-dashed">No payment transactions yet.</div> : (lead.receipts || []).map((receipt) => <a key={receipt.id} href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${receipt.id}/html`} target="_blank" rel="noreferrer" className="flex items-center justify-between p-3 rounded-lg border bg-background hover:bg-accent text-sm"><span>{receipt.receipt_number} - {receipt.transaction_id || "No transaction ID"} - {receipt.payment_stage}</span><ExternalLink className="w-4 h-4" /></a>)}</div>
+            <div className="grid gap-2">{(lead.receipts || []).length === 0 ? <div className="text-xs text-muted-foreground p-3 rounded-lg border border-dashed">No payment transactions yet.</div> : (lead.receipts || []).map((receipt) => <div key={receipt.id} className="flex items-center justify-between gap-3 p-3 rounded-lg border bg-background hover:bg-accent text-sm"><a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${receipt.id}/html`} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate"><span>{receipt.receipt_number} - {receipt.transaction_id || "No transaction ID"} - {receipt.payment_stage}</span></a><div className="flex items-center gap-2"><a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${receipt.id}/html`} target="_blank" rel="noreferrer" className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Open receipt"><ExternalLink className="w-4 h-4" /></a><a href={receiptDownloadUrl(wsId, lead.id, receipt.id)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Download receipt"><Download className="w-4 h-4" /></a></div></div>)}</div>
           </section>
         )}
 
@@ -703,7 +722,17 @@ function LeadDetail(props) {
           <section className="space-y-3">
             <h4 className="font-bold flex items-center gap-2"><FileText className="w-4 h-4 text-primary" /> Final Invoice</h4>
             <div className="text-xs text-muted-foreground rounded-lg border bg-background p-3">{canInvoice ? "All payment stages are paid. Final invoice can be generated." : "Generate receipts and mark every payment stage paid to enable final invoice."}</div>
-            <div className="flex flex-wrap gap-2"><button onClick={createInvoice} disabled={saving || !canInvoice} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><FileText className="w-4 h-4" /> Generate Final Invoice</button>{lead.final_invoice?.id && <a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/final-invoice/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Invoice</a>}</div>
+            <div className="flex flex-wrap gap-2"><button onClick={createInvoice} disabled={saving || !canInvoice} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><FileText className="w-4 h-4" /> Generate Final Invoice</button>{lead.final_invoice?.id && <a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/final-invoice/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Invoice</a>}{lead.final_invoice?.id && <a href={finalInvoiceDownloadUrl(wsId, lead.id)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download PDF</a>}</div>
+            {lead.final_invoice?.id && (
+              <div className="grid gap-2">
+                {invoiceReceipts.map((receipt) => (
+                  <div key={receipt.id} className="flex items-center justify-between gap-3 p-3 rounded-lg border bg-background text-sm">
+                    <span className="min-w-0 flex-1 truncate">{receipt.receipt_number} - {receipt.payment_stage}</span>
+                    <a href={receiptDownloadUrl(wsId, lead.id, receipt.id)} className="inline-flex items-center gap-2 px-3 h-8 rounded-lg border bg-background hover:bg-accent text-xs font-semibold"><Download className="w-4 h-4" /> Download Receipt</a>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         )}
 

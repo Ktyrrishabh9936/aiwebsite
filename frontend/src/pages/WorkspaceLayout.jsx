@@ -20,10 +20,10 @@ const nav = [
   { to: "", label: "Overview", icon: LayoutDashboard, end: true },
   { to: "projects", label: "Projects", icon: Boxes },
   { to: "brain", label: "Brain", icon: BrainIcon },
-  { to: "manager", label: "Manager", icon: MessageSquare },
-  { to: "tasks", label: "Tasks", icon: ListChecks },
+  // { to: "manager", label: "Manager", icon: MessageSquare },
+  // { to: "tasks", label: "Tasks", icon: ListChecks },
   { to: "blogs", label: "Blogs", icon: FileText },
-  { to: "embed", label: "Add Blog System", icon: Code2 },
+  // { to: "embed", label: "Add Blog System", icon: Code2 },
   { to: "workflows", label: "Workflows", icon: Workflow },
   { to: "crm", label: "CRM Leads", icon: Users },
 ];

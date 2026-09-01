@@ -2,12 +2,13 @@ import os
 import asyncio
 import logging
 import random
+import importlib.util
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / ".env")
+load_dotenv(ROOT_DIR / ".env", override=True)
 
 from fastapi import FastAPI, APIRouter, Request, HTTPException, Response, Body
 from fastapi.responses import StreamingResponse, PlainTextResponse
@@ -73,21 +74,34 @@ async def unique_slug(base):
 # ---------------- MODELS ----------------
 @api.get("/models")
 async def list_models():
-    def ready(provider):
-        if provider == "bedrock":
-            return bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or os.environ.get("AWS_ACCESS_KEY_ID"))
-        if provider == "openrouter":
-            return bool(os.environ.get("OPENROUTER_API_KEY"))
-        if provider == "nvidia":
-            return bool(os.environ.get("NVIDIA_NIM_API_KEY"))
-        return False
+    def has_python_package(name):
+        return importlib.util.find_spec(name) is not None
 
-    models = [{**m, "configured": ready(m.get("provider"))} for m in llm_service.MODELS]
+    def provider_status(provider):
+        if provider == "bedrock":
+            has_creds = bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or os.environ.get("AWS_ACCESS_KEY_ID"))
+            has_boto3 = has_python_package("boto3")
+            reason = ""
+            if not has_boto3:
+                reason = "boto3 is missing in the backend Python environment"
+            elif not has_creds:
+                reason = "AWS_BEARER_TOKEN_BEDROCK or AWS_ACCESS_KEY_ID is missing"
+            return {"configured": has_boto3 and has_creds, "reason": reason}
+        if provider == "openrouter":
+            ok = bool(os.environ.get("OPENROUTER_API_KEY"))
+            return {"configured": ok, "reason": "" if ok else "OPENROUTER_API_KEY is missing"}
+        if provider == "nvidia":
+            ok = bool(os.environ.get("NVIDIA_NIM_API_KEY"))
+            return {"configured": ok, "reason": "" if ok else "NVIDIA_NIM_API_KEY is missing"}
+        return {"configured": False, "reason": "Unknown provider"}
+
+    statuses = {provider: provider_status(provider) for provider in ("bedrock", "openrouter", "nvidia")}
+    models = [{**m, **provider_status(m.get("provider"))} for m in llm_service.MODELS]
     return {"models": models, "default": llm_service.DEFAULT_MODEL,
             "providers": {
-                "bedrock": {"configured": ready("bedrock"), "env": "AWS_BEARER_TOKEN_BEDROCK"},
-                "openrouter": {"configured": ready("openrouter"), "env": "OPENROUTER_API_KEY"},
-                "nvidia": {"configured": ready("nvidia"), "env": "NVIDIA_NIM_API_KEY"},
+                "bedrock": {**statuses["bedrock"], "env": "AWS_BEARER_TOKEN_BEDROCK"},
+                "openrouter": {**statuses["openrouter"], "env": "OPENROUTER_API_KEY"},
+                "nvidia": {**statuses["nvidia"], "env": "NVIDIA_NIM_API_KEY"},
             }}
 
 

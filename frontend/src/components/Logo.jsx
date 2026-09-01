@@ -12,7 +12,7 @@ export function LogoMark({ className = "w-7 h-7" }) {
 export function Logo({ className = "", to = "/" }) {
   const inner = (
     <span className={`inline-flex items-center gap-2 font-display font-black tracking-tight ${className}`}>
-      <LogoMark className="w-7 h-7" />
+      {/* <LogoMark className="w-7 h-7" /> */}
       <span>Arevei</span>
     </span>
   );

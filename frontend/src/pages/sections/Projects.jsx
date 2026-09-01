@@ -184,8 +184,8 @@ function ProjectDialog(props) {
               </DropdownMenuTrigger>
               <DropdownMenuContent className="w-64">
                 {models.map((m) => (
-                  <DropdownMenuItem key={m.id} onClick={() => setModelId(m.id)} className="flex justify-between cursor-pointer">
-                    <span>{m.label}</span><span className={m.configured ? "text-[10px] uppercase text-primary" : "text-[10px] uppercase text-amber-500"}>{m.configured ? m.tier : "key needed"}</span>
+                  <DropdownMenuItem key={m.id} disabled={!m.configured} onClick={() => setModelId(m.id)} title={m.reason || ""} className="flex justify-between cursor-pointer">
+                    <span>{m.label}</span><span className={m.configured ? "text-[10px] uppercase text-primary" : "text-[10px] uppercase text-amber-500"}>{m.configured ? m.tier : "setup needed"}</span>
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuContent>
