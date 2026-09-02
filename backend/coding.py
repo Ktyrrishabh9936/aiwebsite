@@ -162,6 +162,87 @@ def build_coding_router(db):
             raise HTTPException(403, "Forbidden")
         return proj
 
+    async def owned_workspace(ws_id, user):
+        if not ws_id:
+            return None
+        try:
+            ws = await db.workspaces.find_one({"_id": ObjectId(ws_id)})
+        except Exception:
+            return None
+        if not ws:
+            return None
+        if str(ws["user_id"]) != str(user["_id"]) and user.get("role") != "admin":
+            return None
+        return ws
+
+    async def owned_workspace_choices(user):
+        query = {} if user.get("role") == "admin" else {"user_id": str(user["_id"])}
+        docs = await db.workspaces.find(query).sort("created_at", -1).to_list(100)
+        return [
+            {
+                "id": str(doc["_id"]),
+                "name": doc.get("name", ""),
+                "website_url": doc.get("website_url", ""),
+                "brain_status": doc.get("brain_status", ""),
+            }
+            for doc in docs
+        ]
+
+    def public_api_base(request):
+        proto = request.headers.get("x-forwarded-proto", "https")
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+        return f"{proto}://{host}"
+
+    def blog_context_payload(ws, request):
+        if not ws:
+            return None
+        api_base = public_api_base(request)
+        key = ws.get("public_key", "")
+        return {
+            "workspace_name": ws.get("name", ""),
+            "publishable_blog_key": key,
+            "api_base_url": api_base,
+            "list_endpoint": f"{api_base}/api/public/blogs?key={key}",
+            "detail_endpoint_template": f"{api_base}/api/public/blog/{{slug}}",
+            "widget_script": f"<div id=\"arevei-blog\"></div>\n<script src=\"{api_base}/api/embed/widget.js?key={key}\" defer></script>",
+            "security_notes": [
+                "This is a frontend-safe publishable key for reading published blogs only.",
+                "Do not add private Arevei auth tokens, user tokens, admin keys, provider keys, or environment secrets.",
+                "Use only public blog endpoints in customer codebases.",
+            ],
+            "integration_rules": [
+                "Inspect the repo first and preserve its framework, routing, styling, spacing, typography, and component conventions.",
+                "Add loading, empty, and error states.",
+                "Never expose draft blogs or admin controls in the external project.",
+                "Use real data from the public Arevei blog endpoints. Do not hardcode sample blog posts unless the API response is empty.",
+                "If a previous implementation added placeholder blog data, replace it with API-backed rendering.",
+            ],
+        }
+
+    def blog_context_prompt(ctx):
+        if not ctx:
+            return ""
+        return (
+            "\n\nAREVEI BLOG INTEGRATION CONTEXT\n"
+            f"Workspace: {ctx['workspace_name']}\n"
+            f"Publishable Blog Key: {ctx['publishable_blog_key']}\n"
+            f"API Base URL: {ctx['api_base_url']}\n"
+            f"List published blogs: {ctx['list_endpoint']}\n"
+            f"Fetch one blog by slug: {ctx['detail_endpoint_template']}\n"
+            f"Widget snippet for static sites:\n{ctx['widget_script']}\n\n"
+            "Security rules:\n"
+            "- This is a frontend-safe publishable key for reading published blogs only.\n"
+            "- Do not add private Arevei auth tokens, user tokens, admin keys, provider keys, or environment secrets.\n"
+            "- Do not create/edit/publish/delete Arevei blogs from the customer codebase.\n\n"
+            "Implementation rules:\n"
+            "- Inspect the repository before editing and match its current framework and design language.\n"
+            "- Prefer a native integration for the stack; use the widget only for simple static sites or unknown stacks.\n"
+            "- Add loading, empty, and error states for the blog UI.\n"
+            "- Fetch real published posts from the Arevei public API.\n"
+            "- Do not hardcode fake/sample blog posts unless the API returns an empty list.\n"
+            "- If placeholder blog posts already exist in the project, replace them with API-backed rendering.\n"
+        )
+
     def out(p):
         p = dict(p)
         p["id"] = str(p.pop("_id"))
@@ -238,6 +319,7 @@ def build_coding_router(db):
             "name": body.get("name") or "Untitled project",
             "template": template,
             "model_id": body.get("model_id") or coding_agent.DEFAULT_CODING_MODEL,
+            "workspace_id": body.get("workspace_id") if await owned_workspace(body.get("workspace_id"), user) else None,
             "sandbox_id": None,
             "sandbox_status": "provisioning",
             "preview_url": None,
@@ -261,6 +343,7 @@ def build_coding_router(db):
             "name": body.get("name") or repo_url.rstrip("/").split("/")[-1].replace(".git", "") or "GitHub project",
             "template": "github",
             "model_id": body.get("model_id") or coding_agent.DEFAULT_CODING_MODEL,
+            "workspace_id": body.get("workspace_id") if await owned_workspace(body.get("workspace_id"), user) else None,
             "sandbox_id": None,
             "sandbox_status": "provisioning",
             "preview_url": None,
@@ -299,6 +382,18 @@ def build_coding_router(db):
         proj = await owned(pid, user)
         return out(proj)
 
+    @router.get("/projects/{pid}/blog-context")
+    async def blog_context(pid: str, request: Request):
+        user = await user_of(request)
+        proj = await owned(pid, user)
+        ws = await owned_workspace(proj.get("workspace_id"), user)
+        if not ws:
+            raise HTTPException(409, {
+                "message": "This coding project is not linked to a blog workspace",
+                "workspaces": await owned_workspace_choices(user),
+            })
+        return blog_context_payload(ws, request)
+
     @router.patch("/projects/{pid}")
     async def update_project(pid: str, request: Request, body: dict = Body(...)):
         user = await user_of(request)
@@ -306,6 +401,17 @@ def build_coding_router(db):
         updates = {k: v for k, v in body.items() if k in ("name", "model_id")}
         if updates:
             await db.code_projects.update_one({"_id": ObjectId(pid)}, {"$set": updates})
+        proj = await db.code_projects.find_one({"_id": ObjectId(pid)})
+        return out(proj)
+
+    @router.patch("/projects/{pid}/workspace")
+    async def link_workspace(pid: str, request: Request, body: dict = Body(...)):
+        user = await user_of(request)
+        await owned(pid, user)
+        ws = await owned_workspace(body.get("workspace_id"), user)
+        if not ws:
+            raise HTTPException(404, "Workspace not found")
+        await db.code_projects.update_one({"_id": ObjectId(pid)}, {"$set": {"workspace_id": str(ws["_id"])}})
         proj = await db.code_projects.find_one({"_id": ObjectId(pid)})
         return out(proj)
 
@@ -409,6 +515,8 @@ def build_coding_router(db):
 
         hist_docs = await db.code_messages.find({"project_id": pid}).sort("created_at", 1).to_list(500)
         history = [{"role": d["role"], "content": d["content"]} for d in hist_docs]
+        ws = await owned_workspace(proj.get("workspace_id"), user)
+        blog_ctx = blog_context_prompt(blog_context_payload(ws, request))
 
         await db.code_messages.insert_one({"project_id": pid, "role": "user", "content": message,
                                            "steps": [], "attachments": [{"name": a["name"], "mime_type": a["mime_type"], "size": a["size"]} for a in attachments], "created_at": now_iso()})
@@ -418,7 +526,7 @@ def build_coding_router(db):
             changed_files = []
             summary = "Done."
             try:
-                async for ev in coding_agent.run_agent(ops, model_id, history, message, attachments=attachments):
+                async for ev in coding_agent.run_agent(ops, model_id, history, message, attachments=attachments, extra_system_context=blog_ctx):
                     if ev.get("type") == "done":
                         collected_steps = ev.get("steps", [])
                         changed_files = ev.get("changed_files", [])

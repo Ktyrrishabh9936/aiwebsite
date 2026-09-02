@@ -159,7 +159,7 @@ def _collect_bedrock_stream(client, **kwargs):
     return message, stop_reason
 
 
-async def _run_bedrock_agent(ops, m, history, user_message, attachments):
+async def _run_bedrock_agent(ops, m, history, user_message, attachments, extra_system_context=""):
     client = _bedrock_client()
     messages = _bedrock_messages(history, user_message, attachments)
     steps = []
@@ -171,7 +171,7 @@ async def _run_bedrock_agent(ops, m, history, user_message, attachments):
             response = await asyncio.to_thread(
                 lambda: client.converse_stream(
                     modelId=m["real"],
-                    system=[{"text": SYSTEM}],
+                    system=[{"text": SYSTEM + (extra_system_context or "")}],
                     messages=messages,
                     toolConfig={"tools": BEDROCK_TOOLS},
                     inferenceConfig={"temperature": 0.2, "maxTokens": 8000},
@@ -240,16 +240,16 @@ async def _run_bedrock_agent(ops, m, history, user_message, attachments):
     yield {"type": "done", "steps": steps, "summary": final["text"], "changed_files": final["changed_files"]}
 
 
-async def run_agent(ops, model_id, history, user_message, attachments=None):
+async def run_agent(ops, model_id, history, user_message, attachments=None, extra_system_context=""):
     """Async generator yielding SSE event dicts with token-level streaming."""
     m = CODING_MODEL_MAP.get(model_id) or CODING_MODEL_MAP[DEFAULT_CODING_MODEL]
     if m["provider"] == "bedrock":
-        async for ev in _run_bedrock_agent(ops, m, history, user_message, attachments or []):
+        async for ev in _run_bedrock_agent(ops, m, history, user_message, attachments or [], extra_system_context):
             yield ev
         return
     client = _client(m["provider"])
 
-    messages = [{"role": "system", "content": SYSTEM}]
+    messages = [{"role": "system", "content": SYSTEM + (extra_system_context or "")}]
     for h in history[-8:]:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": _openai_user_content(user_message, attachments or [])})

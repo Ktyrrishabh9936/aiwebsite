@@ -249,7 +249,7 @@ function attachmentWarning(attachments, currentModel) {
 }
 
 export function AgentChat({ chatRef, messages, input, setInput, streaming, onSend, onStop, models, providers, currentModel, onModel, turns, attachments = [], setAttachments }) {
-  const suggestions = ["Build a landing page hero", "Add a contact form", "Make it dark mode", "Add a pricing section"];
+  const suggestions = ["Integrate Arevei Blogs", "Build a landing page hero", "Add a contact form", "Make it dark mode"];
   const groups = [...new Set(models.map((m) => m.tier || "other"))];
   const warning = attachmentWarning(attachments, currentModel);
 
@@ -358,7 +358,7 @@ export function AgentChat({ chatRef, messages, input, setInput, streaming, onSen
   );
 }
 
-export function TopBar({ project, onBack, onSync, onRun }) {
+export function TopBar({ project, onBack, onSync, onRun, onIntegrateBlogs }) {
   return (
     <header className="h-14 border-b border-border flex items-center px-4 gap-4 shrink-0">
       <button onClick={onBack} data-testid="code-back" className="grid place-items-center w-9 h-9 rounded-full hover:bg-accent"><ArrowLeft className="w-4 h-4" /></button>
@@ -370,6 +370,7 @@ export function TopBar({ project, onBack, onSync, onRun }) {
       </div>
       <div className="ml-auto flex items-center gap-2">
         <button onClick={onSync} data-testid="sync-btn" className="grid place-items-center w-9 h-9 rounded-full border border-border hover:bg-accent" title="Sync / wake sandbox"><RefreshCw className="w-4 h-4" /></button>
+        <button onClick={onIntegrateBlogs} data-testid="integrate-blogs-btn" className="inline-flex items-center gap-2 px-3 h-9 rounded-full border border-border hover:bg-accent text-sm font-semibold"><PlugZap className="w-4 h-4" /> Integrate Blogs</button>
         <button onClick={onRun} data-testid="run-btn" className="inline-flex items-center gap-2 px-4 h-9 rounded-full bg-primary text-primary-foreground text-sm font-semibold hover:-translate-y-0.5 transition-transform"><Play className="w-4 h-4" /> Run</button>
       </div>
     </header>

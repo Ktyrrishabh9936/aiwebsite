@@ -60,7 +60,10 @@ export default function Login() {
               <Input id="email" type="email" data-testid="login-email" value={email} onChange={(e) => setEmail(e.target.value)} required placeholder="admin@arevei.ai" />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="password">Password</Label>
+                <Link to="/forgot-password" data-testid="login-forgot-password-link" className="text-xs font-semibold text-primary hover:underline">Forgot password?</Link>
+              </div>
               <Input id="password" type="password" data-testid="login-password" value={password} onChange={(e) => setPassword(e.target.value)} required placeholder="••••••••" />
             </div>
             <button

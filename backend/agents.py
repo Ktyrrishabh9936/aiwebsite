@@ -117,14 +117,14 @@ Return JSON:
       "title": "",
       "objective": "",
       "agent": "content|seo|creative|analytics",
-      "deliverable_type": "blog_post|seo_audit|image_set|analytics_report|page_copy",
+      "deliverable_type": "blog_post|seo_audit|social_post_pack|analytics_report|page_copy",
       "success_criteria": "",
       "month_number": 1,
       "requires_approval": false
     }}
   ]
 }}
-At least half the tasks must be content agent blog_post tasks. Make blog titles specific and SEO-driven."""
+At least half the tasks must be content agent blog_post tasks. Use seo_audit for SEO tasks and social_post_pack for creative social content tasks. Make blog titles specific and SEO-driven."""
     data = await generate_json(model_id, MANAGER_SYSTEM, prompt, temperature=0.7, max_tokens=3500)
     return data.get("tasks", [])
 
@@ -187,3 +187,108 @@ Write a complete, publish-ready blog article. Return JSON:
 Write 6-10 sections. Use heading, paragraph, list, and quote block types. Make it genuinely useful and 900-1400 words."""
     data = await generate_json(model_id, CONTENT_SYSTEM, prompt, temperature=0.75, max_tokens=7000)
     return data
+
+
+SEO_SYSTEM = (
+    "You are the AREVEI SEO Agent. You produce structured, prioritized website SEO audits. "
+    "Be concrete, practical, and grounded in the business context. Do not use markdown."
+)
+
+
+async def write_seo_audit(model_id, brain, task_title, objective=""):
+    biz = json.dumps(brain.get("business_profile", {}), ensure_ascii=False)[:1800]
+    goals = json.dumps(brain.get("goals_constraints", {}), ensure_ascii=False)[:1200]
+    prompt = f"""Business: {biz}
+Goals and constraints: {goals}
+Task: {task_title}
+Objective: {objective}
+
+Return JSON with EXACTLY this shape:
+{{
+  "type": "seo_audit",
+  "summary": "2 sentence executive summary",
+  "sections": [
+    {{
+      "title": "Technical SEO",
+      "priority": "High|Medium|Low",
+      "issues": [
+        {{"title": "", "impact": "", "recommendation": ""}}
+      ]
+    }},
+    {{
+      "title": "On-Page SEO",
+      "priority": "High|Medium|Low",
+      "issues": [
+        {{"title": "", "impact": "", "recommendation": ""}}
+      ]
+    }},
+    {{
+      "title": "Content Issues",
+      "priority": "High|Medium|Low",
+      "issues": [
+        {{"title": "", "impact": "", "recommendation": ""}}
+      ]
+    }},
+    {{
+      "title": "Backlinks",
+      "priority": "High|Medium|Low",
+      "issues": [
+        {{"title": "", "impact": "", "recommendation": ""}}
+      ]
+    }},
+    {{
+      "title": "User Experience",
+      "priority": "High|Medium|Low",
+      "issues": [
+        {{"title": "", "impact": "", "recommendation": ""}}
+      ]
+    }}
+  ],
+  "action_plan": ["specific next action", "specific next action", "specific next action"]
+}}
+
+Include at least one issue per section. Make recommendations concise and actionable."""
+    return await generate_json(model_id, SEO_SYSTEM, prompt, temperature=0.45, max_tokens=5000)
+
+
+CREATIVE_SYSTEM = (
+    "You are the AREVEI Creative Agent. You produce platform-ready social media drafts and creative briefs. "
+    "Write usable post copy for LinkedIn, X, Instagram, and Facebook. Do not use markdown."
+)
+
+
+async def write_social_post_pack(model_id, brain, task_title, objective=""):
+    biz = json.dumps(brain.get("business_profile", {}), ensure_ascii=False)[:1600]
+    brand = json.dumps(brain.get("brand_identity", {}), ensure_ascii=False)[:1400]
+    audience = json.dumps(brain.get("audience", {}), ensure_ascii=False)[:1400]
+    prompt = f"""Business: {biz}
+Brand voice: {brand}
+Audience: {audience}
+Task: {task_title}
+Objective: {objective}
+
+Return JSON with EXACTLY this shape:
+{{
+  "type": "social_post_pack",
+  "summary": "one sentence describing the campaign angle",
+  "creative_brief": {{
+    "concept": "",
+    "visual_direction": "",
+    "asset_prompt": "",
+    "production_notes": ""
+  }},
+  "posts": {{
+    "linkedin": {{"caption": "", "hashtags": ["#Example"], "cta": ""}},
+    "x": {{"caption": "", "hashtags": ["#Example"], "cta": ""}},
+    "instagram": {{"caption": "", "hashtags": ["#Example"], "cta": ""}},
+    "facebook": {{"caption": "", "hashtags": ["#Example"], "cta": ""}}
+  }},
+  "recommended_publish_notes": ["best timing or audience note", "reuse or format note"],
+  "connector_status": {{
+    "enabled": false,
+    "message": "Social publishing connectors are not enabled in this version. Review and copy drafts for now."
+  }}
+}}
+
+Keep X caption under 260 characters. Make LinkedIn professional, Instagram visual and concise, Facebook conversational."""
+    return await generate_json(model_id, CREATIVE_SYSTEM, prompt, temperature=0.75, max_tokens=5000)

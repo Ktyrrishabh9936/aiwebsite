@@ -3,8 +3,10 @@ import asyncio
 import logging
 import random
 import importlib.util
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).parent
@@ -30,6 +32,9 @@ db = client[os.environ["DB_NAME"]]
 
 app = FastAPI(title="Arevei AI Manager")
 api = APIRouter(prefix="/api")
+PUBLIC_BLOG_RATE = {}
+PUBLIC_BLOG_RATE_LIMIT = 120
+PUBLIC_BLOG_RATE_WINDOW = 60
 
 
 def oid(v):
@@ -69,6 +74,74 @@ async def unique_slug(base):
         i += 1
         slug = f"{base}-{i}"
     return slug
+
+
+def _normalize_origin(value):
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value.rstrip("/")
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def _request_origin(request):
+    return _normalize_origin(request.headers.get("origin") or request.headers.get("referer") or "")
+
+
+def _clean_origins(origins):
+    if not isinstance(origins, list):
+        return []
+    cleaned = []
+    for origin in origins:
+        value = _normalize_origin(str(origin).strip())
+        if value and value not in cleaned:
+            cleaned.append(value)
+    return cleaned[:25]
+
+
+def _assert_blog_origin_allowed(ws, request):
+    allowed = ws.get("allowed_blog_origins") or []
+    seen_origin = _request_origin(request)
+    if allowed and seen_origin and seen_origin not in allowed:
+        raise HTTPException(403, "This origin is not allowed to read this workspace's published blogs")
+
+
+def _assert_public_blog_rate(ws, request):
+    key = ws.get("public_key") or str(ws.get("_id"))
+    host = request.client.host if request.client else "unknown"
+    bucket_key = f"{key}:{host}"
+    now = time.monotonic()
+    bucket = [ts for ts in PUBLIC_BLOG_RATE.get(bucket_key, []) if now - ts < PUBLIC_BLOG_RATE_WINDOW]
+    if len(bucket) >= PUBLIC_BLOG_RATE_LIMIT:
+        raise HTTPException(429, "Too many public blog requests")
+    bucket.append(now)
+    PUBLIC_BLOG_RATE[bucket_key] = bucket
+
+
+def _public_blog_list_item(doc):
+    return {
+        "title": doc.get("title", ""),
+        "slug": doc.get("slug", ""),
+        "excerpt": doc.get("excerpt", ""),
+        "hero_image": doc.get("hero_image", ""),
+        "read_time": doc.get("read_time", ""),
+        "tags": doc.get("tags", []),
+        "published_at": doc.get("published_at"),
+    }
+
+
+def _public_blog_detail(doc, ws):
+    return {
+        **_public_blog_list_item(doc),
+        "author": doc.get("author", ""),
+        "blocks": doc.get("blocks", []),
+        "content_html": doc.get("content_html", ""),
+        "meta_title": doc.get("meta_title", ""),
+        "meta_description": doc.get("meta_description", ""),
+        "workspace_name": ws.get("name") if ws else "",
+        "workspace_url": ws.get("website_url") if ws else "",
+    }
 
 
 # ---------------- MODELS ----------------
@@ -160,9 +233,22 @@ async def update_workspace(ws_id: str, request: Request, body: dict = Body(...))
     user = await require_user(request)
     await owned_workspace(ws_id, user)
     updates = {k: v for k, v in body.items() if k in ("model_id", "name")}
+    if "allowed_blog_origins" in body:
+        updates["allowed_blog_origins"] = _clean_origins(body.get("allowed_blog_origins"))
     if updates:
         await db.workspaces.update_one({"_id": oid(ws_id)}, {"$set": updates})
     doc = await db.workspaces.find_one({"_id": oid(ws_id)})
+    return doc_out(doc)
+
+
+@api.post("/workspaces/{ws_id}/public-key/rotate")
+async def rotate_public_key(ws_id: str, request: Request):
+    user = await require_user(request)
+    await owned_workspace(ws_id, user)
+    new_key = os.urandom(8).hex()
+    await db.workspaces.update_one({"_id": oid(ws_id)}, {"$set": {"public_key": new_key}})
+    doc = await db.workspaces.find_one({"_id": oid(ws_id)})
+    await notify(ws_id, "info", "Publishable blog key rotated", "Update any external blog integrations with the new key.")
     return doc_out(doc)
 
 
@@ -266,15 +352,38 @@ async def execute_task(task_doc):
                 await db.tasks.update_one({"_id": tid}, {"$set": {"status": "awaiting_approval", "output_ref": blog_id,
                                                                   "output_summary": f"Draft ready: {title}"}})
                 await notify(ws_id, "approval", "Blog draft awaiting approval", title)
+        elif task_doc.get("agent") == "seo" or task_doc.get("deliverable_type") == "seo_audit":
+            payload = await agents.write_seo_audit(model_id, brain, task_doc["title"], task_doc.get("objective", ""))
+            summary = payload.get("summary") or f"SEO audit ready: {task_doc['title']}"
+            await db.tasks.update_one({"_id": tid}, {"$set": {
+                "status": "done",
+                "deliverable_type": "seo_audit",
+                "output_summary": summary[:4000],
+                "output_payload": payload,
+            }})
+            await notify(ws_id, "success", "SEO audit ready", task_doc["title"])
+        elif task_doc.get("agent") == "creative" or task_doc.get("deliverable_type") in {"social_post_pack", "image_set"}:
+            payload = await agents.write_social_post_pack(model_id, brain, task_doc["title"], task_doc.get("objective", ""))
+            summary = payload.get("summary") or f"Social drafts ready: {task_doc['title']}"
+            await db.tasks.update_one({"_id": tid}, {"$set": {
+                "status": "done",
+                "deliverable_type": "social_post_pack",
+                "output_summary": summary[:4000],
+                "output_payload": payload,
+            }})
+            await notify(ws_id, "success", "Creative drafts ready", task_doc["title"])
         else:
-            # seo / creative / analytics -> textual deliverable
             summary = await llm_service.generate_text(
                 model_id,
                 f"You are the AREVEI {task_doc.get('agent')} agent.",
                 f"Task: {task_doc['title']}\nObjective: {task_doc.get('objective','')}\n"
                 f"Produce a concise, actionable deliverable (bullet points).",
                 max_tokens=1200)
-            await db.tasks.update_one({"_id": tid}, {"$set": {"status": "done", "output_summary": summary[:4000]}})
+            await db.tasks.update_one({"_id": tid}, {"$set": {
+                "status": "done",
+                "output_summary": summary[:4000],
+                "output_payload": {},
+            }})
             await notify(ws_id, "success", f"{task_doc.get('agent','agent').title()} task done", task_doc["title"])
     except Exception as e:
         logger.exception("task execution failed")
@@ -436,37 +545,45 @@ async def manager_chat(ws_id: str, request: Request, body: dict = Body(...)):
 
 # ---------------- PUBLIC (no auth) ----------------
 @api.get("/public/workspace")
-async def public_workspace(key: str):
+async def public_workspace(key: str, request: Request):
     ws = await db.workspaces.find_one({"public_key": key})
     if not ws:
         raise HTTPException(404, "Not found")
+    _assert_blog_origin_allowed(ws, request)
+    _assert_public_blog_rate(ws, request)
     return {"name": ws.get("name"), "website_url": ws.get("website_url")}
 
 
 @api.get("/public/blogs")
-async def public_blogs(key: str):
+async def public_blogs(key: str, request: Request):
     ws = await db.workspaces.find_one({"public_key": key})
     if not ws:
         raise HTTPException(404, "Not found")
+    _assert_blog_origin_allowed(ws, request)
+    _assert_public_blog_rate(ws, request)
     docs = await db.blogs.find({"workspace_id": str(ws["_id"]), "status": "published"}).sort("published_at", -1).to_list(100)
-    return [{"title": d["title"], "slug": d["slug"], "excerpt": d.get("excerpt", ""),
-             "hero_image": d.get("hero_image", ""), "read_time": d.get("read_time", ""),
-             "tags": d.get("tags", []), "published_at": d.get("published_at")} for d in docs]
+    return [_public_blog_list_item(d) for d in docs]
 
 
 @api.get("/public/blog/{slug}")
-async def public_blog(slug: str):
+async def public_blog(slug: str, request: Request):
     blog = await db.blogs.find_one({"slug": slug, "status": "published"})
     if not blog:
         raise HTTPException(404, "Blog not found")
     ws = await db.workspaces.find_one({"_id": oid(blog["workspace_id"])})
-    return {**doc_out(blog), "workspace_name": ws.get("name") if ws else "",
-            "workspace_url": ws.get("website_url") if ws else "",
-            "public_key": ws.get("public_key") if ws else ""}
+    if ws:
+        _assert_blog_origin_allowed(ws, request)
+        _assert_public_blog_rate(ws, request)
+    return _public_blog_detail(blog, ws)
 
 
 @api.get("/embed/widget.js")
 async def widget_js(key: str, request: Request):
+    ws = await db.workspaces.find_one({"public_key": key})
+    if not ws:
+        raise HTTPException(404, "Not found")
+    _assert_blog_origin_allowed(ws, request)
+    _assert_public_blog_rate(ws, request)
     proto = request.headers.get("x-forwarded-proto", "https")
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
     backend = f"{proto}://{host}"
@@ -478,11 +595,19 @@ async def widget_js(key: str, request: Request):
   var mount = document.getElementById("arevei-blog") || (function(){var d=document.createElement('div');d.id='arevei-blog';document.body.appendChild(d);return d;})();
   var css = "#arevei-blog{font-family:system-ui,sans-serif;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:20px}#arevei-blog a{text-decoration:none;color:inherit;border:1px solid #e5e5e5;border-radius:10px;overflow:hidden;display:block;transition:transform .2s}#arevei-blog a:hover{transform:translateY(-4px)}#arevei-blog img{width:100%%;height:160px;object-fit:cover}#arevei-blog .b{padding:16px}#arevei-blog h3{margin:0 0 8px;font-size:17px}#arevei-blog p{margin:0;color:#666;font-size:14px}";
   var s=document.createElement('style');s.innerHTML=css;document.head.appendChild(s);
-  fetch(api+"/api/public/blogs?key="+key).then(function(r){return r.json()}).then(function(list){
+  function esc(v){return String(v||'').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+  fetch(api+"/api/public/blogs?key="+encodeURIComponent(key)).then(function(r){
+    return r.json().catch(function(){return {};}).then(function(data){
+      if(!r.ok){throw new Error(data.detail||('HTTP '+r.status));}
+      if(!Array.isArray(data)){throw new Error('Unexpected blog response');}
+      return data;
+    });
+  }).then(function(list){
+    if(!list.length){mount.innerHTML='No published blogs yet.';return;}
     mount.innerHTML = list.map(function(b){
-      return '<a href="'+api.replace(/\\/api$/,'')+'/blog/'+b.slug+'" target="_blank"><img src="'+(b.hero_image||'')+'"/><div class="b"><h3>'+b.title+'</h3><p>'+(b.excerpt||'')+'</p></div></a>';
+      return '<a href="'+api.replace(/\\/api$/,'')+'/blog/'+encodeURIComponent(b.slug)+'" target="_blank"><img src="'+esc(b.hero_image)+'" alt=""/><div class="b"><h3>'+esc(b.title)+'</h3><p>'+esc(b.excerpt)+'</p></div></a>';
     }).join('');
-  }).catch(function(e){mount.innerHTML='Unable to load blogs.';});
+  }).catch(function(e){mount.innerHTML='Unable to load blogs: '+esc(e.message||'check blog key and allowed origins')+'.';});
 })();
 """ % (key, backend)
     return PlainTextResponse(js, media_type="application/javascript")
@@ -643,9 +768,12 @@ app.add_middleware(
 async def startup():
     app.state.db = db
     await db.users.create_index("email", unique=True)
+    await db.password_reset_tokens.create_index("token_hash", unique=True)
+    await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
     await db.workspaces.create_index("public_key")
     await db.blogs.create_index("slug", unique=True)
     await db.code_projects.create_index("user_id")
+    await db.code_projects.create_index("workspace_id")
     await db.workflows.create_index([("workspace_id", 1), ("kind", 1)])
     await db.crm_leads.create_index([("workspace_id", 1), ("sheet_row_key", 1)], unique=True)
     await db.crm_settings.create_index("workspace_id", unique=True)

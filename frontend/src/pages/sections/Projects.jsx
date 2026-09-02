@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useOutletContext } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
   AlertCircle, CheckCircle2, Code2, Github, Loader2, Plus, Terminal, Trash2
@@ -20,6 +20,7 @@ const projectStatus = {
 };
 
 export default function Projects() {
+  const { ws } = useOutletContext();
   const nav = useNavigate();
   const [projects, setProjects] = useState([]);
   const [models, setModels] = useState([]);
@@ -57,7 +58,7 @@ export default function Projects() {
     e.preventDefault();
     setCreatingProject(true);
     try {
-      const payload = { name, model_id: projectModelId, template };
+      const payload = { name, model_id: projectModelId, template, workspace_id: ws.id };
       const r = source === "github"
         ? await api.post("/code/projects/import/github", { ...payload, repo_url: repoUrl, branch: branch || undefined })
         : await api.post("/code/projects", payload);

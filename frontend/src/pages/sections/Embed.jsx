@@ -7,7 +7,12 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../../components/ui/ta
 
 function CodeBlock({ code, testid }) {
   const [copied, setCopied] = useState(false);
-  const copy = () => { navigator.clipboard.writeText(code); setCopied(true); toast.success("Copied"); setTimeout(() => setCopied(false), 1500); };
+  const copy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    toast.success("Copied");
+    setTimeout(() => setCopied(false), 1500);
+  };
   return (
     <div className="relative border border-border rounded-md bg-secondary/50 overflow-hidden">
       <button onClick={copy} data-testid={testid} className="absolute top-3 right-3 inline-flex items-center gap-1.5 px-3 h-8 rounded-full bg-primary text-primary-foreground text-xs font-medium">
@@ -21,29 +26,51 @@ function CodeBlock({ code, testid }) {
 export default function Embed() {
   const { ws } = useOutletContext();
   const [count, setCount] = useState(0);
-  const backend = process.env.REACT_APP_BACKEND_URL;
+  const [previewPosts, setPreviewPosts] = useState([]);
+  const [previewLoading, setPreviewLoading] = useState(true);
+  const [previewError, setPreviewError] = useState("");
+  const backend = process.env.REACT_APP_BACKEND_URL || window.location.origin;
   const origin = window.location.origin;
   const key = ws.public_key;
 
   useEffect(() => {
-    api.get(`/public/blogs?key=${key}`).then((r) => setCount(r.data.length)).catch(() => {});
-  }, [key]);
+    setPreviewLoading(true);
+    setPreviewError("");
+    api.get(`/workspaces/${ws.id}/blogs`)
+      .then((r) => {
+        const published = (r.data || []).filter((post) => post.status === "published");
+        setPreviewPosts(published);
+        setCount(published.length);
+      })
+      .catch((e) => setPreviewError(e.response?.data?.detail || "Could not load blog preview"))
+      .finally(() => setPreviewLoading(false));
+  }, [ws.id]);
 
-  const scriptSnippet = `<!-- Arevei Blog System — paste where blogs should render -->
+  const scriptSnippet = `<!-- Arevei Blog System - uses a publishable read-only blog key -->
 <div id="arevei-blog"></div>
 <script src="${backend}/api/embed/widget.js?key=${key}" defer></script>`;
 
   const reactSnippet = `import { useEffect, useState } from "react";
 
-const AREVEI_KEY = "${key}";
+const AREVEI_PUBLISHABLE_BLOG_KEY = "${key}";
 const AREVEI_API = "${backend}";
 
 export function AreveiBlog() {
   const [posts, setPosts] = useState([]);
+  const [error, setError] = useState("");
   useEffect(() => {
-    fetch(\`\${AREVEI_API}/api/public/blogs?key=\${AREVEI_KEY}\`)
-      .then(r => r.json()).then(setPosts);
+    fetch(\`\${AREVEI_API}/api/public/blogs?key=\${AREVEI_PUBLISHABLE_BLOG_KEY}\`)
+      .then(async r => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.detail || \`HTTP \${r.status}\`);
+        if (!Array.isArray(data)) throw new Error("Unexpected blog response");
+        return data;
+      })
+      .then(setPosts)
+      .catch(e => setError(e.message || "Unable to load blogs"));
   }, []);
+  if (error) return <p>Unable to load blogs: {error}.</p>;
+  if (posts.length === 0) return <p>No published blogs yet.</p>;
   return (
     <div style={{display:"grid",gap:20,gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))"}}>
       {posts.map(p => (
@@ -57,10 +84,10 @@ export function AreveiBlog() {
   );
 }`;
 
-  const apiSnippet = `# List published blogs (JSON)
+  const apiSnippet = `# List published blogs with a publishable read-only key
 GET ${backend}/api/public/blogs?key=${key}
 
-# Fetch a single blog by slug
+# Fetch a single published blog by slug
 GET ${backend}/api/public/blog/{slug}`;
 
   return (
@@ -68,19 +95,23 @@ GET ${backend}/api/public/blog/{slug}`;
       <div>
         <h1 className="font-display text-3xl font-black tracking-tight">Add Blog System</h1>
         <p className="text-muted-foreground mt-1">
-          Drop your Arevei-managed blog into any codebase. This app stays the control panel — you write & publish here,
-          it appears there automatically. {count} published post{count === 1 ? "" : "s"} live.
+          Drop your Arevei-managed blog into any codebase. This app stays the control panel - you write and publish here,
+          it appears there automatically through a frontend-safe read-only key. {count} published post{count === 1 ? "" : "s"} live.
         </p>
       </div>
 
       <div className="border border-border rounded-md bg-card p-5 flex items-center justify-between flex-wrap gap-3">
         <div>
-          <div className="text-xs uppercase tracking-[0.2em] font-bold text-primary mb-1">Public key</div>
+          <div className="text-xs uppercase tracking-[0.2em] font-bold text-primary mb-1">Publishable Blog Key</div>
           <div className="font-mono text-sm">{key}</div>
         </div>
-        <button onClick={() => { navigator.clipboard.writeText(key); toast.success("Key copied"); }} data-testid="copy-key-btn" className="inline-flex items-center gap-2 px-4 h-10 rounded-full border border-border hover:bg-accent text-sm font-medium">
+        <button onClick={() => { navigator.clipboard.writeText(key); toast.success("Publishable key copied"); }} data-testid="copy-key-btn" className="inline-flex items-center gap-2 px-4 h-10 rounded-full border border-border hover:bg-accent text-sm font-medium">
           <Copy className="w-4 h-4" /> Copy key
         </button>
+      </div>
+
+      <div className="rounded-md border border-border bg-secondary/30 p-4 text-sm leading-6 text-muted-foreground">
+        This key is safe to place in frontend code because it can only read published blog content. Private Arevei auth tokens, admin keys, and model provider keys should never be added to customer codebases.
       </div>
 
       <Tabs defaultValue="script">
@@ -105,12 +136,27 @@ GET ${backend}/api/public/blog/{slug}`;
 
       <div className="border border-border rounded-md bg-card p-6">
         <div className="text-xs uppercase tracking-[0.2em] font-bold text-primary mb-3">Live preview</div>
-        <iframe
-          title="embed-preview"
-          data-testid="embed-preview"
-          className="w-full h-72 rounded-md border border-border bg-background"
-          srcDoc={`<!doctype html><html><body style="margin:0;padding:16px;font-family:system-ui">${scriptSnippet.replace(/<!--.*?-->/, "")}</body></html>`}
-        />
+        <div data-testid="embed-preview" className="min-h-72 rounded-md border border-border bg-background p-4">
+          {previewLoading ? (
+            <div className="text-sm text-muted-foreground">Loading preview...</div>
+          ) : previewError ? (
+            <div className="text-sm text-destructive">{previewError}</div>
+          ) : previewPosts.length === 0 ? (
+            <div className="text-sm text-muted-foreground">No published blogs yet.</div>
+          ) : (
+            <div className="grid gap-5 sm:grid-cols-2">
+              {previewPosts.map((post) => (
+                <a key={post.id} href={`/blog/${post.slug}`} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-md border border-border transition hover:-translate-y-0.5">
+                  {post.hero_image && <img src={post.hero_image} alt="" className="h-36 w-full object-cover" />}
+                  <div className="p-4">
+                    <h3 className="font-display font-bold leading-snug">{post.title}</h3>
+                    <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{post.excerpt}</p>
+                  </div>
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Loader2 } from "lucide-react";
+import { Code2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import api, { API } from "../lib/api";
 import { useTheme } from "../context/ThemeContext";
 import { AgentChat, CenterBlock, FilesPanel, TopBar } from "../components/code/CodeParts";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
 
 export default function CodeWorkspace() {
   const { pid } = useParams();
@@ -26,6 +27,9 @@ export default function CodeWorkspace() {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState([]);
   const [streaming, setStreaming] = useState(false);
+  const [workspaces, setWorkspaces] = useState([]);
+  const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
+  const [linkingWorkspace, setLinkingWorkspace] = useState(null);
   const chatRef = useRef(null);
   const abortRef = useRef(null);
 
@@ -47,6 +51,17 @@ export default function CodeWorkspace() {
     const r = await api.get(`/code/projects/${pid}`); setProject(r.data); return r.data;
   }, [pid]);
 
+  const loadWorkspaces = useCallback(async () => {
+    try {
+      const r = await api.get("/workspaces");
+      setWorkspaces(r.data || []);
+      return r.data || [];
+    } catch {
+      setWorkspaces([]);
+      return [];
+    }
+  }, []);
+
   const openFile = useCallback(async (path) => {
     try {
       const r = await api.get(`/code/projects/${pid}/file`, { params: { path } });
@@ -59,6 +74,7 @@ export default function CodeWorkspace() {
       const p = await loadProject();
       api.get("/code/models").then((r) => { setModels(r.data.models); setProviders(r.data.providers || {}); });
       api.get(`/code/projects/${pid}/messages`).then((r) => setMessages(r.data)).catch(() => {});
+      loadWorkspaces();
       let status = p.sandbox_status;
       while (status === "provisioning") {
         await new Promise((res) => setTimeout(res, 3500));
@@ -157,6 +173,36 @@ export default function CodeWorkspace() {
 
   const changeModel = async (id) => { const r = await api.patch(`/code/projects/${pid}`, { model_id: id }); setProject(r.data); };
   const sync = () => { loadFiles(); loadProject(); toast.success("Sandbox synced"); };
+  const blogIntegrationPrompt = "Integrate this project with my Arevei blog system using the current workspace publishable blog API. Inspect the repo first, match the existing UI/design/routing style, remove any fake or hardcoded placeholder blog posts, fetch real published posts from the Arevei public API, add blog list and article detail UI when the stack supports it, render a proper empty state if no posts are returned, and do not add any private tokens or secrets.";
+  const integrateBlogs = async () => {
+    try {
+      await api.get(`/code/projects/${pid}/blog-context`);
+      await send(blogIntegrationPrompt);
+    } catch (err) {
+      if (err.response?.status === 409) {
+        const choices = err.response?.data?.detail?.workspaces || await loadWorkspaces();
+        setWorkspaces(choices);
+        if (choices.length === 0) toast.error("Create a blog workspace first.");
+        else setWorkspacePickerOpen(true);
+        return;
+      }
+      toast.error("Could not load blog integration context.");
+    }
+  };
+  const linkAndIntegrate = async (workspaceId) => {
+    setLinkingWorkspace(workspaceId);
+    try {
+      const r = await api.patch(`/code/projects/${pid}/workspace`, { workspace_id: workspaceId });
+      setProject(r.data);
+      setWorkspacePickerOpen(false);
+      toast.success("Blog workspace linked");
+      await send(blogIntegrationPrompt);
+    } catch {
+      toast.error("Could not link blog workspace");
+    } finally {
+      setLinkingWorkspace(null);
+    }
+  };
   const backToProjects = async () => {
     try {
       const r = await api.get("/workspaces");
@@ -176,7 +222,7 @@ export default function CodeWorkspace() {
 
   return (
     <div className="h-screen flex flex-col bg-background">
-      <TopBar project={project} onBack={backToProjects} onSync={sync} onRun={runDev} />
+      <TopBar project={project} onBack={backToProjects} onSync={sync} onRun={runDev} onIntegrateBlogs={integrateBlogs} />
       <div className="flex-1 flex min-h-0">
         <AgentChat chatRef={chatRef} messages={messages} input={input} setInput={setInput} streaming={streaming}
           onSend={send} onStop={stop} models={models} providers={providers} currentModel={currentModel} onModel={changeModel} turns={turns}
@@ -188,6 +234,34 @@ export default function CodeWorkspace() {
           termLines={termLines} termInput={termInput} setTermInput={setTermInput} onRunTerminal={runTerminal} />
         {showFiles && <FilesPanel tree={tree} activePath={activeFile?.path} onOpen={openFile} onRefresh={loadFiles} />}
       </div>
+      <Dialog open={workspacePickerOpen} onOpenChange={setWorkspacePickerOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="font-display">Choose blog workspace</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">Choose which Arevei workspace should supply published blog posts for this code project.</p>
+            <div className="space-y-2">
+              {workspaces.map((workspace) => (
+                <button
+                  key={workspace.id}
+                  onClick={() => linkAndIntegrate(workspace.id)}
+                  disabled={!!linkingWorkspace}
+                  className="flex w-full items-start gap-3 rounded-md border border-border p-4 text-left transition-colors hover:bg-accent disabled:opacity-60"
+                >
+                  <div className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-primary/10 text-primary">
+                    {linkingWorkspace === workspace.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Code2 className="h-4 w-4" />}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="font-semibold truncate">{workspace.name}</div>
+                    <div className="text-xs text-muted-foreground truncate">{workspace.website_url}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
