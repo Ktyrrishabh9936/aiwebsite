@@ -1,6 +1,7 @@
 import html
 import re
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
 from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
@@ -28,6 +29,7 @@ VALID_FIELD_TYPES = {
 VALID_STAGE_STATUSES = {"pending", "partially_paid", "paid"}
 VALID_PLAN_STATUSES = {"draft", "active", "completed", "cancelled"}
 SYSTEM_FIELD_KEYS = {"phone"}
+TRASH_RETENTION_DAYS = 30
 
 DEFAULT_FIELDS = [
     {"key": "phone", "label": "Phone", "type": "phone", "required": True, "system": True, "active": True, "options": []},
@@ -91,6 +93,18 @@ def doc_out(doc):
     doc = dict(doc)
     doc["id"] = str(doc.pop("_id"))
     return doc
+
+
+def iso_after_days(days):
+    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+
+
+async def purge_expired_trashed_leads(db, ws_id):
+    await db.crm_leads.delete_many({
+        "workspace_id": ws_id,
+        "deleted_at": {"$ne": None},
+        "delete_after": {"$lte": now_iso()},
+    })
 
 
 def keyify(value):
@@ -255,6 +269,57 @@ def validate_field_values(values, settings):
         if field.get("required") and not str(clean.get(key, "")).strip():
             raise HTTPException(status_code=400, detail=f"{field['label']} is required")
     return clean
+
+
+def lead_query(ws_id, include_trashed=False, only_trashed=False):
+    q = {"workspace_id": ws_id}
+    if only_trashed:
+        q["deleted_at"] = {"$ne": None}
+    elif not include_trashed:
+        q["$or"] = [{"deleted_at": {"$exists": False}}, {"deleted_at": None}]
+    return q
+
+
+def build_manual_lead(ws_id, body, settings):
+    body = body or {}
+    states = {s["key"] for s in settings.get("states", [])}
+    status = body.get("status") or "new"
+    if status not in states:
+        raise HTTPException(status_code=400, detail="Invalid status value")
+    incoming_values = body.get("field_values")
+    if incoming_values is None:
+        incoming_values = {f["key"]: body[f["key"]] for f in active_fields(settings) if f["key"] in body}
+    values = validate_field_values(incoming_values or {}, settings)
+    lead_id = ObjectId()
+    now = now_iso()
+    return {
+        "_id": lead_id,
+        "workspace_id": ws_id,
+        "workflow_kind": "ads_to_crm",
+        "source": values.get("source") or "manual",
+        "sheet_row_key": f"manual:{lead_id}",
+        "email": values.get("email"),
+        "full_name": values.get("full_name"),
+        "phone": values.get("phone"),
+        "address": values.get("address"),
+        "assigned_salesperson": values.get("assigned_salesperson"),
+        "notes": "",
+        "lead_notes": [],
+        "fields": {},
+        "field_values": values,
+        "status": status,
+        "customer_status": "lead",
+        "conversion_type": None,
+        "converted_at": None,
+        "payment_plan": {},
+        "timeline": [{"type": "created", "label": "Lead created manually", "created_at": now}],
+        "receipts": [],
+        "final_invoice": {},
+        "deleted_at": None,
+        "delete_after": None,
+        "created_at": now,
+        "updated_at": now,
+    }
 
 
 def normalize_payment_stage(stage):
@@ -990,10 +1055,19 @@ async def update_organization(ws_id: str, request: Request, body: dict = Body(..
 
 
 @router.get("/leads")
-async def list_leads(ws_id: str, request: Request, status: str = Query(None), page: int = Query(None), limit: int = Query(20), search: str = Query("")):
+async def list_leads(
+    ws_id: str,
+    request: Request,
+    status: str = Query(None),
+    page: int = Query(None),
+    limit: int = Query(20),
+    search: str = Query(""),
+    trashed: bool = Query(False),
+):
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
-    q = {"workspace_id": ws_id}
+    await purge_expired_trashed_leads(db, ws_id)
+    q = lead_query(ws_id, only_trashed=trashed)
     if status:
         q["status"] = status
     all_docs = await db.crm_leads.find(q).sort("created_at", -1).to_list(1000)
@@ -1017,14 +1091,58 @@ async def list_leads(ws_id: str, request: Request, status: str = Query(None), pa
     }
 
 
+@router.post("/leads")
+async def create_lead(ws_id: str, request: Request, body: dict = Body(...)):
+    db = db_from(request)
+    settings = await ensure_crm_settings(db, ws_id)
+    await purge_expired_trashed_leads(db, ws_id)
+    lead_doc = build_manual_lead(ws_id, body, settings)
+    await db.crm_leads.insert_one(lead_doc)
+    return decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": lead_doc["_id"]}), settings)
+
+
 @router.get("/leads/{lead_id}")
 async def get_lead(ws_id: str, lead_id: str, request: Request):
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
+    await purge_expired_trashed_leads(db, ws_id)
     doc = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
     if not doc:
         raise HTTPException(status_code=404, detail="Lead not found")
     return decorate_lead(doc, settings)
+
+
+@router.delete("/leads/{lead_id}")
+async def trash_lead(ws_id: str, lead_id: str, request: Request):
+    db = db_from(request)
+    settings = await ensure_crm_settings(db, ws_id)
+    await purge_expired_trashed_leads(db, ws_id)
+    now = now_iso()
+    result = await db.crm_leads.update_one(
+        {
+            "workspace_id": ws_id,
+            "_id": oid(lead_id),
+            "$or": [{"deleted_at": {"$exists": False}}, {"deleted_at": None}],
+        },
+        {"$set": {"deleted_at": now, "delete_after": iso_after_days(TRASH_RETENTION_DAYS), "updated_at": now}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    return decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)}), settings)
+
+
+@router.post("/leads/{lead_id}/restore")
+async def restore_lead(ws_id: str, lead_id: str, request: Request):
+    db = db_from(request)
+    settings = await ensure_crm_settings(db, ws_id)
+    await purge_expired_trashed_leads(db, ws_id)
+    result = await db.crm_leads.update_one(
+        {"workspace_id": ws_id, "_id": oid(lead_id), "deleted_at": {"$ne": None}},
+        {"$set": {"updated_at": now_iso()}, "$unset": {"deleted_at": "", "delete_after": ""}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Lead not found in trash")
+    return decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)}), settings)
 
 
 @router.get("/leads/{lead_id}/notes")

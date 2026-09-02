@@ -139,6 +139,8 @@ class CRMLead(BaseDocument):
     timeline: List[dict] = Field(default_factory=list)
     receipts: List[dict] = Field(default_factory=list)
     final_invoice: dict = Field(default_factory=dict)
+    deleted_at: Optional[str] = None
+    delete_after: Optional[str] = None
     created_at: str = Field(default_factory=now_iso)
     updated_at: str = Field(default_factory=now_iso)
 

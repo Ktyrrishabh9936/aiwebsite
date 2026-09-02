@@ -3,7 +3,7 @@ import {
   Folder, FolderOpen, File as FileIcon, RefreshCw, TerminalSquare, Search,
   FileEdit, Loader2, CheckCircle2, ChevronDown, Send, Sparkles, History,
   Code2, Monitor, Save, PanelRight, Play, ArrowLeft, Square, Wrench, PlugZap,
-  Plus, X, Image as ImageIcon, ExternalLink, RotateCcw,
+  X, Image as ImageIcon, ExternalLink, RotateCcw,
 } from "lucide-react";
 import Editor from "@monaco-editor/react";
 import {
@@ -253,7 +253,7 @@ export function AgentChat({ chatRef, messages, input, setInput, streaming, onSen
   const groups = [...new Set(models.map((m) => m.tier || "other"))];
   const warning = attachmentWarning(attachments, currentModel);
 
-  const addImages = async (files) => {
+  /* const addImages = async (files) => {
     const selected = Array.from(files || []);
     const allowed = new Set(["image/png", "image/jpeg", "image/webp"]);
     const next = [];
@@ -273,7 +273,7 @@ export function AgentChat({ chatRef, messages, input, setInput, streaming, onSen
       });
     }
     setAttachments((prev) => [...prev, ...next].slice(0, 3));
-  };
+  }; */
   return (
     <div className="w-[380px] shrink-0 border-r border-border flex flex-col min-h-0">
       <div className="h-11 px-4 flex items-center justify-between border-b border-border">
@@ -313,11 +313,11 @@ export function AgentChat({ chatRef, messages, input, setInput, streaming, onSen
             </div>
           )}
           {warning && <div className="px-3 pb-2 text-xs text-amber-500">{warning}</div>}
-          <div className="flex items-center justify-between px-2 pb-2">
-            <label className="grid place-items-center w-8 h-8 rounded-full border border-border hover:bg-accent cursor-pointer" title="Attach reference images">
+          <div className="flex items-center justify-end px-2 pb-2">
+            {/* <label className="grid place-items-center w-8 h-8 rounded-full border border-border hover:bg-accent cursor-pointer" title="Attach reference images">
               <Plus className="w-4 h-4" />
               <input type="file" accept="image/png,image/jpeg,image/webp" multiple className="hidden" onChange={(e) => { addImages(e.target.files); e.target.value = ""; }} />
-            </label>
+            </label> */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button data-testid="agent-model-picker" className="inline-flex items-center gap-1.5 px-2.5 h-7 rounded-full border border-border text-xs font-medium hover:bg-accent">

@@ -9,8 +9,11 @@ from crm import (  # noqa: E402
     DEFAULT_FIELDS,
     DEFAULT_ORGANIZATION,
     DEFAULT_STATES,
+    TRASH_RETENTION_DAYS,
+    build_manual_lead,
     effective_organization,
     invoice_html,
+    lead_query,
     invoice_pdf,
     normalize_field,
     normalize_lead_note,
@@ -56,6 +59,41 @@ def test_required_phone_validation_uses_crm_field_values():
 
     values = validate_field_values({"phone": "999", "email": "diya@example.com", "unknown": "ignored"}, settings)
     assert values == {"phone": "999", "email": "diya@example.com"}
+
+
+def test_manual_lead_uses_active_fields_and_required_phone():
+    settings = {"fields": DEFAULT_FIELDS, "states": DEFAULT_STATES}
+
+    lead = build_manual_lead("workspace-1", {"field_values": {"phone": "999", "full_name": "Diya Sharma"}}, settings)
+
+    assert str(lead["_id"]) in lead["sheet_row_key"]
+    assert lead["source"] == "manual"
+    assert lead["status"] == "new"
+    assert lead["customer_status"] == "lead"
+    assert lead["phone"] == "999"
+    assert lead["field_values"] == {"phone": "999", "full_name": "Diya Sharma"}
+    assert lead["deleted_at"] is None
+    assert lead["delete_after"] is None
+
+
+def test_manual_lead_rejects_invalid_status():
+    settings = {"fields": DEFAULT_FIELDS, "states": DEFAULT_STATES}
+
+    try:
+        build_manual_lead("workspace-1", {"status": "archived", "field_values": {"phone": "999"}}, settings)
+        assert False, "invalid status should fail"
+    except HTTPException as exc:
+        assert exc.status_code == 400
+
+
+def test_lead_query_separates_active_and_trash():
+    active = lead_query("workspace-1")
+    trash = lead_query("workspace-1", only_trashed=True)
+
+    assert active["workspace_id"] == "workspace-1"
+    assert active["$or"] == [{"deleted_at": {"$exists": False}}, {"deleted_at": None}]
+    assert trash == {"workspace_id": "workspace-1", "deleted_at": {"$ne": None}}
+    assert TRASH_RETENTION_DAYS == 30
 
 
 def test_payment_plan_stays_embedded_and_completes_by_stage_status():

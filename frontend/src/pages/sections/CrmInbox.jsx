@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
-  Users, Calendar, Info, Search, ChevronRight, XCircle, Save, BadgeIndianRupee,
+  Users, Calendar, Info, Search, XCircle, Save, BadgeIndianRupee,
   Plus, CheckCircle2, Settings, Trash2, Columns3, Palette, Building2,
   ReceiptText, FileText, ExternalLink, RefreshCw, FileCode2, MessageSquare, Send,
-  Download
+  Download, RotateCcw
 } from "lucide-react";
 import { toast } from "sonner";
 import api, { API, formatError } from "../../lib/api";
@@ -30,6 +30,10 @@ function valuesFrom(lead, fields) {
     if (values[field.key] == null && lead?.[field.key] != null) values[field.key] = lead[field.key];
   });
   return values;
+}
+
+function emptyValues(fields) {
+  return fields.reduce((acc, field) => ({ ...acc, [field.key]: field.type === "boolean" ? false : "" }), {});
 }
 
 function planFrom(lead) {
@@ -133,6 +137,7 @@ function finalInvoiceDownloadUrl(wsId, leadId) {
 export default function CrmInbox() {
   const { wsId } = useParams();
   const [activeTab, setActiveTab] = useState("records");
+  const [recordView, setRecordView] = useState("active");
   const [leads, setLeads] = useState([]);
   const [settings, setSettings] = useState({ fields: [], states: [], templates: [], organization: {} });
   const [loading, setLoading] = useState(true);
@@ -143,6 +148,8 @@ export default function CrmInbox() {
   const [pagination, setPagination] = useState({ total: 0, page: 1, limit: 10 });
   const [selectedLead, setSelectedLead] = useState(null);
   const [fieldValues, setFieldValues] = useState({});
+  const [showCreateLead, setShowCreateLead] = useState(false);
+  const [createValues, setCreateValues] = useState({});
   const [paymentPlan, setPaymentPlan] = useState(planFrom(null));
   const [conversionType, setConversionType] = useState("single_payment");
   const [receiptForm, setReceiptForm] = useState({ payment_stage: "Single Payment", total_amount: "", existing_paid: "", paid_amount: "", amount: "", transaction_id: "", payment_date: today(), payment_method: "Bank Transfer", status: "Pending", due_amount: "0", description: "" });
@@ -171,12 +178,18 @@ export default function CrmInbox() {
     }));
   };
 
+  const openCreateLead = () => {
+    setCreateValues(emptyValues(activeFields));
+    setShowCreateLead(true);
+  };
+
   const loadAll = async () => {
     try {
       setLoading(true);
       const params = new URLSearchParams({ page: String(page), limit: "10" });
       if (statusFilter !== "all") params.set("status", statusFilter);
       if (searchQuery.trim()) params.set("search", searchQuery.trim());
+      if (recordView === "trash") params.set("trashed", "true");
       const [settingsRes, leadsRes] = await Promise.all([
         api.get(`/workspaces/${wsId}/crm/settings`),
         api.get(`/workspaces/${wsId}/crm/leads?${params.toString()}`)
@@ -184,6 +197,7 @@ export default function CrmInbox() {
       setSettings(settingsRes.data);
       setLeads(leadsRes.data.items || []);
       setPagination({ total: leadsRes.data.total || 0, page: leadsRes.data.page || page, limit: leadsRes.data.limit || 10 });
+      if (selectedLead && !(leadsRes.data.items || []).some((lead) => lead.id === selectedLead.id)) setSelectedLead(null);
     } catch (e) {
       toast.error(formatError(e.response?.data?.detail));
     } finally {
@@ -195,11 +209,60 @@ export default function CrmInbox() {
     const t = setTimeout(loadAll, 200);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsId, statusFilter, page, searchQuery]);
+  }, [wsId, statusFilter, page, searchQuery, recordView]);
 
   const mergeLead = (updated) => {
     setLeads((prev) => prev.map((lead) => lead.id === updated.id ? updated : lead));
     selectLead(updated);
+  };
+
+  const createLead = async () => {
+    try {
+      setSaving(true);
+      const r = await api.post(`/workspaces/${wsId}/crm/leads`, { field_values: createValues });
+      toast.success("Lead created");
+      setShowCreateLead(false);
+      setRecordView("active");
+      setStatusFilter("all");
+      setPage(1);
+      await loadAll();
+      selectLead(r.data);
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const trashLead = async (lead) => {
+    try {
+      setSaving(true);
+      await api.delete(`/workspaces/${wsId}/crm/leads/${lead.id}`);
+      toast.success("Lead moved to trash");
+      if (selectedLead?.id === lead.id) setSelectedLead(null);
+      await loadAll();
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const restoreLead = async (lead) => {
+    try {
+      setSaving(true);
+      const r = await api.post(`/workspaces/${wsId}/crm/leads/${lead.id}/restore`, {});
+      toast.success("Lead restored");
+      setRecordView("active");
+      setStatusFilter("all");
+      setPage(1);
+      await loadAll();
+      selectLead(r.data);
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const saveLead = async () => {
@@ -400,18 +463,22 @@ export default function CrmInbox() {
         <>
           <div className="flex flex-col sm:flex-row gap-3 items-center justify-between">
             <div className="flex flex-wrap gap-1.5 w-full sm:w-auto">
-              <FilterButton active={statusFilter === "all"} onClick={() => { setStatusFilter("all"); setPage(1); }}>All Leads</FilterButton>
-              {states.map((state) => <FilterButton key={state.key} active={statusFilter === state.key} onClick={() => { setStatusFilter(state.key); setPage(1); }}>{state.label}</FilterButton>)}
+              <FilterButton active={recordView === "active" && statusFilter === "all"} onClick={() => { setRecordView("active"); setStatusFilter("all"); setPage(1); }}>All Leads</FilterButton>
+              {states.map((state) => <FilterButton key={state.key} active={recordView === "active" && statusFilter === state.key} onClick={() => { setRecordView("active"); setStatusFilter(state.key); setPage(1); }}>{state.label}</FilterButton>)}
+              <FilterButton active={recordView === "trash"} onClick={() => { setRecordView("trash"); setStatusFilter("all"); setPage(1); }}><Trash2 className="w-3.5 h-3.5" /> Trash</FilterButton>
             </div>
-            <div className="relative w-full sm:w-72">
-              <Search className="absolute left-3 top-2.5 w-4 h-4 text-muted-foreground" />
-              <input value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }} placeholder="Search leads..." className="w-full pl-9 pr-4 py-2 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
+            <div className="flex gap-2 w-full sm:w-auto">
+              <button onClick={openCreateLead} className="inline-flex items-center gap-2 px-3 h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold whitespace-nowrap"><Plus className="w-4 h-4" /> New Lead</button>
+              <div className="relative flex-1 sm:w-72">
+                <Search className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
+                <input value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }} placeholder={recordView === "trash" ? "Search trash..." : "Search leads..."} className="w-full pl-9 pr-4 h-10 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
+              </div>
             </div>
           </div>
 
           <div className={`grid gap-6 items-start ${selectedLead ? "xl:grid-cols-[minmax(0,1fr)_560px]" : "grid-cols-1"}`}>
             <div className="space-y-3">
-              <LeadTable leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} onSelect={selectLead} onStatus={changeStatus} />
+              <LeadTable leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} onSelect={selectLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} />
               <Pagination page={page} totalPages={totalPages} total={pagination.total} onPage={setPage} />
             </div>
             {selectedLead && (
@@ -436,11 +503,23 @@ export default function CrmInbox() {
                 createInvoice={createInvoice}
                 addLeadNote={addLeadNote}
                 deleteLeadNote={deleteLeadNote}
+                trashLead={trashLead}
+                restoreLead={restoreLead}
                 close={() => setSelectedLead(null)}
                 wsId={wsId}
               />
             )}
           </div>
+          {showCreateLead && (
+            <CreateLeadDialog
+              fields={activeFields}
+              values={createValues}
+              setValues={setCreateValues}
+              saving={saving}
+              onCreate={createLead}
+              onClose={() => setShowCreateLead(false)}
+            />
+          )}
         </>
       )}
     </div>
@@ -451,19 +530,19 @@ function TabButton({ active, onClick, icon: Icon, label }) {
   return <button onClick={onClick} className={`inline-flex items-center gap-2 px-3 h-9 rounded-md text-sm font-semibold ${active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}><Icon className="w-4 h-4" /> {label}</button>;
 }
 function FilterButton({ active, onClick, children }) {
-  return <button onClick={onClick} className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${active ? "bg-primary text-primary-foreground border-primary" : "bg-card text-muted-foreground hover:bg-accent"}`}>{children}</button>;
+  return <button onClick={onClick} className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${active ? "bg-primary text-primary-foreground border-primary" : "bg-card text-muted-foreground hover:bg-accent"}`}>{children}</button>;
 }
 function Pagination({ page, totalPages, total, onPage }) {
   return <div className="flex items-center justify-between text-sm text-muted-foreground"><span>{total} leads</span><div className="flex items-center gap-2"><button disabled={page <= 1} onClick={() => onPage(page - 1)} className="px-3 h-8 rounded-lg border bg-card disabled:opacity-40">Previous</button><span>Page {page} of {totalPages}</span><button disabled={page >= totalPages} onClick={() => onPage(page + 1)} className="px-3 h-8 rounded-lg border bg-card disabled:opacity-40">Next</button></div></div>;
 }
 
-function LeadTable({ leads, fields, states, selectedLead, loading, onSelect, onStatus }) {
+function LeadTable({ leads, fields, states, selectedLead, loading, trashed, onSelect, onStatus, onTrash, onRestore }) {
   const primaryFields = fields.slice(0, 4);
   return (
     <div className={`rounded-xl border bg-card overflow-hidden ${loading ? "opacity-60" : ""}`}>
       <div className="overflow-x-auto">
         <table className="w-full text-left border-collapse text-sm">
-          <thead><tr className="border-b bg-muted/30"><th className="p-4 font-semibold text-muted-foreground">Lead Details</th><th className="p-4 font-semibold text-muted-foreground">Status</th><th className="p-4 font-semibold text-muted-foreground hidden lg:table-cell">Created</th><th className="p-4 w-10"></th></tr></thead>
+          <thead><tr className="border-b bg-muted/30"><th className="p-4 font-semibold text-muted-foreground">Lead Details</th><th className="p-4 font-semibold text-muted-foreground">Status</th><th className="p-4 font-semibold text-muted-foreground hidden lg:table-cell">{trashed ? "Trash Expiry" : "Created"}</th><th className="p-4 w-10"></th></tr></thead>
           <tbody className="divide-y">
             {leads.length === 0 ? <tr><td colSpan="4" className="p-8 text-center text-muted-foreground">{loading ? "Loading leads..." : "No leads found."}</td></tr> : leads.map((lead) => {
               const values = valuesFrom(lead, fields);
@@ -474,9 +553,21 @@ function LeadTable({ leads, fields, states, selectedLead, loading, onSelect, onS
                     <div className="font-semibold text-foreground flex items-center gap-2">{values.full_name || values.phone || values.email || "Unnamed Lead"}{lead.customer_status === "customer" && <span className="text-[10px] uppercase px-1.5 py-0.5 rounded border border-emerald-500/30 text-emerald-500">Customer</span>}</div>
                     <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground mt-2">{primaryFields.map((field) => values[field.key] ? <span key={field.key}>{field.label}: {String(values[field.key])}</span> : null)}</div>
                   </td>
-                  <td className="p-4" onClick={(e) => e.stopPropagation()}><select value={lead.status} onChange={(e) => onStatus(lead, e.target.value)} className={`px-2.5 py-1 rounded-md border text-xs font-semibold focus:outline-none ${stateClasses[state.color] || stateClasses.slate}`}>{states.map((s) => <option key={s.key} value={s.key} className="bg-background text-foreground">{s.label}</option>)}</select></td>
-                  <td className="p-4 text-xs text-muted-foreground hidden lg:table-cell">{new Date(lead.created_at).toLocaleDateString()}</td>
-                  <td className="p-4 text-right"><ChevronRight className="w-4 h-4 text-muted-foreground" /></td>
+                  <td className="p-4" onClick={(e) => e.stopPropagation()}>
+                    {trashed ? (
+                      <span className={`px-2.5 py-1 rounded-md border text-xs font-semibold ${stateClasses[state.color] || stateClasses.slate}`}>{state.label}</span>
+                    ) : (
+                      <select value={lead.status} onChange={(e) => onStatus(lead, e.target.value)} className={`px-2.5 py-1 rounded-md border text-xs font-semibold focus:outline-none ${stateClasses[state.color] || stateClasses.slate}`}>{states.map((s) => <option key={s.key} value={s.key} className="bg-background text-foreground">{s.label}</option>)}</select>
+                    )}
+                  </td>
+                  <td className="p-4 text-xs text-muted-foreground hidden lg:table-cell">{new Date(trashed ? lead.delete_after : lead.created_at).toLocaleDateString()}</td>
+                  <td className="p-4 text-right" onClick={(e) => e.stopPropagation()}>
+                    {trashed ? (
+                      <button onClick={() => onRestore(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
+                    ) : (
+                      <button onClick={() => onTrash(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
+                    )}
+                  </td>
                 </tr>
               );
             })}
@@ -488,11 +579,12 @@ function LeadTable({ leads, fields, states, selectedLead, loading, onSelect, onS
 }
 
 function LeadDetail(props) {
-  const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, addLeadNote, deleteLeadNote, close, wsId } = props;
+  const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, addLeadNote, deleteLeadNote, trashLead, restoreLead, close, wsId } = props;
   const [detailTab, setDetailTab] = useState("Details");
   const [activeStageId, setActiveStageId] = useState("");
   const [noteDraft, setNoteDraft] = useState("");
   const isCustomer = lead.customer_status === "customer" || lead.status === "won";
+  const isTrashed = Boolean(lead.deleted_at);
   useEffect(() => {
     if (paymentPlan.stages?.[0]?.id && !paymentPlan.stages.some((stage) => stage.id === activeStageId)) setActiveStageId(paymentPlan.stages[0].id);
   }, [activeStageId, paymentPlan.stages]);
@@ -588,8 +680,16 @@ function LeadDetail(props) {
       <div className="p-5 rounded-xl border bg-card space-y-5 max-w-3xl mx-auto xl:max-w-none">
         <div className="flex items-start justify-between border-b pb-4">
           <div className="min-w-0"><h3 className="font-bold text-lg truncate">{values.full_name || values.phone || values.email || "Unnamed Lead"}</h3><span className="text-xs text-muted-foreground flex items-center gap-1 mt-1"><Calendar className="w-3.5 h-3.5" /> Captured on {new Date(lead.created_at).toLocaleString()}</span></div>
-          <button onClick={close} className="p-1 rounded-lg hover:bg-accent text-muted-foreground" title="Close details"><XCircle className="w-5 h-5" /></button>
+          <div className="flex items-center gap-2">
+            {isTrashed ? (
+              <button onClick={() => restoreLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
+            ) : (
+              <button onClick={() => trashLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-50" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
+            )}
+            <button onClick={close} className="p-1 rounded-lg hover:bg-accent text-muted-foreground" title="Close details"><XCircle className="w-5 h-5" /></button>
+          </div>
         </div>
+        {isTrashed && <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs text-destructive">This lead is in trash and can be restored until {new Date(lead.delete_after).toLocaleDateString()}.</div>}
         <div className="flex rounded-lg border bg-background p-1 overflow-x-auto">
           {DETAIL_TABS.map((tab) => <button key={tab} onClick={() => setDetailTab(tab)} className={`px-3 h-9 rounded-md text-sm font-semibold whitespace-nowrap ${detailTab === tab ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{tab}</button>)}
         </div>
@@ -742,6 +842,31 @@ function LeadDetail(props) {
   );
 }
 
+function CreateLeadDialog({ fields, values, setValues, saving, onCreate, onClose }) {
+  const requiredMissing = fields.some((field) => field.required && !String(values[field.key] || "").trim());
+  const setField = (key, value) => setValues({ ...values, [key]: value });
+  return (
+    <div className="fixed inset-0 z-[60] bg-background/80 backdrop-blur-sm p-4 grid place-items-center">
+      <div className="w-full max-w-2xl rounded-xl border bg-card shadow-xl">
+        <div className="flex items-start justify-between gap-4 p-5 border-b">
+          <div>
+            <h3 className="font-bold text-lg">Create Lead</h3>
+            <p className="text-xs text-muted-foreground mt-1">Add a CRM lead manually using your active field setup.</p>
+          </div>
+          <button onClick={onClose} className="p-1 rounded-lg hover:bg-accent text-muted-foreground" title="Close"><XCircle className="w-5 h-5" /></button>
+        </div>
+        <div className="p-5 grid sm:grid-cols-2 gap-3 max-h-[70vh] overflow-y-auto">
+          {fields.map((field) => <DynamicField key={field.key} field={field} value={values[field.key] || ""} onChange={(v) => setField(field.key, v)} />)}
+        </div>
+        <div className="p-5 border-t flex flex-wrap items-center justify-end gap-2">
+          <button onClick={onClose} className="px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold">Cancel</button>
+          <button onClick={onCreate} disabled={saving || requiredMissing} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><Plus className="w-4 h-4" /> Add Lead</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DynamicField({ field, value, onChange }) {
   const common = "w-full h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary";
   const label = <span className="text-xs font-semibold text-muted-foreground uppercase">{field.label}{field.required && <span className="text-destructive"> *</span>}</span>;
@@ -783,17 +908,128 @@ function StatusSelect({ value, onChange }) {
 
 function SettingsPanel({ fields, states, organization, templates, newField, setNewField, newState, setNewState, templateDraft, setTemplateDraft, addField, updateField, removeField, addState, saveStates, saveOrganization, saveTemplate }) {
   const [org, setOrg] = useState(organization);
+  const [fieldDrafts, setFieldDrafts] = useState({});
+  const [stateDrafts, setStateDrafts] = useState({});
+  const [savingFieldKey, setSavingFieldKey] = useState("");
+  const [savingStateKey, setSavingStateKey] = useState("");
+
   useEffect(() => setOrg(organization), [organization]);
+
+  useEffect(() => {
+    setFieldDrafts(fields.reduce((acc, field) => ({
+      ...acc,
+      [field.key]: {
+        label: field.label || "",
+        type: field.type || "text",
+        required: Boolean(field.required),
+      },
+    }), {}));
+  }, [fields]);
+
+  useEffect(() => {
+    setStateDrafts(states.reduce((acc, state) => ({
+      ...acc,
+      [state.key]: {
+        label: state.label || "",
+        color: state.color || "blue",
+      },
+    }), {}));
+  }, [states]);
+
+  const fieldDraft = (field) => fieldDrafts[field.key] || {
+    label: field.label || "",
+    type: field.type || "text",
+    required: Boolean(field.required),
+  };
+
+  const setFieldDraft = (field, patch) => {
+    setFieldDrafts((current) => ({
+      ...current,
+      [field.key]: { ...fieldDraft(field), ...patch },
+    }));
+  };
+
+  const fieldHasChanges = (field) => {
+    const draft = fieldDraft(field);
+    return draft.label !== (field.label || "") || draft.type !== (field.type || "text") || draft.required !== Boolean(field.required);
+  };
+
+  const stateDraft = (state) => stateDrafts[state.key] || {
+    label: state.label || "",
+    color: state.color || "blue",
+  };
+
+  const setStateDraft = (state, patch) => {
+    setStateDrafts((current) => ({
+      ...current,
+      [state.key]: { ...stateDraft(state), ...patch },
+    }));
+  };
+
+  const stateHasChanges = (state) => {
+    const draft = stateDraft(state);
+    return draft.label !== (state.label || "") || draft.color !== (state.color || "blue");
+  };
+
+  const saveFieldDraft = async (field) => {
+    const draft = fieldDraft(field);
+    try {
+      setSavingFieldKey(field.key);
+      await updateField(field, draft);
+      toast.success("Field saved");
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      setSavingFieldKey("");
+    }
+  };
+
+  const saveStateDraft = async (state) => {
+    const draft = stateDraft(state);
+    try {
+      setSavingStateKey(state.key);
+      await saveStates(states.map((s) => s.key === state.key ? { ...s, ...draft } : s));
+      toast.success("State saved");
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      setSavingStateKey("");
+    }
+  };
+
   return (
     <div className="grid gap-6 xl:grid-cols-2 items-start">
       <section className="rounded-xl border bg-card p-5 space-y-4">
         <h3 className="font-bold flex items-center gap-2"><Columns3 className="w-4 h-4 text-primary" /> Field Columns</h3>
-        <div className="space-y-2">{fields.map((field) => <div key={field.key} className="grid grid-cols-[1fr_130px_70px_36px] gap-2 items-center p-2 rounded-lg border bg-background"><input value={field.label} onChange={(e) => updateField(field, { label: e.target.value })} className="h-9 px-2 rounded border bg-background text-sm" /><select value={field.type} disabled={field.key === "phone"} onChange={(e) => updateField(field, { type: e.target.value })} className="h-9 px-2 rounded border bg-background text-xs">{FIELD_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}</select><label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={field.required} disabled={field.key === "phone"} onChange={(e) => updateField(field, { required: e.target.checked })} /> Req</label><button onClick={() => removeField(field)} disabled={field.key === "phone"} className="h-9 rounded border hover:bg-accent disabled:opacity-40" title="Remove field"><Trash2 className="w-4 h-4 mx-auto" /></button></div>)}</div>
+        <div className="space-y-2">{fields.map((field) => {
+          const draft = fieldDraft(field);
+          const dirty = fieldHasChanges(field);
+          return (
+            <div key={field.key} className="grid grid-cols-[1fr_130px_70px_84px_36px] gap-2 items-center p-2 rounded-lg border bg-background">
+              <input value={draft.label} onChange={(e) => setFieldDraft(field, { label: e.target.value })} className="h-9 px-2 rounded border bg-background text-sm" />
+              <select value={draft.type} disabled={field.key === "phone"} onChange={(e) => setFieldDraft(field, { type: e.target.value })} className="h-9 px-2 rounded border bg-background text-xs">{FIELD_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}</select>
+              <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={draft.required} disabled={field.key === "phone"} onChange={(e) => setFieldDraft(field, { required: e.target.checked })} /> Req</label>
+              <button onClick={() => saveFieldDraft(field)} disabled={!dirty || savingFieldKey === field.key || !draft.label.trim()} className="inline-flex items-center justify-center gap-1 h-9 rounded border hover:bg-accent text-xs font-semibold disabled:opacity-40" title="Save field"><Save className="w-3.5 h-3.5" /> Save</button>
+              <button onClick={() => removeField(field)} disabled={field.key === "phone"} className="h-9 rounded border hover:bg-accent disabled:opacity-40" title="Remove field"><Trash2 className="w-4 h-4 mx-auto" /></button>
+            </div>
+          );
+        })}</div>
         <div className="grid grid-cols-[1fr_130px_80px] gap-2 border-t pt-4"><input placeholder="Field label" value={newField.label} onChange={(e) => setNewField({ ...newField, label: e.target.value })} className="h-10 px-3 rounded-lg border bg-background text-sm" /><select value={newField.type} onChange={(e) => setNewField({ ...newField, type: e.target.value })} className="h-10 px-2 rounded-lg border bg-background text-xs">{FIELD_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}</select><button onClick={addField} disabled={!newField.label.trim()} className="inline-flex items-center justify-center gap-1 h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><Plus className="w-4 h-4" /> Add</button></div>
       </section>
       <section className="rounded-xl border bg-card p-5 space-y-4">
         <h3 className="font-bold flex items-center gap-2"><Palette className="w-4 h-4 text-primary" /> Lead States</h3>
-        <div className="space-y-2">{states.map((state, index) => <div key={state.key} className="grid grid-cols-[1fr_110px_36px] gap-2 items-center p-2 rounded-lg border bg-background"><input value={state.label} onChange={(e) => saveStates(states.map((s) => s.key === state.key ? { ...s, label: e.target.value } : s))} className="h-9 px-2 rounded border bg-background text-sm" /><select value={state.color} onChange={(e) => saveStates(states.map((s) => s.key === state.key ? { ...s, color: e.target.value } : s))} className="h-9 px-2 rounded border bg-background text-xs">{Object.keys(stateClasses).map((color) => <option key={color} value={color}>{color}</option>)}</select><span className="text-xs text-muted-foreground text-center">{index + 1}</span></div>)}</div>
+        <div className="space-y-2">{states.map((state, index) => {
+          const draft = stateDraft(state);
+          const dirty = stateHasChanges(state);
+          return (
+            <div key={state.key} className="grid grid-cols-[1fr_110px_84px_36px] gap-2 items-center p-2 rounded-lg border bg-background">
+              <input value={draft.label} onChange={(e) => setStateDraft(state, { label: e.target.value })} className="h-9 px-2 rounded border bg-background text-sm" />
+              <select value={draft.color} onChange={(e) => setStateDraft(state, { color: e.target.value })} className="h-9 px-2 rounded border bg-background text-xs">{Object.keys(stateClasses).map((color) => <option key={color} value={color}>{color}</option>)}</select>
+              <button onClick={() => saveStateDraft(state)} disabled={!dirty || savingStateKey === state.key || !draft.label.trim()} className="inline-flex items-center justify-center gap-1 h-9 rounded border hover:bg-accent text-xs font-semibold disabled:opacity-40" title="Save state"><Save className="w-3.5 h-3.5" /> Save</button>
+              <span className="text-xs text-muted-foreground text-center">{index + 1}</span>
+            </div>
+          );
+        })}</div>
         <div className="grid grid-cols-[1fr_110px_80px] gap-2 border-t pt-4"><input placeholder="State label" value={newState.label} onChange={(e) => setNewState({ ...newState, label: e.target.value })} className="h-10 px-3 rounded-lg border bg-background text-sm" /><select value={newState.color} onChange={(e) => setNewState({ ...newState, color: e.target.value })} className="h-10 px-2 rounded-lg border bg-background text-xs">{Object.keys(stateClasses).map((color) => <option key={color} value={color}>{color}</option>)}</select><button onClick={addState} disabled={!newState.label.trim()} className="inline-flex items-center justify-center gap-1 h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><Plus className="w-4 h-4" /> Add</button></div>
       </section>
       <section className="rounded-xl border bg-card p-5 space-y-4 xl:col-span-2">
