@@ -93,15 +93,15 @@ export default function Overview() {
         </motion.div>
       )}
 
-      {/* {ws.strategy_summary && (
+      {ws.strategy_summary && (
         <div className="border border-border rounded-md bg-card p-6">
           <div className="text-xs uppercase tracking-[0.2em] font-bold text-primary mb-2">Strategy</div>
           <p className="text-lg leading-relaxed">{ws.strategy_summary}</p>
         </div>
-      )} */}
+      )}
 
       <div className="grid grid-cols-1 gap-4">
-        {/* <div className="border border-border rounded-md bg-card p-6">
+        <div className="border border-border rounded-md bg-card p-6">
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-display font-bold">Upcoming tasks</h3>
             <button onClick={() => nav("tasks")} className="text-sm text-primary inline-flex items-center gap-1">View all <ArrowRight className="w-3.5 h-3.5" /></button>
@@ -116,7 +116,7 @@ export default function Overview() {
             ))}
             {tasks.length === 0 && <div className="text-sm text-muted-foreground">No tasks yet.</div>}
           </div>
-        </div> */}
+        </div>
         <div className="border border-border rounded-md bg-card p-6">
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-display font-bold">Recent blogs</h3>

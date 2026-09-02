@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { NavLink, Outlet, useParams, useNavigate, Link } from "react-router-dom";
+import { NavLink, Outlet, useParams, useNavigate, Link, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, Brain as BrainIcon, MessageSquare, ListChecks, FileText, Code2,
   AlertCircle, Bell, CheckCircle2, Globe, Loader2, LogOut, Plus, Boxes, Settings as SettingsIcon,
@@ -20,10 +20,10 @@ const nav = [
   { to: "", label: "Overview", icon: LayoutDashboard, end: true },
   { to: "projects", label: "Projects", icon: Boxes },
   { to: "brain", label: "Brain", icon: BrainIcon },
-  // { to: "manager", label: "Manager", icon: MessageSquare },
-  // { to: "tasks", label: "Tasks", icon: ListChecks },
+  { to: "manager", label: "Manager", icon: MessageSquare },
+  { to: "tasks", label: "Tasks", icon: ListChecks },
   { to: "blogs", label: "Blogs", icon: FileText },
-  // { to: "embed", label: "Add Blog System", icon: Code2 },
+  { to: "embed", label: "Add Blog System", icon: Code2 },
   { to: "workflows", label: "Workflows", icon: Workflow },
   { to: "crm", label: "CRM Leads", icon: Users },
 ];
@@ -38,6 +38,7 @@ const workspaceStatus = {
 
 export default function WorkspaceLayout() {
   const { wsId } = useParams();
+  const location = useLocation();
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [ws, setWs] = useState(null);
@@ -105,6 +106,7 @@ export default function WorkspaceLayout() {
     logout();
     navigate("/");
   };
+  const isBlogEditor = /\/blogs\/[^/]+$/.test(location.pathname);
 
   if (notFound) return <div className="min-h-screen grid place-items-center text-muted-foreground">Workspace not found. <Link to="/app" className="text-primary ml-1">Back</Link></div>;
   if (!ws) return <div className="min-h-screen grid place-items-center text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin" /></div>;
@@ -141,7 +143,7 @@ export default function WorkspaceLayout() {
       </aside>
 
       <div className="h-screen flex flex-col min-w-0">
-        <header className="sticky top-0 z-20 glass border-b border-border">
+        <header className={`sticky top-0 z-20 glass border-b border-border ${isBlogEditor ? "hidden" : ""}`}>
           <div className="h-16 px-5 flex items-center justify-between gap-3">
             <div className="min-w-0">
               <h2 className="font-display font-bold truncate">{ws.name}</h2>
@@ -254,7 +256,7 @@ export default function WorkspaceLayout() {
           </div>
         </header>
 
-        <main className="flex-1 overflow-y-auto">
+        <main className={`flex-1 ${isBlogEditor ? "min-h-0 overflow-hidden" : "overflow-y-auto"}`}>
           <Outlet context={{ ws, setWs, refresh, loadNotes }} />
         </main>
       </div>

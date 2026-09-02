@@ -76,6 +76,7 @@ class Blog(BaseDocument):
     read_time: str = "5 min read"
     tags: List[str] = Field(default_factory=list)
     blocks: List[dict] = Field(default_factory=list)
+    content_html: str = ""
     meta_title: str = ""
     meta_description: str = ""
     keywords: List[str] = Field(default_factory=list)

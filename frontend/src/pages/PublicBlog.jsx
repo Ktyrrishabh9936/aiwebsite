@@ -69,9 +69,13 @@ export default function PublicBlog() {
           />
         )}
 
-        <div className="mt-10">
-          <BlockRenderer blocks={blog.blocks} />
-        </div>
+        {blog.content_html ? (
+          <div className="prose-arevei mt-10" dangerouslySetInnerHTML={{ __html: blog.content_html }} />
+        ) : (
+          <div className="mt-10">
+            <BlockRenderer blocks={blog.blocks} />
+          </div>
+        )}
 
         <div className="mt-16 pt-8 border-t border-border flex items-center justify-between">
           <Link to="/" className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground">

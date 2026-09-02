@@ -101,3 +101,66 @@
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 8px; }
+
+.editor-body:empty::before {
+    content: attr(data-placeholder);
+    color: rgb(63 63 70);
+    pointer-events: none;
+}
+
+.prose-arevei {
+    color: rgb(228 228 231);
+    font-size: 1.25rem;
+    line-height: 2.05;
+}
+
+.prose-arevei p {
+    margin: 0 0 1.35rem;
+}
+
+.prose-arevei h2 {
+    margin: 3rem 0 1.25rem;
+    color: white;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 2.5rem;
+    line-height: 1.25;
+    font-weight: 700;
+}
+
+.prose-arevei h3 {
+    margin: 2.25rem 0 0.8rem;
+    color: white;
+    font-size: 1.45rem;
+    line-height: 1.35;
+    font-weight: 800;
+}
+
+.prose-arevei blockquote {
+    margin: 2rem 0;
+    border-left: 3px solid hsl(var(--primary));
+    padding-left: 1.25rem;
+    color: rgb(244 244 245);
+    font-style: italic;
+}
+
+.prose-arevei ul,
+.prose-arevei ol {
+    margin: 0 0 1.35rem;
+    padding-left: 1.5rem;
+}
+
+.prose-arevei li {
+    margin: 0.25rem 0;
+}
+
+.prose-arevei a {
+    color: rgb(96 165 250);
+    text-decoration: underline;
+    text-underline-offset: 4px;
+}
+
+.prose-arevei strong,
+.prose-arevei b {
+    color: white;
+    font-weight: 800;
+}

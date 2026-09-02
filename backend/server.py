@@ -369,7 +369,7 @@ async def update_blog(blog_id: str, request: Request, body: dict = Body(...)):
         raise HTTPException(404, "Blog not found")
     await owned_workspace(blog["workspace_id"], user)
     fields = ["title", "excerpt", "hero_image", "author", "read_time", "tags",
-              "blocks", "meta_title", "meta_description", "keywords"]
+              "blocks", "content_html", "meta_title", "meta_description", "keywords", "status"]
     updates = {k: body[k] for k in fields if k in body}
     if updates:
         await db.blogs.update_one({"_id": oid(blog_id)}, {"$set": updates})
@@ -378,13 +378,14 @@ async def update_blog(blog_id: str, request: Request, body: dict = Body(...)):
 
 
 @api.post("/blogs/{blog_id}/publish")
-async def publish_blog(blog_id: str, request: Request):
+async def publish_blog(blog_id: str, request: Request, body: dict = Body(None)):
     user = await require_user(request)
     blog = await db.blogs.find_one({"_id": oid(blog_id)})
     if not blog:
         raise HTTPException(404, "Blog not found")
     await owned_workspace(blog["workspace_id"], user)
-    new_status = "draft" if blog.get("status") == "published" else "published"
+    requested_status = (body or {}).get("status")
+    new_status = requested_status if requested_status in {"draft", "published"} else ("draft" if blog.get("status") == "published" else "published")
     await db.blogs.update_one({"_id": oid(blog_id)},
                               {"$set": {"status": new_status,
                                         "published_at": now_iso() if new_status == "published" else None}})
