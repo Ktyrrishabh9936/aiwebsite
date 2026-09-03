@@ -4,6 +4,8 @@ import logging
 import random
 import importlib.util
 import time
+import json
+import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -522,6 +524,153 @@ async def list_notifications(ws_id: str, request: Request):
     return [doc_out(d) for d in docs]
 
 
+async def crm_manager_context(ws_id):
+    from crm import build_crm_analytics, decorate_lead, ensure_crm_settings, lead_query, money_value, purge_expired_trashed_leads
+
+    settings = await ensure_crm_settings(db, ws_id)
+    await purge_expired_trashed_leads(db, ws_id)
+    docs = await db.crm_leads.find(lead_query(ws_id)).sort("updated_at", -1).to_list(5000)
+    leads = [decorate_lead(doc, settings) for doc in docs]
+    analytics = build_crm_analytics(leads)
+    lead_summaries = []
+    for lead in leads[:80]:
+        values = lead.get("field_values") or {}
+        receipts = lead.get("receipts") or []
+        payment_total = sum(money_value(r.get("amount")) for r in receipts if str(r.get("status") or "Paid").lower() in {"paid", "success", "successful", "completed", "complete", "collected"})
+        lead_summaries.append({
+            "id": lead.get("id"),
+            "name": values.get("full_name") or lead.get("full_name") or "",
+            "phone": values.get("phone") or lead.get("phone") or "",
+            "email": values.get("email") or lead.get("email") or "",
+            "status": lead.get("status"),
+            "customer_status": lead.get("customer_status"),
+            "assigned_salesperson": values.get("assigned_salesperson") or lead.get("assigned_salesperson") or "",
+            "created_at": lead.get("created_at"),
+            "payment_collected": payment_total,
+            "receipts": len(receipts),
+            "last_note": (lead.get("lead_notes") or [{}])[-1].get("body", ""),
+        })
+    return settings, leads, analytics, lead_summaries
+
+
+def _compact_crm_context(analytics, lead_summaries):
+    return {
+        "analytics": analytics,
+        "leads": lead_summaries[:40],
+    }
+
+
+def _find_crm_lead(message, leads):
+    text = str(message or "").lower()
+    id_match = re.search(r"\b[0-9a-f]{24}\b", text)
+    if id_match:
+        for lead in leads:
+            if str(lead.get("id", "")).lower() == id_match.group(0):
+                return lead, None
+    digits = re.sub(r"\D+", "", text)
+    phone_matches = []
+    if len(digits) >= 6:
+        for lead in leads:
+            phone = re.sub(r"\D+", "", str((lead.get("field_values") or {}).get("phone") or lead.get("phone") or ""))
+            if phone and (phone in digits or digits in phone):
+                phone_matches.append(lead)
+    if len(phone_matches) == 1:
+        return phone_matches[0], None
+    if len(phone_matches) > 1:
+        return None, "Multiple leads match that phone number. Please include the lead name or full lead id."
+    name_matches = []
+    for lead in leads:
+        name = str((lead.get("field_values") or {}).get("full_name") or lead.get("full_name") or "").strip().lower()
+        if name and name in text:
+            name_matches.append(lead)
+    if len(name_matches) == 1:
+        return name_matches[0], None
+    if len(name_matches) > 1:
+        return None, "Multiple leads match that name. Please include the phone number or full lead id."
+    return None, "I could not identify the lead. Please include the lead name, phone number, or full lead id."
+
+
+def _extract_note_body(message):
+    patterns = [
+        r"(?:add|create|save)\s+(?:a\s+)?(?:call\s+)?note(?:\s+to|\s+for)?\s+.*?(?:\:|\-)\s*(.+)$",
+        r"(?:called|call note)\s+(.+)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, message, flags=re.IGNORECASE | re.DOTALL)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return ""
+
+
+async def try_manager_crm_action(ws_id, message, settings, leads):
+    from crm import default_field_values, normalize_lead_note, validate_field_values
+
+    text = str(message or "")
+    lower = text.lower()
+    is_note = bool(re.search(r"\b(add|create|save)\b.*\bnote\b|\bcalled\b|\bcall note\b", lower))
+    is_status = bool(re.search(r"\b(change|set|update|mark)\b.*\b(status|lead)\b", lower))
+    is_assign = bool(re.search(r"\b(assign|salesperson|sales person)\b", lower))
+    is_field = bool(re.search(r"\b(update|set|change)\b", lower)) and any(f.get("key") in lower or str(f.get("label", "")).lower() in lower for f in settings.get("fields", []))
+    if not any([is_note, is_status, is_assign, is_field]):
+        return None
+
+    lead, error = _find_crm_lead(text, leads)
+    if not lead:
+        return error
+
+    updates = {"updated_at": now_iso()}
+    actions = []
+    if is_note:
+        body = _extract_note_body(text) or text
+        note_payload = {"body": body, "author": "Manager Chat"}
+        if "plivo" in lower or "call" in lower or "called" in lower:
+            note_payload.update({"source": "call_agent", "call_provider": "plivo", "summary": body})
+        note = normalize_lead_note(note_payload)
+        await db.crm_leads.update_one({"workspace_id": ws_id, "_id": oid(lead["id"])}, {"$push": {"lead_notes": note}, "$set": updates})
+        actions.append("added a lead note")
+
+    states = {s["key"]: s for s in settings.get("states", [])}
+    if is_status:
+        target_status = next((key for key in states if re.search(rf"\b{re.escape(key)}\b", lower)), "")
+        if not target_status:
+            target_status = next((s["key"] for s in states.values() if re.search(rf"\b{re.escape(str(s.get('label', '')).lower())}\b", lower)), "")
+        if not target_status:
+            return f"Which status should I set? Valid statuses are: {', '.join(states.keys())}."
+        updates["status"] = target_status
+        actions.append(f"set status to {target_status}")
+
+    values = default_field_values(lead, settings)
+    active = {f["key"]: f for f in settings.get("fields", []) if f.get("active", True)}
+    if is_assign:
+        match = re.search(r"(?:assign(?:ed)?(?:\s+salesperson)?|salesperson|sales person)\s+(?:to|as)?\s*([A-Za-z][A-Za-z .'-]{1,60})", text, flags=re.IGNORECASE)
+        if match:
+            values["assigned_salesperson"] = match.group(1).strip(" .")
+            actions.append(f"assigned salesperson to {values['assigned_salesperson']}")
+    for key, field in active.items():
+        label = str(field.get("label") or key).lower()
+        match = re.search(rf"(?:set|update|change)\s+(?:{re.escape(key)}|{re.escape(label)})\s+(?:to|as)\s+(.+?)(?:$|,|\band\b)", text, flags=re.IGNORECASE)
+        if match:
+            values[key] = match.group(1).strip()
+            actions.append(f"updated {field.get('label') or key}")
+    if actions and any(action.startswith(("assigned", "updated")) for action in actions):
+        values = validate_field_values(values, settings)
+        updates.update({
+            "field_values": values,
+            "email": values.get("email"),
+            "full_name": values.get("full_name"),
+            "phone": values.get("phone"),
+            "address": values.get("address"),
+            "source": values.get("source", lead.get("source", "google_sheet")),
+            "assigned_salesperson": values.get("assigned_salesperson"),
+        })
+    if len(updates) > 1:
+        await db.crm_leads.update_one({"workspace_id": ws_id, "_id": oid(lead["id"])}, {"$set": updates})
+    if actions:
+        name = (lead.get("field_values") or {}).get("full_name") or lead.get("phone") or lead.get("id")
+        return f"Done. I {', '.join(actions)} for {name}."
+    return None
+
+
 # ---------------- MANAGER CHAT (SSE) ----------------
 @api.post("/workspaces/{ws_id}/chat")
 async def manager_chat(ws_id: str, request: Request, body: dict = Body(...)):
@@ -531,16 +680,123 @@ async def manager_chat(ws_id: str, request: Request, body: dict = Body(...)):
     history = body.get("history", [])
     model_id = body.get("model_id") or ws.get("model_id")
     roadmap = {"strategy_summary": ws.get("strategy_summary", ""), "months": ws.get("roadmap", [])}
+    crm_settings, crm_leads, crm_analytics, crm_lead_summaries = await crm_manager_context(ws_id)
+    action_result = await try_manager_crm_action(ws_id, message, crm_settings, crm_leads)
 
     async def gen():
         try:
-            async for delta in agents.manager_chat_stream(model_id, ws.get("brain", {}), roadmap, history, message):
+            if action_result:
+                yield action_result
+                return
+            crm_context = json.dumps(_compact_crm_context(crm_analytics, crm_lead_summaries), ensure_ascii=False)[:9000]
+            crm_message = (
+                f"{message}\n\nCRM workspace knowledge JSON:\n{crm_context}\n\n"
+                "Use the CRM data above for lead, customer, payment, due amount, daily, and monthly analytics questions. "
+                "If the user asks for a CRM update, explain the exact lead identifier needed unless it was already clear."
+            )
+            async for delta in agents.manager_chat_stream(model_id, ws.get("brain", {}), roadmap, history, crm_message):
                 yield delta
         except Exception as e:
             yield f"\n[error: {str(e)[:120]}]"
 
     return StreamingResponse(gen(), media_type="text/plain",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ---------------- PLIVO CALL WEBHOOKS ----------------
+async def _plivo_params(request: Request):
+    params = dict(request.query_params)
+    if request.method.upper() == "POST":
+        form = await request.form()
+        params.update({k: v for k, v in form.items()})
+    return params
+
+
+async def _plivo_body_params(request: Request):
+    if request.method.upper() != "POST":
+        return {}
+    form = await request.form()
+    return {k: v for k, v in form.items()}
+
+
+@api.api_route("/plivo/workspaces/{ws_id}/calls/{lead_id}/outbound/answer", methods=["GET", "POST"])
+async def plivo_outbound_answer(ws_id: str, lead_id: str, request: Request):
+    from plivo_calls import callback_urls, normalize_phone, outbound_bridge_xml, public_base_url, require_plivo_signature
+
+    params = await _plivo_params(request)
+    await require_plivo_signature(request, await _plivo_body_params(request))
+    lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
+    if not lead:
+        raise HTTPException(404, "Lead not found")
+    values = lead.get("field_values") or {}
+    lead_phone = normalize_phone(values.get("phone") or lead.get("phone"))
+    if not lead_phone:
+        raise HTTPException(400, "Lead phone number is required")
+    urls = callback_urls(public_base_url(request), ws_id, lead_id)
+    return outbound_bridge_xml(lead_phone, urls["recording"])
+
+
+@api.api_route("/plivo/workspaces/{ws_id}/calls/outbound/status", methods=["GET", "POST"])
+async def plivo_outbound_status(ws_id: str, request: Request):
+    from plivo_calls import log_call_note, require_plivo_signature
+
+    params = await _plivo_params(request)
+    await require_plivo_signature(request, await _plivo_body_params(request))
+    lead_id = str(params.get("lead_id") or "").strip()
+    if not lead_id:
+        return {"ok": True, "logged": False}
+    await log_call_note(db, ws_id, lead_id, params, {
+        "event": "outbound_status",
+        "call_direction": "outbound",
+        "body": f"Outbound Plivo call status: {params.get('CallStatus') or params.get('HangupCause') or 'updated'}",
+        "outcome": params.get("CallStatus") or params.get("HangupCause") or "updated",
+    })
+    return {"ok": True, "logged": True}
+
+
+@api.api_route("/plivo/workspaces/{ws_id}/calls/inbound/answer", methods=["GET", "POST"])
+async def plivo_inbound_answer(ws_id: str, request: Request):
+    from plivo_calls import callback_urls, find_or_create_inbound_lead, inbound_bridge_xml, plivo_config, public_base_url, require_plivo_signature
+
+    params = await _plivo_params(request)
+    await require_plivo_signature(request, await _plivo_body_params(request))
+    cfg = plivo_config()
+    caller = params.get("From") or params.get("CallerName") or ""
+    lead, created = await find_or_create_inbound_lead(db, ws_id, caller)
+    await log_plivo_inbound_started(ws_id, lead["id"], params, created)
+    urls = callback_urls(public_base_url(request), ws_id, lead["id"])
+    return inbound_bridge_xml(cfg["staff_number"], urls["recording"] + "&call_direction=inbound")
+
+
+async def log_plivo_inbound_started(ws_id, lead_id, params, created):
+    from plivo_calls import log_call_note
+
+    await log_call_note(db, ws_id, lead_id, params, {
+        "event": "inbound_started",
+        "call_direction": "inbound",
+        "body": "Inbound Plivo call received" + (" and new CRM lead created." if created else "."),
+        "outcome": "new_lead_created" if created else "matched_existing_lead",
+    })
+
+
+@api.api_route("/plivo/workspaces/{ws_id}/calls/recording", methods=["GET", "POST"])
+async def plivo_recording_callback(ws_id: str, request: Request):
+    from plivo_calls import log_call_note, require_plivo_signature
+
+    params = await _plivo_params(request)
+    await require_plivo_signature(request, await _plivo_body_params(request))
+    lead_id = str(params.get("lead_id") or "").strip()
+    if not lead_id:
+        return {"ok": True, "logged": False}
+    direction = params.get("call_direction") or params.get("Direction") or "outbound"
+    await log_call_note(db, ws_id, lead_id, params, {
+        "event": "recording",
+        "call_direction": direction,
+        "body": f"{str(direction).title()} Plivo recording saved.",
+        "outcome": "recording_saved",
+        "summary": params.get("Transcription") or "Recording metadata received",
+    })
+    return {"ok": True, "logged": True}
 
 
 # ---------------- PUBLIC (no auth) ----------------

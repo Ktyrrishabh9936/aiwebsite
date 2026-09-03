@@ -4,7 +4,7 @@ import {
   Users, Calendar, Info, Search, XCircle, Save, BadgeIndianRupee,
   Plus, CheckCircle2, Settings, Trash2, Columns3, Palette, Building2,
   ReceiptText, FileText, ExternalLink, RefreshCw, FileCode2, MessageSquare, Send,
-  Download, RotateCcw
+  Download, RotateCcw, PhoneCall
 } from "lucide-react";
 import { toast } from "sonner";
 import api, { API, formatError } from "../../lib/api";
@@ -142,6 +142,7 @@ export default function CrmInbox() {
   const [settings, setSettings] = useState({ fields: [], states: [], templates: [], organization: {} });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [callingLeadId, setCallingLeadId] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -426,6 +427,20 @@ export default function CrmInbox() {
     toast.success("Template saved");
   };
 
+  const callLead = async (lead) => {
+    if (!lead?.id) return;
+    try {
+      setCallingLeadId(lead.id);
+      const r = await api.post(`/workspaces/${wsId}/crm/leads/${lead.id}/calls/outbound`, {});
+      toast.success("Plivo call started");
+      if (r.data?.lead) mergeLead(r.data.lead);
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      setCallingLeadId("");
+    }
+  };
+
   return (
     <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -478,7 +493,7 @@ export default function CrmInbox() {
 
           <div className={`grid gap-6 items-start ${selectedLead ? "xl:grid-cols-[minmax(0,1fr)_560px]" : "grid-cols-1"}`}>
             <div className="space-y-3">
-              <LeadTable leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} onSelect={selectLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} />
+              <LeadTable leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} onSelect={selectLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
               <Pagination page={page} totalPages={totalPages} total={pagination.total} onPage={setPage} />
             </div>
             {selectedLead && (
@@ -503,6 +518,8 @@ export default function CrmInbox() {
                 createInvoice={createInvoice}
                 addLeadNote={addLeadNote}
                 deleteLeadNote={deleteLeadNote}
+                callingLeadId={callingLeadId}
+                callLead={callLead}
                 trashLead={trashLead}
                 restoreLead={restoreLead}
                 close={() => setSelectedLead(null)}
@@ -536,7 +553,7 @@ function Pagination({ page, totalPages, total, onPage }) {
   return <div className="flex items-center justify-between text-sm text-muted-foreground"><span>{total} leads</span><div className="flex items-center gap-2"><button disabled={page <= 1} onClick={() => onPage(page - 1)} className="px-3 h-8 rounded-lg border bg-card disabled:opacity-40">Previous</button><span>Page {page} of {totalPages}</span><button disabled={page >= totalPages} onClick={() => onPage(page + 1)} className="px-3 h-8 rounded-lg border bg-card disabled:opacity-40">Next</button></div></div>;
 }
 
-function LeadTable({ leads, fields, states, selectedLead, loading, trashed, onSelect, onStatus, onTrash, onRestore }) {
+function LeadTable({ leads, fields, states, selectedLead, loading, trashed, callingLeadId, onSelect, onStatus, onTrash, onRestore, onCall }) {
   const primaryFields = fields.slice(0, 4);
   return (
     <div className={`rounded-xl border bg-card overflow-hidden ${loading ? "opacity-60" : ""}`}>
@@ -565,7 +582,12 @@ function LeadTable({ leads, fields, states, selectedLead, loading, trashed, onSe
                     {trashed ? (
                       <button onClick={() => onRestore(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
                     ) : (
-                      <button onClick={() => onTrash(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
+                      <div className="flex items-center justify-end gap-2">
+                        <button onClick={() => onCall(lead)} disabled={!values.phone || callingLeadId === lead.id} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-40" title={values.phone ? "Call lead" : "Phone number required"}>
+                          {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
+                        </button>
+                        <button onClick={() => onTrash(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -579,7 +601,7 @@ function LeadTable({ leads, fields, states, selectedLead, loading, trashed, onSe
 }
 
 function LeadDetail(props) {
-  const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, addLeadNote, deleteLeadNote, trashLead, restoreLead, close, wsId } = props;
+  const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, addLeadNote, deleteLeadNote, callingLeadId, callLead, trashLead, restoreLead, close, wsId } = props;
   const [detailTab, setDetailTab] = useState("Details");
   const [activeStageId, setActiveStageId] = useState("");
   const [noteDraft, setNoteDraft] = useState("");
@@ -684,7 +706,12 @@ function LeadDetail(props) {
             {isTrashed ? (
               <button onClick={() => restoreLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
             ) : (
-              <button onClick={() => trashLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-50" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
+              <>
+                <button onClick={() => callLead(lead)} disabled={saving || !values.phone || callingLeadId === lead.id} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title={values.phone ? "Call lead" : "Phone number required"}>
+                  {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
+                </button>
+                <button onClick={() => trashLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-50" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
+              </>
             )}
             <button onClick={close} className="p-1 rounded-lg hover:bg-accent text-muted-foreground" title="Close details"><XCircle className="w-5 h-5" /></button>
           </div>
@@ -802,7 +829,17 @@ function LeadDetail(props) {
               ) : (lead.lead_notes || []).map((note) => (
                 <div key={note.id} className="flex justify-end">
                   <div className="max-w-[86%] rounded-2xl rounded-br-md bg-primary text-primary-foreground px-3 py-2 shadow-sm">
+                    {note.source === "call_agent" && (
+                      <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[10px] font-semibold uppercase opacity-80">
+                        <PhoneCall className="w-3 h-3" />
+                        <span>{note.call_provider || "call"}</span>
+                        {note.call_direction && <span>{note.call_direction}</span>}
+                        {note.status && <span>{note.status}</span>}
+                        {note.duration && <span>{note.duration}s</span>}
+                      </div>
+                    )}
                     <div className="text-sm whitespace-pre-wrap leading-relaxed">{note.body}</div>
+                    {note.recording_url && <a href={note.recording_url} target="_blank" rel="noreferrer" className="mt-1 block text-[10px] underline underline-offset-2 opacity-90">Open recording</a>}
                     <div className="mt-1 flex items-center justify-end gap-2 text-[10px] opacity-80">
                       <span>{new Date(note.created_at).toLocaleString()}</span>
                       <button onClick={() => deleteLeadNote(note.id)} disabled={saving} className="opacity-80 hover:opacity-100 disabled:opacity-40" title="Remove note"><Trash2 className="w-3 h-3" /></button>

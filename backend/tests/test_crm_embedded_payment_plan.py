@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from datetime import datetime
 
 from fastapi import HTTPException
 
@@ -10,6 +11,7 @@ from crm import (  # noqa: E402
     DEFAULT_ORGANIZATION,
     DEFAULT_STATES,
     TRASH_RETENTION_DAYS,
+    build_crm_analytics,
     build_manual_lead,
     effective_organization,
     invoice_html,
@@ -133,6 +135,86 @@ def test_lead_note_requires_body_and_gets_timestamp():
         assert False, "empty note should fail"
     except HTTPException as exc:
         assert exc.status_code == 400
+
+
+def test_call_agent_note_preserves_plivo_metadata():
+    note = normalize_lead_note({
+        "body": "Customer asked for a callback tomorrow",
+        "author": "Manager Chat",
+        "source": "call_agent",
+        "call_id": "call-123",
+        "direction": "outbound",
+        "duration": "73",
+        "outcome": "callback_requested",
+        "transcript": "Please call me tomorrow.",
+        "summary": "Callback requested",
+    })
+
+    assert note["source"] == "call_agent"
+    assert note["call_provider"] == "plivo"
+    assert note["call_id"] == "call-123"
+    assert note["outcome"] == "callback_requested"
+
+
+def test_crm_analytics_empty_returns_zeroes():
+    analytics = build_crm_analytics([], now=datetime.fromisoformat("2026-09-03T10:00:00+00:00"))
+
+    assert analytics["totals"]["leads"] == 0
+    assert analytics["totals"]["payments_collected"] == "0"
+    assert analytics["this_month_totals"]["payments_collected"] == "0"
+    assert analytics["today_totals"]["leads"] == 0
+    assert analytics["day_buckets"] == []
+
+
+def test_crm_analytics_counts_leads_payments_due_and_buckets():
+    leads = [
+        {
+            "_id": "lead-1",
+            "field_values": {"full_name": "Diya Sharma", "phone": "999"},
+            "status": "new",
+            "customer_status": "customer",
+            "conversion_type": "single_payment",
+            "payment_summary": {"total_amount": "10000"},
+            "created_at": "2026-09-03T08:00:00+00:00",
+            "receipts": [
+                {"id": "r1", "receipt_number": "REC-1", "amount": "4000", "payment_date": "2026-09-03", "status": "Paid", "payment_method": "UPI"},
+                {"id": "r2", "receipt_number": "REC-2", "amount": "1000", "payment_date": "2026-08-15", "status": "Pending"},
+            ],
+        },
+        {
+            "_id": "lead-2",
+            "field_values": {"full_name": "Aman Rao", "phone": "888"},
+            "status": "contacted",
+            "customer_status": "lead",
+            "created_at": "2026-08-15T08:00:00+00:00",
+            "receipts": [],
+        },
+        {
+            "_id": "lead-3",
+            "field_values": {"full_name": "Nia Bose", "phone": "777"},
+            "status": "won",
+            "customer_status": "customer",
+            "conversion_type": "payment_plan",
+            "payment_plan": {"total_amount": "20000", "stages": [{"id": "stage-1", "name": "Token", "amount": "5000"}]},
+            "created_at": "2026-09-01T08:00:00+00:00",
+            "receipts": [{"id": "r3", "receipt_number": "REC-3", "stage_id": "stage-1", "amount": "5000", "payment_date": "2026-09-01", "status": "Paid"}],
+        },
+    ]
+
+    analytics = build_crm_analytics(leads, now=datetime.fromisoformat("2026-09-03T10:00:00+00:00"))
+
+    assert analytics["totals"]["leads"] == 3
+    assert analytics["totals"]["customers"] == 2
+    assert analytics["totals"]["new_leads"] == 1
+    assert analytics["totals"]["payments_collected"] == "9000"
+    assert analytics["totals"]["due_amount"] == "20000"
+    assert analytics["this_month_totals"]["leads"] == 2
+    assert analytics["this_month_totals"]["payments_collected"] == "9000"
+    assert analytics["today_totals"]["leads"] == 1
+    assert analytics["today_totals"]["payments_collected"] == "4000"
+    assert analytics["status_counts"] == {"new": 1, "contacted": 1, "won": 1}
+    assert {row["month"]: row["leads"] for row in analytics["month_buckets"]} == {"2026-08": 1, "2026-09": 2}
+    assert analytics["recent_receipts"][0]["receipt_number"] == "REC-1"
 
 
 def test_single_payment_summary_tracks_partial_and_full_due():

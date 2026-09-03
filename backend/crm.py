@@ -87,6 +87,19 @@ def db_from(request):
     return request.app.state.db if hasattr(request.app.state, "db") else request.app.extra.get("db")
 
 
+async def require_workspace_access(request, ws_id):
+    from auth import get_current_user
+
+    db = db_from(request)
+    user = await get_current_user(request, db)
+    workspace = await db.workspaces.find_one({"_id": oid(ws_id)})
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if str(workspace.get("user_id")) != str(user.get("_id")) and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return user, workspace
+
+
 def doc_out(doc):
     if not doc:
         return None
@@ -427,6 +440,188 @@ def payments_total(receipts, stage_id=None):
             continue
         total += money_value(receipt.get("amount"))
     return total
+
+
+def parse_date(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        if len(text) == 10:
+            return datetime.fromisoformat(text).replace(tzinfo=timezone.utc)
+        parsed = datetime.fromisoformat(text)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def date_key(value):
+    parsed = parse_date(value)
+    return parsed.date().isoformat() if parsed else ""
+
+
+def month_key(value):
+    parsed = parse_date(value)
+    return parsed.strftime("%Y-%m") if parsed else ""
+
+
+def receipt_is_collected(receipt):
+    status = str(receipt.get("status") or "").strip().lower()
+    if not status:
+        return True
+    return status in {"paid", "success", "successful", "completed", "complete", "collected"}
+
+
+def lead_due_amount(lead):
+    receipts = lead.get("receipts") or []
+    if lead.get("conversion_type") == "payment_plan":
+        return money_value(recalculate_payment_plan(lead.get("payment_plan") or {}, receipts).get("due_amount"))
+    if lead.get("conversion_type") == "single_payment":
+        return money_value(single_payment_summary(lead, receipts).get("due_amount"))
+    return 0.0
+
+
+def zero_crm_analytics(now=None):
+    now = now or datetime.now(timezone.utc)
+    today = now.date().isoformat()
+    this_month = now.strftime("%Y-%m")
+    return {
+        "as_of": now.isoformat(),
+        "today": today,
+        "this_month": this_month,
+        "totals": {
+            "leads": 0,
+            "customers": 0,
+            "active_leads": 0,
+            "new_leads": 0,
+            "payments_collected": "0",
+            "due_amount": "0",
+            "receipts": 0,
+        },
+        "this_month_totals": {
+            "leads": 0,
+            "customers": 0,
+            "payments_collected": "0",
+            "receipts": 0,
+        },
+        "today_totals": {
+            "leads": 0,
+            "payments_collected": "0",
+            "receipts": 0,
+        },
+        "status_counts": {},
+        "customer_status_counts": {},
+        "day_buckets": [],
+        "month_buckets": [],
+        "recent_receipts": [],
+    }
+
+
+def build_crm_analytics(leads, now=None, day_limit=30, month_limit=12):
+    now = now or datetime.now(timezone.utc)
+    analytics = zero_crm_analytics(now)
+    today = analytics["today"]
+    this_month = analytics["this_month"]
+    day_buckets = {}
+    month_buckets = {}
+    recent_receipts = []
+    total_collected = 0.0
+    month_collected = 0.0
+    today_collected = 0.0
+    due_total = 0.0
+    receipt_count = 0
+    month_receipts = 0
+    today_receipts = 0
+
+    for lead in leads or []:
+        created_day = date_key(lead.get("created_at"))
+        created_month = month_key(lead.get("created_at"))
+        status = str(lead.get("status") or "unknown").strip() or "unknown"
+        customer_status = str(lead.get("customer_status") or "lead").strip() or "lead"
+        analytics["totals"]["leads"] += 1
+        analytics["status_counts"][status] = analytics["status_counts"].get(status, 0) + 1
+        analytics["customer_status_counts"][customer_status] = analytics["customer_status_counts"].get(customer_status, 0) + 1
+        if customer_status == "customer":
+            analytics["totals"]["customers"] += 1
+        else:
+            analytics["totals"]["active_leads"] += 1
+        if status == "new":
+            analytics["totals"]["new_leads"] += 1
+        if created_month == this_month:
+            analytics["this_month_totals"]["leads"] += 1
+        if created_day == today:
+            analytics["today_totals"]["leads"] += 1
+        if created_day:
+            day_buckets.setdefault(created_day, {"date": created_day, "leads": 0, "payments_collected": 0.0, "receipts": 0})
+            day_buckets[created_day]["leads"] += 1
+        if created_month:
+            month_buckets.setdefault(created_month, {"month": created_month, "leads": 0, "payments_collected": 0.0, "receipts": 0})
+            month_buckets[created_month]["leads"] += 1
+
+        due_total += lead_due_amount(lead)
+        lead_values = lead.get("field_values") or {}
+        lead_name = lead_values.get("full_name") or lead.get("full_name") or lead_values.get("phone") or lead.get("phone") or str(lead.get("_id", ""))
+        for receipt in lead.get("receipts") or []:
+            if not receipt_is_collected(receipt):
+                continue
+            amount = money_value(receipt.get("amount"))
+            payment_day = date_key(receipt.get("payment_date") or receipt.get("created_at"))
+            payment_month = month_key(receipt.get("payment_date") or receipt.get("created_at"))
+            total_collected += amount
+            receipt_count += 1
+            if payment_month == this_month:
+                month_collected += amount
+                month_receipts += 1
+            if payment_day == today:
+                today_collected += amount
+                today_receipts += 1
+            if payment_day:
+                day_buckets.setdefault(payment_day, {"date": payment_day, "leads": 0, "payments_collected": 0.0, "receipts": 0})
+                day_buckets[payment_day]["payments_collected"] += amount
+                day_buckets[payment_day]["receipts"] += 1
+            if payment_month:
+                month_buckets.setdefault(payment_month, {"month": payment_month, "leads": 0, "payments_collected": 0.0, "receipts": 0})
+                month_buckets[payment_month]["payments_collected"] += amount
+                month_buckets[payment_month]["receipts"] += 1
+            recent_receipts.append({
+                "id": receipt.get("id"),
+                "lead_id": str(lead.get("_id") or lead.get("id") or ""),
+                "lead_name": lead_name,
+                "receipt_number": receipt.get("receipt_number", ""),
+                "amount": money_text(amount),
+                "payment_date": receipt.get("payment_date") or receipt.get("created_at") or "",
+                "payment_method": receipt.get("payment_method", ""),
+                "status": receipt.get("status", ""),
+            })
+
+    analytics["totals"]["payments_collected"] = money_text(total_collected)
+    analytics["totals"]["due_amount"] = money_text(due_total)
+    analytics["totals"]["receipts"] = receipt_count
+    analytics["this_month_totals"]["payments_collected"] = money_text(month_collected)
+    analytics["this_month_totals"]["receipts"] = month_receipts
+    analytics["this_month_totals"]["customers"] = analytics["customer_status_counts"].get("customer", 0)
+    analytics["today_totals"]["payments_collected"] = money_text(today_collected)
+    analytics["today_totals"]["receipts"] = today_receipts
+    analytics["day_buckets"] = [
+        {**bucket, "payments_collected": money_text(bucket["payments_collected"])}
+        for bucket in sorted(day_buckets.values(), key=lambda b: b["date"])[-day_limit:]
+    ]
+    analytics["month_buckets"] = [
+        {**bucket, "payments_collected": money_text(bucket["payments_collected"])}
+        for bucket in sorted(month_buckets.values(), key=lambda b: b["month"])[-month_limit:]
+    ]
+    analytics["recent_receipts"] = sorted(
+        recent_receipts,
+        key=lambda r: str(r.get("payment_date") or ""),
+        reverse=True,
+    )[:10]
+    return analytics
 
 
 def payment_stage_remaining_amount(stage, receipts):
@@ -815,12 +1010,18 @@ def normalize_lead_note(body):
     note = str(body.get("body") or body.get("note") or body.get("content") or "").strip()
     if not note:
         raise HTTPException(status_code=400, detail="Note cannot be empty")
-    return {
+    normalized = {
         "id": str(ObjectId()),
         "body": note,
         "author": str(body.get("author") or "Internal").strip() or "Internal",
         "created_at": now_iso(),
     }
+    for key in ("source", "call_provider", "call_id", "direction", "duration", "outcome", "transcript", "summary"):
+        if body.get(key) is not None:
+            normalized[key] = str(body.get(key) or "").strip()
+    if normalized.get("source") == "call_agent" and not normalized.get("call_provider"):
+        normalized["call_provider"] = "plivo"
+    return normalized
 
 
 def receipt_html(receipt):
@@ -1054,6 +1255,17 @@ async def update_organization(ws_id: str, request: Request, body: dict = Body(..
     return doc_out(await db.crm_settings.find_one({"workspace_id": ws_id}))
 
 
+@router.get("/analytics/overview")
+async def crm_analytics_overview(ws_id: str, request: Request):
+    await require_workspace_access(request, ws_id)
+    db = db_from(request)
+    settings = await ensure_crm_settings(db, ws_id)
+    await purge_expired_trashed_leads(db, ws_id)
+    docs = await db.crm_leads.find(lead_query(ws_id)).sort("created_at", -1).to_list(5000)
+    leads = [decorate_lead(doc, settings) for doc in docs]
+    return build_crm_analytics(leads)
+
+
 @router.get("/leads")
 async def list_leads(
     ws_id: str,
@@ -1110,6 +1322,15 @@ async def get_lead(ws_id: str, lead_id: str, request: Request):
     if not doc:
         raise HTTPException(status_code=404, detail="Lead not found")
     return decorate_lead(doc, settings)
+
+
+@router.post("/leads/{lead_id}/calls/outbound")
+async def start_lead_outbound_call(ws_id: str, lead_id: str, request: Request):
+    await require_workspace_access(request, ws_id)
+    from plivo_calls import start_outbound_call
+
+    db = db_from(request)
+    return await start_outbound_call(db, ws_id, lead_id, request)
 
 
 @router.delete("/leads/{lead_id}")

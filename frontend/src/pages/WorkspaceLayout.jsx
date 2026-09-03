@@ -11,6 +11,7 @@ import { useAuth } from "../context/AuthContext";
 import { Logo } from "../components/Logo";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { ModelPicker } from "../components/ModelPicker";
+import { ManagerChatWidget } from "../components/ManagerChatWidget";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
@@ -259,6 +260,7 @@ export default function WorkspaceLayout() {
         <main className={`flex-1 ${isBlogEditor ? "min-h-0 overflow-hidden" : "overflow-y-auto"}`}>
           <Outlet context={{ ws, setWs, refresh, loadNotes }} />
         </main>
+        {!isBlogEditor && <ManagerChatWidget ws={ws} />}
       </div>
     </div>
   );
