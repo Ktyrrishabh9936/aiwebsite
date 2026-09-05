@@ -1310,6 +1310,9 @@ async def create_lead(ws_id: str, request: Request, body: dict = Body(...)):
     await purge_expired_trashed_leads(db, ws_id)
     lead_doc = build_manual_lead(ws_id, body, settings)
     await db.crm_leads.insert_one(lead_doc)
+    from plivo_calls import start_qualification_call
+
+    await start_qualification_call(db, ws_id, str(lead_doc["_id"]), request, auto=True, raise_on_error=False)
     return decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": lead_doc["_id"]}), settings)
 
 
@@ -1325,12 +1328,14 @@ async def get_lead(ws_id: str, lead_id: str, request: Request):
 
 
 @router.post("/leads/{lead_id}/calls/outbound")
-async def start_lead_outbound_call(ws_id: str, lead_id: str, request: Request):
+async def start_lead_outbound_call(ws_id: str, lead_id: str, request: Request, body: dict = Body(None)):
     await require_workspace_access(request, ws_id)
-    from plivo_calls import start_outbound_call
+    from plivo_calls import start_outbound_call, start_qualification_call
 
     db = db_from(request)
-    return await start_outbound_call(db, ws_id, lead_id, request)
+    if (body or {}).get("mode") == "staff_bridge":
+        return await start_outbound_call(db, ws_id, lead_id, request)
+    return await start_qualification_call(db, ws_id, lead_id, request)
 
 
 @router.delete("/leads/{lead_id}")

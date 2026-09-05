@@ -721,10 +721,11 @@ async def _plivo_body_params(request: Request):
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/{lead_id}/outbound/answer", methods=["GET", "POST"])
 async def plivo_outbound_answer(ws_id: str, lead_id: str, request: Request):
-    from plivo_calls import callback_urls, normalize_phone, outbound_bridge_xml, public_base_url, require_plivo_signature
+    from plivo_calls import callback_urls, normalize_phone, outbound_bridge_xml, plivo_config, public_base_url, require_plivo_signature
 
     params = await _plivo_params(request)
     await require_plivo_signature(request, await _plivo_body_params(request))
+    cfg = plivo_config()
     lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
     if not lead:
         raise HTTPException(404, "Lead not found")
@@ -733,12 +734,21 @@ async def plivo_outbound_answer(ws_id: str, lead_id: str, request: Request):
     if not lead_phone:
         raise HTTPException(400, "Lead phone number is required")
     urls = callback_urls(public_base_url(request), ws_id, lead_id)
-    return outbound_bridge_xml(lead_phone, urls["recording"])
+    return outbound_bridge_xml(lead_phone, urls["recording"], caller_id=cfg["from_number"])
+
+
+@api.get("/plivo/workspaces/{ws_id}/calls/debug")
+async def plivo_calls_debug(ws_id: str, request: Request, lead_id: str = None):
+    from plivo_calls import plivo_config_debug, public_base_url
+
+    user = await require_user(request)
+    await owned_workspace(ws_id, user)
+    return plivo_config_debug(public_base_url(request), ws_id, lead_id)
 
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/outbound/status", methods=["GET", "POST"])
 async def plivo_outbound_status(ws_id: str, request: Request):
-    from plivo_calls import log_call_note, require_plivo_signature
+    from plivo_calls import log_call_note, require_plivo_signature, sync_qualification_status_from_payload
 
     params = await _plivo_params(request)
     await require_plivo_signature(request, await _plivo_body_params(request))
@@ -751,7 +761,16 @@ async def plivo_outbound_status(ws_id: str, request: Request):
         "body": f"Outbound Plivo call status: {params.get('CallStatus') or params.get('HangupCause') or 'updated'}",
         "outcome": params.get("CallStatus") or params.get("HangupCause") or "updated",
     })
+    await sync_qualification_status_from_payload(db, ws_id, lead_id, params)
     return {"ok": True, "logged": True}
+
+
+@api.post("/plivo/workspaces/{ws_id}/calls/{lead_id}/qualification/result")
+async def plivo_qualification_result(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
+    from plivo_calls import require_agent_callback_token, save_qualification_result
+
+    require_agent_callback_token(request)
+    return await save_qualification_result(db, ws_id, lead_id, body or {})
 
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/inbound/answer", methods=["GET", "POST"])
@@ -890,6 +909,7 @@ async def google_sheets_poller_loop():
     from models import CRMLead
     from crm import active_fields, ensure_crm_settings
     from google_sheets import refresh_access_token
+    from plivo_calls import start_qualification_call
     await asyncio.sleep(15)
     while True:
         try:
@@ -981,7 +1001,14 @@ async def google_sheets_poller_loop():
                             fields=row_dict,
                             status="new"
                         )
-                        await db.crm_leads.insert_one(lead_doc.to_mongo())
+                        lead_data = lead_doc.to_mongo()
+                        res = await db.crm_leads.insert_one(lead_data)
+                        lead_id = str(res.inserted_id)
+                        fake_request = type("RequestContext", (), {
+                            "headers": {},
+                            "url": type("UrlContext", (), {"scheme": "http", "netloc": "", "path": "", "query": ""})(),
+                        })()
+                        await start_qualification_call(db, ws_id, lead_id, fake_request, auto=True, raise_on_error=False)
                         new_leads_count += 1
                 
                 new_cursor = current_cursor + len(rows)

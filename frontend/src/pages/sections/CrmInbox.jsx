@@ -432,7 +432,8 @@ export default function CrmInbox() {
     try {
       setCallingLeadId(lead.id);
       const r = await api.post(`/workspaces/${wsId}/crm/leads/${lead.id}/calls/outbound`, {});
-      toast.success("Plivo call started");
+      const leadPhone = r.data?.lead_phone;
+      toast.success(leadPhone ? `Qualification call started to ${leadPhone}` : "Qualification call started");
       if (r.data?.lead) mergeLead(r.data.lead);
     } catch (e) {
       toast.error(formatError(e.response?.data?.detail));
