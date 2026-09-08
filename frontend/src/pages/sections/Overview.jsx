@@ -13,6 +13,8 @@ import {
   BadgeIndianRupee,
   CalendarDays,
   WalletCards,
+  PhoneCall,
+  Ban,
 } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { toast } from "sonner";
@@ -26,6 +28,7 @@ const zeroAnalytics = {
   day_buckets: [],
   month_buckets: [],
   recent_receipts: [],
+  scheduled_calls: [],
 };
 
 function Stat({ icon: Icon, label, value, testid }) {
@@ -82,6 +85,7 @@ export default function Overview() {
   const [blogs, setBlogs] = useState([]);
   const [crmAnalytics, setCrmAnalytics] = useState(zeroAnalytics);
   const [genning, setGenning] = useState(false);
+  const [cancellingCallId, setCancellingCallId] = useState("");
 
   const load = useCallback(() => {
     api.get(`/workspaces/${ws.id}/tasks`).then((r) => setTasks(r.data)).catch(() => {});
@@ -109,6 +113,19 @@ export default function Overview() {
     }
   };
 
+  const cancelScheduledCall = async (leadId) => {
+    try {
+      setCancellingCallId(leadId);
+      await api.post(`/workspaces/${ws.id}/crm/leads/${leadId}/calls/qualification/cancel`, {});
+      toast.success("Scheduled call cancelled");
+      load();
+    } catch (e) {
+      toast.error("Could not cancel scheduled call");
+    } finally {
+      setCancellingCallId("");
+    }
+  };
+
   const building = ws.brain_status === "building" || ws.brain_status === "pending";
   const published = blogs.filter((b) => b.status === "published").length;
   const totals = crmAnalytics.totals || zeroAnalytics.totals;
@@ -116,6 +133,7 @@ export default function Overview() {
   const todayTotals = crmAnalytics.today_totals || zeroAnalytics.today_totals;
   const days = chartData(crmAnalytics.day_buckets, "date");
   const months = chartData(crmAnalytics.month_buckets, "month");
+  const scheduledCalls = crmAnalytics.scheduled_calls || [];
 
   return (
     <div className="p-6 sm:p-10 max-w-6xl mx-auto space-y-8">
@@ -167,6 +185,28 @@ export default function Overview() {
       <div className="grid lg:grid-cols-2 gap-4">
         <AnalyticsChart title="Day-wise CRM" data={days} empty="No daily CRM activity yet." />
         <AnalyticsChart title="Month-wise CRM" data={months} empty="No monthly CRM activity yet." />
+      </div>
+
+      <div className="border border-border rounded-md bg-card p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-display font-bold flex items-center gap-2"><PhoneCall className="w-4 h-4 text-primary" /> Scheduled qualification calls</h3>
+          <button onClick={() => nav("crm")} className="text-sm text-primary inline-flex items-center gap-1">View CRM <ArrowRight className="w-3.5 h-3.5" /></button>
+        </div>
+        <div className="space-y-3">
+          {scheduledCalls.slice(0, 5).map((call) => (
+            <div key={call.lead_id} className="grid sm:grid-cols-[1fr_auto] gap-3 rounded-md border bg-background p-3 text-sm">
+              <div className="min-w-0">
+                <div className="font-medium truncate">{call.lead_name || call.phone || "Unnamed Lead"}</div>
+                <div className="text-xs text-muted-foreground">{call.phone || "No phone"} - {call.scheduled_for ? new Date(call.scheduled_for).toLocaleString() : "No time"}</div>
+              </div>
+              <button onClick={() => cancelScheduledCall(call.lead_id)} disabled={cancellingCallId === call.lead_id} className="inline-flex items-center justify-center gap-1.5 px-3 h-9 rounded-md border bg-card hover:bg-accent text-xs font-semibold disabled:opacity-50">
+                {cancellingCallId === call.lead_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Ban className="w-3.5 h-3.5" />}
+                Cancel Call
+              </button>
+            </div>
+          ))}
+          {scheduledCalls.length === 0 && <div className="text-sm text-muted-foreground">No qualification calls scheduled.</div>}
+        </div>
       </div>
 
       <div className="border border-border rounded-md bg-card p-6">

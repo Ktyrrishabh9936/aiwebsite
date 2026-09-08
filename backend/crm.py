@@ -318,6 +318,8 @@ def build_manual_lead(ws_id, body, settings):
         "assigned_salesperson": values.get("assigned_salesperson"),
         "notes": "",
         "lead_notes": [],
+        "communication_summary": {},
+        "qualification_call": {},
         "fields": {},
         "field_values": values,
         "status": status,
@@ -520,6 +522,7 @@ def zero_crm_analytics(now=None):
         "day_buckets": [],
         "month_buckets": [],
         "recent_receipts": [],
+        "scheduled_calls": [],
     }
 
 
@@ -553,6 +556,18 @@ def build_crm_analytics(leads, now=None, day_limit=30, month_limit=12):
             analytics["totals"]["active_leads"] += 1
         if status == "new":
             analytics["totals"]["new_leads"] += 1
+        qualification = lead.get("qualification_call") or {}
+        if qualification.get("status") == "scheduled":
+            values = lead.get("field_values") or {}
+            analytics["scheduled_calls"].append({
+                "lead_id": str(lead.get("id") or lead.get("_id") or ""),
+                "lead_name": values.get("full_name") or lead.get("full_name") or values.get("phone") or lead.get("phone") or "Unnamed Lead",
+                "phone": values.get("phone") or lead.get("phone") or "",
+                "status": qualification.get("status"),
+                "scheduled_for": qualification.get("scheduled_for", ""),
+                "qualification_category": qualification.get("qualification_category", ""),
+                "qualification_score": qualification.get("qualification_score"),
+            })
         if created_month == this_month:
             analytics["this_month_totals"]["leads"] += 1
         if created_day == today:
@@ -620,6 +635,10 @@ def build_crm_analytics(leads, now=None, day_limit=30, month_limit=12):
         recent_receipts,
         key=lambda r: str(r.get("payment_date") or ""),
         reverse=True,
+    )[:10]
+    analytics["scheduled_calls"] = sorted(
+        analytics["scheduled_calls"],
+        key=lambda r: str(r.get("scheduled_for") or ""),
     )[:10]
     return analytics
 
@@ -1310,9 +1329,9 @@ async def create_lead(ws_id: str, request: Request, body: dict = Body(...)):
     await purge_expired_trashed_leads(db, ws_id)
     lead_doc = build_manual_lead(ws_id, body, settings)
     await db.crm_leads.insert_one(lead_doc)
-    from plivo_calls import start_qualification_call
+    from plivo_calls import schedule_first_qualification_call
 
-    await start_qualification_call(db, ws_id, str(lead_doc["_id"]), request, auto=True, raise_on_error=False)
+    await schedule_first_qualification_call(db, ws_id, str(lead_doc["_id"]))
     return decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": lead_doc["_id"]}), settings)
 
 
@@ -1336,6 +1355,15 @@ async def start_lead_outbound_call(ws_id: str, lead_id: str, request: Request, b
     if (body or {}).get("mode") == "staff_bridge":
         return await start_outbound_call(db, ws_id, lead_id, request)
     return await start_qualification_call(db, ws_id, lead_id, request)
+
+
+@router.post("/leads/{lead_id}/calls/qualification/cancel")
+async def cancel_lead_qualification_call(ws_id: str, lead_id: str, request: Request):
+    user, _ = await require_workspace_access(request, ws_id)
+    from plivo_calls import cancel_scheduled_qualification_call
+
+    db = db_from(request)
+    return await cancel_scheduled_qualification_call(db, ws_id, lead_id, user.get("email") or user.get("name") or "admin")
 
 
 @router.delete("/leads/{lead_id}")
@@ -1439,6 +1467,11 @@ async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = B
         "assigned_salesperson": values.get("assigned_salesperson"),
         "updated_at": now_iso(),
     }
+    qualification = doc.get("qualification_call") or {}
+    if doc.get("status") == "lost" and status != "lost" and qualification.get("qualification_category") == "junk":
+        updates["qualification_call.qualification_category"] = ""
+        updates["qualification_call.last_error"] = ""
+        updates["qualification_call.disconnection_reason"] = ""
     await db.crm_leads.update_one({"workspace_id": ws_id, "_id": oid(lead_id)}, {"$set": updates})
     return decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)}), settings)
 

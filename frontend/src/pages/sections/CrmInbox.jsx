@@ -4,7 +4,7 @@ import {
   Users, Calendar, Info, Search, XCircle, Save, BadgeIndianRupee,
   Plus, CheckCircle2, Settings, Trash2, Columns3, Palette, Building2,
   ReceiptText, FileText, ExternalLink, RefreshCw, FileCode2, MessageSquare, Send,
-  Download, RotateCcw, PhoneCall
+  Download, RotateCcw, PhoneCall, Ban
 } from "lucide-react";
 import { toast } from "sonner";
 import api, { API, formatError } from "../../lib/api";
@@ -15,6 +15,7 @@ const PAYMENT_METHODS = ["Cash", "Bank Transfer", "UPI", "Cheque", "Card", "Othe
 const PAYMENT_STATUSES = ["Paid", "Pending"];
 const ORG_FIELDS = ["company_name", "logo_url", "address", "phone", "email", "website", "tax_number", "bank_details", "authorized_signatory", "receipt_prefix", "invoice_prefix"];
 const DETAIL_TABS = ["Details", "Payments", "Receipts", "Invoice", "Notes"];
+const LIVE_CALL_STATUSES = new Set(["scheduled", "queued", "started", "answered"]);
 const today = () => new Date().toISOString().slice(0, 10);
 const stateClasses = {
   blue: "bg-blue-500/10 text-blue-500 border-blue-500/20",
@@ -134,6 +135,10 @@ function finalInvoiceDownloadUrl(wsId, leadId) {
   return `${API}/workspaces/${wsId}/crm/leads/${leadId}/final-invoice/pdf`;
 }
 
+function needsLiveCallRefresh(lead) {
+  return LIVE_CALL_STATUSES.has(lead?.qualification_call?.status);
+}
+
 export default function CrmInbox() {
   const { wsId } = useParams();
   const [activeTab, setActiveTab] = useState("records");
@@ -143,6 +148,7 @@ export default function CrmInbox() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [callingLeadId, setCallingLeadId] = useState("");
+  const [cancellingCallId, setCancellingCallId] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -196,9 +202,18 @@ export default function CrmInbox() {
         api.get(`/workspaces/${wsId}/crm/leads?${params.toString()}`)
       ]);
       setSettings(settingsRes.data);
-      setLeads(leadsRes.data.items || []);
+      const items = leadsRes.data.items || [];
+      setLeads(items);
       setPagination({ total: leadsRes.data.total || 0, page: leadsRes.data.page || page, limit: leadsRes.data.limit || 10 });
-      if (selectedLead && !(leadsRes.data.items || []).some((lead) => lead.id === selectedLead.id)) setSelectedLead(null);
+      if (selectedLead) {
+        const refreshed = items.find((lead) => lead.id === selectedLead.id);
+        if (refreshed) {
+          setSelectedLead(refreshed);
+          setFieldValues(valuesFrom(refreshed, (settingsRes.data.fields || []).filter((field) => field.active !== false)));
+        } else {
+          setSelectedLead(null);
+        }
+      }
     } catch (e) {
       toast.error(formatError(e.response?.data?.detail));
     } finally {
@@ -216,6 +231,20 @@ export default function CrmInbox() {
     setLeads((prev) => prev.map((lead) => lead.id === updated.id ? updated : lead));
     selectLead(updated);
   };
+
+  useEffect(() => {
+    if (!selectedLead?.id || !needsLiveCallRefresh(selectedLead)) return undefined;
+    const interval = setInterval(async () => {
+      try {
+        const r = await api.get(`/workspaces/${wsId}/crm/leads/${selectedLead.id}`);
+        mergeLead(r.data);
+      } catch {
+        clearInterval(interval);
+      }
+    }, 6000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsId, selectedLead?.id, selectedLead?.qualification_call?.status]);
 
   const createLead = async () => {
     try {
@@ -442,6 +471,21 @@ export default function CrmInbox() {
     }
   };
 
+  const cancelScheduledCall = async (lead) => {
+    if (!lead?.id) return;
+    try {
+      setCancellingCallId(lead.id);
+      const r = await api.post(`/workspaces/${wsId}/crm/leads/${lead.id}/calls/qualification/cancel`, {});
+      toast.success("Scheduled call cancelled");
+      if (r.data?.lead) mergeLead(r.data.lead);
+      await loadAll();
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      setCancellingCallId("");
+    }
+  };
+
   return (
     <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -520,7 +564,9 @@ export default function CrmInbox() {
                 addLeadNote={addLeadNote}
                 deleteLeadNote={deleteLeadNote}
                 callingLeadId={callingLeadId}
+                cancellingCallId={cancellingCallId}
                 callLead={callLead}
+                cancelScheduledCall={cancelScheduledCall}
                 trashLead={trashLead}
                 restoreLead={restoreLead}
                 close={() => setSelectedLead(null)}
@@ -565,11 +611,15 @@ function LeadTable({ leads, fields, states, selectedLead, loading, trashed, call
             {leads.length === 0 ? <tr><td colSpan="4" className="p-8 text-center text-muted-foreground">{loading ? "Loading leads..." : "No leads found."}</td></tr> : leads.map((lead) => {
               const values = valuesFrom(lead, fields);
               const state = states.find((s) => s.key === lead.status) || states[0];
+              const qualification = lead.qualification_call || {};
+              const isJunk = qualification.qualification_category === "junk";
+              const scheduledFor = qualification.status === "scheduled" && qualification.scheduled_for;
               return (
                 <tr key={lead.id} onClick={() => onSelect(lead)} className={`hover:bg-accent/40 cursor-pointer transition-colors ${selectedLead?.id === lead.id ? "bg-accent/50" : ""}`}>
                   <td className="p-4">
-                    <div className="font-semibold text-foreground flex items-center gap-2">{values.full_name || values.phone || values.email || "Unnamed Lead"}{lead.customer_status === "customer" && <span className="text-[10px] uppercase px-1.5 py-0.5 rounded border border-emerald-500/30 text-emerald-500">Customer</span>}</div>
+                    <div className="font-semibold text-foreground flex items-center gap-2">{values.full_name || values.phone || values.email || "Unnamed Lead"}{lead.customer_status === "customer" && <span className="text-[10px] uppercase px-1.5 py-0.5 rounded border border-emerald-500/30 text-emerald-500">Customer</span>}{isJunk && <span className="text-[10px] uppercase px-1.5 py-0.5 rounded border border-destructive/30 text-destructive">Junk</span>}</div>
                     <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground mt-2">{primaryFields.map((field) => values[field.key] ? <span key={field.key}>{field.label}: {String(values[field.key])}</span> : null)}</div>
+                    {scheduledFor && <div className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-primary"><PhoneCall className="w-3 h-3" /> Scheduled {new Date(scheduledFor).toLocaleString()}</div>}
                   </td>
                   <td className="p-4" onClick={(e) => e.stopPropagation()}>
                     {trashed ? (
@@ -584,7 +634,7 @@ function LeadTable({ leads, fields, states, selectedLead, loading, trashed, call
                       <button onClick={() => onRestore(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
                     ) : (
                       <div className="flex items-center justify-end gap-2">
-                        <button onClick={() => onCall(lead)} disabled={!values.phone || callingLeadId === lead.id} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-40" title={values.phone ? "Call lead" : "Phone number required"}>
+                        <button onClick={() => onCall(lead)} disabled={!values.phone || callingLeadId === lead.id || isJunk} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-40" title={isJunk ? "Junk leads cannot be called" : values.phone ? "Call lead" : "Phone number required"}>
                           {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
                         </button>
                         <button onClick={() => onTrash(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
@@ -602,7 +652,7 @@ function LeadTable({ leads, fields, states, selectedLead, loading, trashed, call
 }
 
 function LeadDetail(props) {
-  const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, addLeadNote, deleteLeadNote, callingLeadId, callLead, trashLead, restoreLead, close, wsId } = props;
+  const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, addLeadNote, deleteLeadNote, callingLeadId, cancellingCallId, callLead, cancelScheduledCall, trashLead, restoreLead, close, wsId } = props;
   const [detailTab, setDetailTab] = useState("Details");
   const [activeStageId, setActiveStageId] = useState("");
   const [noteDraft, setNoteDraft] = useState("");
@@ -662,6 +712,9 @@ function LeadDetail(props) {
   const planStages = currentPlan.stages || [];
   const allPlanStagesPaid = planStages.length > 0 && planStages.every((stage) => stage.status === "paid");
   const canInvoice = (lead.receipts || []).length > 0 && planDue === 0 && (lead.conversion_type === "single_payment" || allPlanStagesPaid);
+  const communication = lead.communication_summary || {};
+  const qualification = lead.qualification_call || {};
+  const isJunkLead = qualification.qualification_category === "junk";
   const activeStageIndex = Math.max(0, (paymentPlan.stages || []).findIndex((stage) => stage.id === (activeStageId || paymentPlan.stages?.[0]?.id)));
   const activeStage = (paymentPlan.stages || [])[activeStageIndex];
   const stageCount = (paymentPlan.stages || []).length;
@@ -708,7 +761,7 @@ function LeadDetail(props) {
               <button onClick={() => restoreLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
             ) : (
               <>
-                <button onClick={() => callLead(lead)} disabled={saving || !values.phone || callingLeadId === lead.id} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title={values.phone ? "Call lead" : "Phone number required"}>
+                <button onClick={() => callLead(lead)} disabled={saving || !values.phone || callingLeadId === lead.id || isJunkLead} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title={isJunkLead ? "Junk leads cannot be called" : values.phone ? "Call lead" : "Phone number required"}>
                   {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
                 </button>
                 <button onClick={() => trashLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-50" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
@@ -718,6 +771,7 @@ function LeadDetail(props) {
           </div>
         </div>
         {isTrashed && <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs text-destructive">This lead is in trash and can be restored until {new Date(lead.delete_after).toLocaleDateString()}.</div>}
+        <QualificationSummary communication={communication} qualification={qualification} saving={saving || cancellingCallId === lead.id} onCancel={() => cancelScheduledCall(lead)} />
         <div className="flex rounded-lg border bg-background p-1 overflow-x-auto">
           {DETAIL_TABS.map((tab) => <button key={tab} onClick={() => setDetailTab(tab)} className={`px-3 h-9 rounded-md text-sm font-semibold whitespace-nowrap ${detailTab === tab ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{tab}</button>)}
         </div>
@@ -840,6 +894,7 @@ function LeadDetail(props) {
                       </div>
                     )}
                     <div className="text-sm whitespace-pre-wrap leading-relaxed">{note.body}</div>
+                    <StructuredCallDetails note={note} />
                     {note.recording_url && <a href={note.recording_url} target="_blank" rel="noreferrer" className="mt-1 block text-[10px] underline underline-offset-2 opacity-90">Open recording</a>}
                     <div className="mt-1 flex items-center justify-end gap-2 text-[10px] opacity-80">
                       <span>{new Date(note.created_at).toLocaleString()}</span>
@@ -878,6 +933,94 @@ function LeadDetail(props) {
       </div>
     </aside>
   );
+}
+
+function listItems(value) {
+  if (Array.isArray(value)) return value.filter(Boolean).map(String);
+  if (value && typeof value === "object") return Object.entries(value).filter(([, v]) => v != null && String(v).trim()).map(([k, v]) => `${k}: ${v}`);
+  if (typeof value === "string" && value.trim()) return value.split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
+  return [];
+}
+
+function QualificationSummary({ communication, qualification, saving, onCancel }) {
+  const hasSummary = communication.latest_summary || qualification.summary || qualification.status || qualification.scheduled_for;
+  if (!hasSummary) return null;
+  const status = communication.last_call_status || qualification.status || "updated";
+  const recording = communication.last_recording_url || qualification.recording_url;
+  const category = communication.qualification_category || qualification.qualification_category;
+  const score = communication.qualification_score ?? qualification.qualification_score;
+  const scheduledFor = qualification.status === "scheduled" && qualification.scheduled_for;
+  const categoryClass = category === "hot" ? "border-red-500/30 text-red-500 bg-red-500/10" : category === "warm" ? "border-amber-500/30 text-amber-500 bg-amber-500/10" : category === "cold" ? "border-blue-500/30 text-blue-500 bg-blue-500/10" : category === "junk" ? "border-destructive/30 text-destructive bg-destructive/10" : "border-border text-muted-foreground bg-muted";
+  return (
+    <section className="rounded-lg border bg-background p-4 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <h4 className="font-bold flex items-center gap-2"><PhoneCall className="w-4 h-4 text-primary" /> Qualification</h4>
+        <div className="flex flex-wrap justify-end gap-2">
+          {category && <span className={`px-2 py-1 rounded-md border text-[11px] font-semibold uppercase ${categoryClass}`}>{category}</span>}
+          {score != null && score !== "" && <span className="px-2 py-1 rounded-md border bg-card text-[11px] font-semibold">{score}%</span>}
+          <span className="px-2 py-1 rounded-md border bg-muted text-[11px] font-semibold uppercase text-muted-foreground">{status}</span>
+        </div>
+      </div>
+      {scheduledFor && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs">
+          <span className="font-semibold text-primary">Scheduled for {new Date(scheduledFor).toLocaleString()}</span>
+          <button onClick={onCancel} disabled={saving} className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border bg-background hover:bg-accent font-semibold disabled:opacity-50" title="Cancel scheduled call">
+            {saving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Ban className="w-3.5 h-3.5" />}
+            Cancel Call
+          </button>
+        </div>
+      )}
+      {(communication.latest_summary || qualification.summary) && <p className="text-sm leading-relaxed">{communication.latest_summary || qualification.summary}</p>}
+      <div className="grid sm:grid-cols-3 gap-3">
+        <MiniList title="Collected" items={communication.collected_information || qualification.collected_information} empty="Nothing captured yet" />
+        <MiniList title="To Discuss" items={communication.pending_discussion || qualification.pending_discussion} empty="No pending topics" />
+        <MiniList title="Next Steps" items={communication.recommended_next_steps || qualification.recommended_next_steps} empty="No next step set" />
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        {communication.total_call_count ? <span>{communication.total_call_count} call{communication.total_call_count === 1 ? "" : "s"} tracked</span> : null}
+        {(communication.disconnection_reason || qualification.disconnection_reason) && <span>Reason: {communication.disconnection_reason || qualification.disconnection_reason}</span>}
+        {(communication.last_duration || qualification.duration) && <span>{communication.last_duration || qualification.duration}s</span>}
+        {recording && <a href={recording} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border bg-card hover:bg-accent text-foreground font-semibold"><ExternalLink className="w-3.5 h-3.5" /> Open recording</a>}
+      </div>
+    </section>
+  );
+}
+
+function MiniList({ title, items, empty }) {
+  const rows = listItems(items).slice(0, 4);
+  return (
+    <div className="rounded-lg border bg-card p-3 min-h-[112px]">
+      <div className="text-[11px] font-semibold uppercase text-muted-foreground mb-2">{title}</div>
+      {rows.length ? (
+        <ul className="space-y-1.5 text-xs leading-relaxed">
+          {rows.map((item, idx) => <li key={`${title}-${idx}`} className="flex gap-1.5"><CheckCircle2 className="w-3.5 h-3.5 mt-0.5 text-primary shrink-0" /><span>{item}</span></li>)}
+        </ul>
+      ) : <div className="text-xs text-muted-foreground">{empty}</div>}
+    </div>
+  );
+}
+
+function StructuredCallDetails({ note }) {
+  const answers = listItems(note.answers);
+  const collected = listItems(note.collected_information);
+  const pending = listItems(note.pending_discussion);
+  const steps = listItems(note.recommended_next_steps);
+  const hasDetails = answers.length || collected.length || pending.length || steps.length || note.transcript;
+  if (!hasDetails) return null;
+  return (
+    <div className="mt-2 space-y-2 rounded-lg bg-primary-foreground/10 p-2 text-[11px] leading-relaxed">
+      <InlineDetails label="Answers" items={answers} />
+      <InlineDetails label="Collected" items={collected} />
+      <InlineDetails label="Pending" items={pending} />
+      <InlineDetails label="Next" items={steps} />
+      {note.transcript && <details><summary className="cursor-pointer font-semibold">Transcript</summary><div className="mt-1 whitespace-pre-wrap opacity-90">{note.transcript}</div></details>}
+    </div>
+  );
+}
+
+function InlineDetails({ label, items }) {
+  if (!items.length) return null;
+  return <div><span className="font-semibold">{label}: </span>{items.slice(0, 6).join("; ")}</div>;
 }
 
 function CreateLeadDialog({ fields, values, setValues, saving, onCreate, onClose }) {

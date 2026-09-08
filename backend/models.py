@@ -132,6 +132,8 @@ class CRMLead(BaseDocument):
     assigned_salesperson: Optional[str] = None
     notes: str = ""
     lead_notes: List[dict] = Field(default_factory=list)
+    communication_summary: dict = Field(default_factory=dict)
+    qualification_call: dict = Field(default_factory=dict)
     fields: dict = Field(default_factory=dict)
     field_values: dict = Field(default_factory=dict)
     status: str = "new"  # new | contacted | won | lost

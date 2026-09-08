@@ -719,6 +719,24 @@ async def _plivo_body_params(request: Request):
     return {k: v for k, v in form.items()}
 
 
+async def _plivo_result_payload(request: Request):
+    payload = dict(request.query_params)
+    if request.method.upper() != "POST":
+        return payload
+    content_type = request.headers.get("content-type", "").lower()
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                payload.update(body)
+                return payload
+        except Exception:
+            return payload
+    form = await request.form()
+    payload.update({k: v for k, v in form.items()})
+    return payload
+
+
 @api.api_route("/plivo/workspaces/{ws_id}/calls/{lead_id}/outbound/answer", methods=["GET", "POST"])
 async def plivo_outbound_answer(ws_id: str, lead_id: str, request: Request):
     from plivo_calls import callback_urls, normalize_phone, outbound_bridge_xml, plivo_config, public_base_url, require_plivo_signature
@@ -765,12 +783,12 @@ async def plivo_outbound_status(ws_id: str, request: Request):
     return {"ok": True, "logged": True}
 
 
-@api.post("/plivo/workspaces/{ws_id}/calls/{lead_id}/qualification/result")
-async def plivo_qualification_result(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
+@api.api_route("/plivo/workspaces/{ws_id}/calls/{lead_id}/qualification/result", methods=["GET", "POST"])
+async def plivo_qualification_result(ws_id: str, lead_id: str, request: Request):
     from plivo_calls import require_agent_callback_token, save_qualification_result
 
     require_agent_callback_token(request)
-    return await save_qualification_result(db, ws_id, lead_id, body or {})
+    return await save_qualification_result(db, ws_id, lead_id, await _plivo_result_payload(request))
 
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/inbound/answer", methods=["GET", "POST"])
@@ -899,6 +917,22 @@ async def scheduler_loop():
             if task:
                 logger.info("Scheduler executing task %s", task.get("title"))
                 await execute_task(task)
+            from plivo_calls import start_qualification_call
+
+            due_lead = await db.crm_leads.find_one({
+                "qualification_call.status": "scheduled",
+                "qualification_call.scheduled_for": {"$lte": now},
+                "$or": [{"deleted_at": {"$exists": False}}, {"deleted_at": None}],
+            })
+            if due_lead:
+                ws_id = due_lead["workspace_id"]
+                lead_id = str(due_lead["_id"])
+                fake_request = type("RequestContext", (), {
+                    "headers": {},
+                    "url": type("UrlContext", (), {"scheme": "http", "netloc": "", "path": "", "query": ""})(),
+                })()
+                logger.info("Scheduler starting CRM qualification call workspace=%s lead=%s", ws_id, lead_id)
+                await start_qualification_call(db, ws_id, lead_id, fake_request, auto=True, raise_on_error=False)
         except Exception:
             logger.exception("scheduler tick failed")
         await asyncio.sleep(30)
@@ -909,7 +943,7 @@ async def google_sheets_poller_loop():
     from models import CRMLead
     from crm import active_fields, ensure_crm_settings
     from google_sheets import refresh_access_token
-    from plivo_calls import start_qualification_call
+    from plivo_calls import schedule_first_qualification_call
     await asyncio.sleep(15)
     while True:
         try:
@@ -1004,11 +1038,7 @@ async def google_sheets_poller_loop():
                         lead_data = lead_doc.to_mongo()
                         res = await db.crm_leads.insert_one(lead_data)
                         lead_id = str(res.inserted_id)
-                        fake_request = type("RequestContext", (), {
-                            "headers": {},
-                            "url": type("UrlContext", (), {"scheme": "http", "netloc": "", "path": "", "query": ""})(),
-                        })()
-                        await start_qualification_call(db, ws_id, lead_id, fake_request, auto=True, raise_on_error=False)
+                        await schedule_first_qualification_call(db, ws_id, lead_id)
                         new_leads_count += 1
                 
                 new_cursor = current_cursor + len(rows)
