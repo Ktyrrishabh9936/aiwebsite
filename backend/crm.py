@@ -1352,9 +1352,10 @@ async def start_lead_outbound_call(ws_id: str, lead_id: str, request: Request, b
     from plivo_calls import start_outbound_call, start_qualification_call
 
     db = db_from(request)
-    if (body or {}).get("mode") == "staff_bridge":
+    body = body or {}
+    if body.get("mode") == "staff_bridge":
         return await start_outbound_call(db, ws_id, lead_id, request)
-    return await start_qualification_call(db, ws_id, lead_id, request)
+    return await start_qualification_call(db, ws_id, lead_id, request, agent_config_id=body.get("agent_config_id"))
 
 
 @router.post("/leads/{lead_id}/calls/qualification/cancel")

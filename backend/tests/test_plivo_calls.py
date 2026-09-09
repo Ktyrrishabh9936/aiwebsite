@@ -8,8 +8,10 @@ import httpx
 from fastapi import HTTPException
 
 from plivo_calls import (
+    DEFAULT_AGENT_INPUT_MAPPINGS,
     callback_urls,
     cancel_scheduled_qualification_call,
+    build_agent_trigger_payload,
     inbound_bridge_xml,
     lead_phone_from_doc,
     is_junk_lead,
@@ -18,20 +20,29 @@ from plivo_calls import (
     normalize_lead_phone,
     normalize_qualification_category,
     normalize_qualification_score,
+    normalize_agent_config,
+    normalize_budget_inr,
     is_mandatory_junk_result,
     outbound_bridge_xml,
     plivo_config_debug,
     plivo_error_detail,
     plivo_config,
     plivo_agent_config,
+    sanitize_agent_config,
     communication_summary_from_result,
     normalized_answers,
     normalized_text_list,
     qualification_payload,
+    recommended_next_action,
     qualification_result_status,
     qualification_status_from_plivo,
     save_qualification_result,
+    score_structured_qualification,
     schedule_first_qualification_call,
+    start_qualification_call,
+    store_plivo_event,
+    trigger_auth_for_agent,
+    structured_qualification_from_payload,
     unwrap_qualification_payload,
     validate_signature,
 )
@@ -63,17 +74,40 @@ class FakeCollection:
             doc.setdefault(key, []).append(value)
         return FakeUpdateResult(1)
 
+    async def update_many(self, query, update):
+        matched = 0
+        for doc in self.docs:
+            if self._matches(doc, query):
+                matched += 1
+                for key, value in (update.get("$set") or {}).items():
+                    self._set_path(doc, key, value)
+        return FakeUpdateResult(matched)
+
     async def insert_one(self, doc):
         self.inserted.append(doc)
+        self.docs.append(doc)
         return type("InsertResult", (), {"inserted_id": doc.get("_id")})()
 
     def _matches(self, doc, query):
         for key, value in query.items():
+            if key == "$or":
+                if not any(self._matches(doc, item) for item in value):
+                    return False
+                continue
+            if isinstance(value, dict):
+                current = self._get_path(doc, key) if "." in key else doc.get(key)
+                if "$in" in value and current not in value["$in"]:
+                    return False
+                if "$ne" in value and current == value["$ne"]:
+                    return False
+                continue
             if key == "_id" and doc.get("_id") != value:
                 return False
             if key == "workspace_id" and doc.get("workspace_id") != value:
                 return False
             if "." in key and self._get_path(doc, key) != value:
+                return False
+            if key not in {"_id", "workspace_id"} and "." not in key and doc.get(key) != value:
                 return False
         return True
 
@@ -92,10 +126,13 @@ class FakeCollection:
 
 
 class FakeDb:
-    def __init__(self, lead):
+    def __init__(self, lead, agents=None):
         self.crm_leads = FakeCollection([lead])
         self.crm_settings = FakeCollection([{"workspace_id": lead["workspace_id"], "fields": [], "states": [], "templates": [], "organization": {}}])
         self.crm_call_logs = FakeCollection([])
+        self.plivo_agent_configs = FakeCollection(agents or [])
+        self.plivo_call_sessions = FakeCollection([])
+        self.plivo_call_events = FakeCollection([])
 
     def __getitem__(self, name):
         return getattr(self, name)
@@ -123,6 +160,237 @@ def test_plivo_agent_config_requires_trigger_url_and_from_number(monkeypatch):
     except HTTPException as exc:
         assert exc.status_code == 400
         assert "Plivo AI qualification is not configured" in exc.detail
+
+
+def test_normalize_agent_config_keeps_trigger_secret_server_side():
+    config = normalize_agent_config({
+        "display_name": "DLF Sales Agent",
+        "flow_id": "flow-123",
+        "trigger_url": "https://agentflow.plivo.com/v1/account/auth/flow/flow-123",
+        "auth_type": "basic",
+        "auth_username": "api-user",
+        "auth_password": "api-secret",
+        "from_number": "+918031703100",
+        "input_variable_mappings": {
+            "mobile": "lead.phone",
+            "name": "lead.full_name",
+            "result_callback": "callbacks.result_url",
+        },
+    })
+    public = sanitize_agent_config({**config, "_id": "agent-1"})
+
+    assert config["credentials"] == {"username": "api-user", "password": "api-secret"}
+    assert public["credential_configured"] is True
+    assert "credentials" not in public
+    assert "api-secret" not in str(public)
+    assert public["input_variable_mappings"]["mobile"] == "lead.phone"
+
+
+def test_legacy_agent_uses_plivo_basic_auth_from_env(monkeypatch):
+    from plivo_calls import legacy_agent_config_from_env
+
+    monkeypatch.setenv("PLIVO_AGENT_TRIGGER_URL", "https://agentflow.plivo.com/v1/account/auth/flow/flow-123")
+    monkeypatch.delenv("PLIVO_AGENT_TRIGGER_TOKEN", raising=False)
+    monkeypatch.setenv("PLIVO_AUTH_ID", "auth-id")
+    monkeypatch.setenv("PLIVO_AUTH_TOKEN", "auth-token")
+    monkeypatch.setenv("PLIVO_FROM_NUMBER", "+918031703100")
+
+    agent = legacy_agent_config_from_env()
+    headers, auth = trigger_auth_for_agent(agent)
+
+    assert agent["auth_type"] == "basic"
+    assert sanitize_agent_config(agent)["credential_configured"] is True
+    assert "Authorization" not in headers
+    assert auth == ("auth-id", "auth-token")
+
+
+def test_basic_agent_without_saved_credentials_falls_back_to_env(monkeypatch):
+    monkeypatch.setenv("PLIVO_AUTH_ID", "auth-id")
+    monkeypatch.setenv("PLIVO_AUTH_TOKEN", "auth-token")
+
+    config = normalize_agent_config({
+        "display_name": "Env Auth Agent",
+        "trigger_url": "https://agentflow.plivo.com/v1/account/auth/flow/flow-123",
+        "auth_type": "basic",
+        "from_number": "+918031703100",
+    })
+    headers, auth = trigger_auth_for_agent(config)
+
+    assert config["credentials"] == {}
+    assert sanitize_agent_config(config)["credential_configured"] is True
+    assert "Authorization" not in headers
+    assert auth == ("auth-id", "auth-token")
+
+
+def test_build_agent_trigger_payload_uses_configured_input_mappings(monkeypatch):
+    monkeypatch.setenv("PLIVO_FROM_NUMBER", "+918031703100")
+    agent = normalize_agent_config({
+        "display_name": "Inventory Agent",
+        "trigger_url": "https://agentflow.plivo.com/v1/account/auth/flow/flow-abc",
+        "auth_type": "bearer",
+        "bearer_token": "secret",
+        "from_number": "+918031703100",
+        "input_variable_mappings": {
+            "customer_mobile": "lead.phone",
+            "customer_name": "lead.full_name",
+            "callback": "callbacks.result_url",
+            "fixed_campaign": "literal:AREVEI Demo",
+            "session": "session.id",
+        },
+    })
+    base = qualification_payload(
+        "https://public.example",
+        "ws-1",
+        "lead-1",
+        {"field_values": {"phone": "+919876543210", "full_name": "Riya", "source": "Meta Ads"}},
+        "+919876543210",
+        agent,
+        "session-1",
+    )
+    payload = build_agent_trigger_payload(base, agent, "session-1")
+
+    assert payload == {
+        "customer_mobile": "+919876543210",
+        "customer_name": "Riya",
+        "callback": "https://public.example/api/plivo/workspaces/ws-1/calls/lead-1/qualification/result",
+        "fixed_campaign": "AREVEI Demo",
+        "session": "session-1",
+    }
+    assert "lead" not in payload
+
+
+def test_start_qualification_call_creates_session_and_uses_selected_agent(monkeypatch):
+    from bson import ObjectId
+
+    class FakeAsyncClient:
+        last_request = {}
+
+        def __init__(self, timeout=None):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json=None, headers=None, auth=None):
+            FakeAsyncClient.last_request = {"url": url, "json": json, "headers": headers, "auth": auth}
+            return httpx.Response(200, json={"execution_id": "exec-1", "request_uuid": "call-1"})
+
+    async def run():
+        monkeypatch.setenv("PUBLIC_BASE_URL", "https://public.example")
+        import plivo_calls
+
+        monkeypatch.setattr(plivo_calls.httpx, "AsyncClient", FakeAsyncClient)
+        lead_id = ObjectId()
+        agent_id = ObjectId()
+        agent = normalize_agent_config({
+            "display_name": "Sales Qualifier",
+            "flow_id": "flow-1",
+            "trigger_url": "https://agentflow.plivo.com/v1/account/auth/flow/flow-1",
+            "auth_type": "basic",
+            "auth_username": "trigger-user",
+            "auth_password": "trigger-password",
+            "from_number": "+918031703100",
+            "input_variable_mappings": {
+                "phone": "lead.phone",
+                "name": "lead.full_name",
+                "session_id": "session.id",
+            },
+        })
+        agent.update({"_id": agent_id, "workspace_id": "ws-1", "enabled": True, "is_default": True})
+        lead = {
+            "_id": lead_id,
+            "workspace_id": "ws-1",
+            "field_values": {"phone": "8299752170", "full_name": "Aarav"},
+            "qualification_call": {},
+            "lead_notes": [],
+        }
+        db = FakeDb(lead, [agent])
+        request = type("RequestContext", (), {
+            "headers": {},
+            "url": type("UrlContext", (), {"scheme": "https", "netloc": "public.example", "path": "", "query": ""})(),
+        })()
+
+        result = await start_qualification_call(db, "ws-1", str(lead_id), request, agent_config_id=str(agent_id))
+
+        session = db.plivo_call_sessions.docs[0]
+        sent = FakeAsyncClient.last_request
+        assert result["status"] == "started"
+        assert result["session_id"] == str(session["_id"])
+        assert result["agent_display_name"] == "Sales Qualifier"
+        assert sent["url"] == agent["trigger_url"]
+        assert sent["auth"] == ("trigger-user", "trigger-password")
+        assert sent["json"] == {"phone": "+918299752170", "name": "Aarav", "session_id": str(session["_id"])}
+        assert session["agent_snapshot"]["display_name"] == "Sales Qualifier"
+        assert session["provider_identifiers"]["execution_id"] == "exec-1"
+        assert lead["qualification_call"]["agent_config_id"] == str(agent_id)
+        assert lead["qualification_call"]["session_id"] == str(session["_id"])
+
+    anyio.run(run)
+
+
+def test_default_agent_input_mappings_include_correlation_fields():
+    assert DEFAULT_AGENT_INPUT_MAPPINGS["lead_id"] == "lead_id"
+    assert DEFAULT_AGENT_INPUT_MAPPINGS["session_id"] == "session.id"
+    assert DEFAULT_AGENT_INPUT_MAPPINGS["result_url"] == "callbacks.result_url"
+
+
+def test_real_estate_qualification_normalizes_budget_score_and_action():
+    payload = {
+        "qualification_status": "completed",
+        "summary": "Lead wants a 3 BHK in Gurgaon and asked for a site visit.",
+        "answers": {
+            "budget": "1.2 Cr",
+            "location": "Gurgaon",
+            "property_type": "3 BHK",
+            "purpose": "End use",
+            "timeline": "30-45 days",
+            "intent": "High intent",
+            "site_visit_interest": "yes",
+        },
+    }
+    structured = structured_qualification_from_payload(payload)
+    score = score_structured_qualification(structured)
+    action = recommended_next_action(structured, score, "completed")
+
+    assert normalize_budget_inr("1.2 Cr")["normalized_inr_min"] == 12000000
+    assert structured["budget"]["normalized_inr_max"] == 12000000
+    assert structured["preferred_location"] == "Gurgaon"
+    assert score["score"] == 100
+    assert score["category"] == "hot"
+    assert action["type"] == "schedule_site_visit"
+
+
+def test_real_estate_qualification_keeps_no_answer_separate_from_cold():
+    structured = structured_qualification_from_payload({"status": "no_answer", "summary": "No answer."})
+    score = score_structured_qualification(structured)
+
+    assert score["score"] is None
+    assert score["category"] == "insufficient_data"
+    assert score["qualification_processing_status"] == "no_answer"
+
+
+def test_store_plivo_event_deduplicates_by_kind_and_event_identity():
+    from bson import ObjectId
+
+    async def run():
+        lead = {"_id": ObjectId(), "workspace_id": "ws-1", "field_values": {"phone": "8299752170"}}
+        db = FakeDb(lead)
+
+        first, duplicate_first = await store_plivo_event(db, "ws-1", str(lead["_id"]), "outbound_status", {"CallUUID": "call-1", "Event": "Ring", "CallStatus": "ringing"})
+        second, duplicate_second = await store_plivo_event(db, "ws-1", str(lead["_id"]), "outbound_status", {"CallUUID": "call-1", "Event": "Ring", "CallStatus": "ringing"})
+        result, duplicate_result = await store_plivo_event(db, "ws-1", str(lead["_id"]), "qualification_result", {"call_uuid": "call-1", "qualification_status": "completed"})
+
+        assert duplicate_first is False
+        assert duplicate_second is True
+        assert duplicate_result is False
+        assert first["_id"] == second["_id"]
+        assert first["_id"] != result["_id"]
+        assert len(db.plivo_call_events.docs) == 2
+
+    anyio.run(run)
 
 
 def test_normalize_phone_preserves_plus_when_present():

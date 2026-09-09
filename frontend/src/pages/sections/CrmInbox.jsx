@@ -4,7 +4,7 @@ import {
   Users, Calendar, Info, Search, XCircle, Save, BadgeIndianRupee,
   Plus, CheckCircle2, Settings, Trash2, Columns3, Palette, Building2,
   ReceiptText, FileText, ExternalLink, RefreshCw, FileCode2, MessageSquare, Send,
-  Download, RotateCcw, PhoneCall, Ban
+  Download, RotateCcw, PhoneCall, Ban, Bot, Power, Star, KeyRound
 } from "lucide-react";
 import { toast } from "sonner";
 import api, { API, formatError } from "../../lib/api";
@@ -15,7 +15,51 @@ const PAYMENT_METHODS = ["Cash", "Bank Transfer", "UPI", "Cheque", "Card", "Othe
 const PAYMENT_STATUSES = ["Paid", "Pending"];
 const ORG_FIELDS = ["company_name", "logo_url", "address", "phone", "email", "website", "tax_number", "bank_details", "authorized_signatory", "receipt_prefix", "invoice_prefix"];
 const DETAIL_TABS = ["Details", "Payments", "Receipts", "Invoice", "Notes"];
-const LIVE_CALL_STATUSES = new Set(["scheduled", "queued", "started", "answered"]);
+const LIVE_CALL_STATUSES = new Set(["scheduled", "queued", "started", "answered", "reconcile_required"]);
+const DEFAULT_AGENT_MAPPINGS_TEXT = JSON.stringify({
+  workspace_id: "workspace_id",
+  lead_id: "lead_id",
+  session_id: "session.id",
+  call_session_id: "session.id",
+  to_number: "lead.phone",
+  from_number: "agent.from_number",
+  customer_name: "lead.full_name",
+  lead_source: "lead.source",
+  result_url: "callbacks.result_url",
+  status_url: "callbacks.status_url",
+  recording_url: "callbacks.recording_url"
+}, null, 2);
+const EMPTY_AGENT_DRAFT = {
+  display_name: "",
+  flow_id: "",
+  trigger_url: "",
+  auth_type: "basic",
+  auth_username: "",
+  auth_password: "",
+  bearer_token: "",
+  from_number: "",
+  qualification_config_id: "indian_real_estate_v1",
+  enabled: true,
+  is_default: false,
+  input_variable_mappings_text: DEFAULT_AGENT_MAPPINGS_TEXT,
+  extra_payload_text: "{}"
+};
+
+function selectableAgentIds(agentState) {
+  return [
+    ...(agentState?.agents || []),
+    agentState?.legacy_environment_agent
+  ].filter((agent) => agent && agent.enabled !== false && agent.readiness?.ready !== false).map((agent) => agent.id);
+}
+
+function nextSelectedAgentId(current, agentState) {
+  const ids = selectableAgentIds(agentState);
+  const preferred = agentState?.selected_agent_config_id || "";
+  if (ids.includes(current)) return current;
+  if (ids.includes(preferred)) return preferred;
+  return ids[0] || "";
+}
+
 const today = () => new Date().toISOString().slice(0, 10);
 const stateClasses = {
   blue: "bg-blue-500/10 text-blue-500 border-blue-500/20",
@@ -145,6 +189,8 @@ export default function CrmInbox() {
   const [recordView, setRecordView] = useState("active");
   const [leads, setLeads] = useState([]);
   const [settings, setSettings] = useState({ fields: [], states: [], templates: [], organization: {} });
+  const [plivoAgentState, setPlivoAgentState] = useState({ agents: [], selected_agent_config_id: "", legacy_environment_agent: null });
+  const [selectedAgentId, setSelectedAgentId] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [callingLeadId, setCallingLeadId] = useState("");
@@ -166,6 +212,12 @@ export default function CrmInbox() {
 
   const activeFields = useMemo(() => (settings.fields || []).filter((field) => field.active !== false), [settings.fields]);
   const states = settings.states?.length ? settings.states : [{ key: "new", label: "New", color: "blue" }];
+  const plivoAgents = useMemo(() => {
+    const stored = plivoAgentState.agents || [];
+    return plivoAgentState.legacy_environment_agent ? [...stored, plivoAgentState.legacy_environment_agent] : stored;
+  }, [plivoAgentState]);
+  const enabledPlivoAgents = useMemo(() => plivoAgents.filter((agent) => agent.enabled !== false && agent.readiness?.ready !== false), [plivoAgents]);
+  const hasCallableAgent = enabledPlivoAgents.some((agent) => agent.id === selectedAgentId);
   const totalPages = Math.max(1, Math.ceil((pagination.total || 0) / pagination.limit));
 
   const selectLead = (lead) => {
@@ -197,11 +249,15 @@ export default function CrmInbox() {
       if (statusFilter !== "all") params.set("status", statusFilter);
       if (searchQuery.trim()) params.set("search", searchQuery.trim());
       if (recordView === "trash") params.set("trashed", "true");
-      const [settingsRes, leadsRes] = await Promise.all([
+      const [settingsRes, leadsRes, plivoAgentsRes] = await Promise.all([
         api.get(`/workspaces/${wsId}/crm/settings`),
-        api.get(`/workspaces/${wsId}/crm/leads?${params.toString()}`)
+        api.get(`/workspaces/${wsId}/crm/leads?${params.toString()}`),
+        api.get(`/workspaces/${wsId}/crm/plivo/agents`)
       ]);
       setSettings(settingsRes.data);
+      const nextPlivoAgents = plivoAgentsRes.data || { agents: [], selected_agent_config_id: "", legacy_environment_agent: null };
+      setPlivoAgentState(nextPlivoAgents);
+      setSelectedAgentId((current) => nextSelectedAgentId(current, nextPlivoAgents));
       const items = leadsRes.data.items || [];
       setLeads(items);
       setPagination({ total: leadsRes.data.total || 0, page: leadsRes.data.page || page, limit: leadsRes.data.limit || 10 });
@@ -456,13 +512,107 @@ export default function CrmInbox() {
     toast.success("Template saved");
   };
 
+  const refreshPlivoAgents = async () => {
+    const { data } = await api.get(`/workspaces/${wsId}/crm/plivo/agents`);
+    const nextState = data || { agents: [], selected_agent_config_id: "", legacy_environment_agent: null };
+    setPlivoAgentState(nextState);
+    setSelectedAgentId((current) => nextSelectedAgentId(current, nextState));
+    return nextState;
+  };
+
+  const agentPayloadFromDraft = (draft) => {
+    const inputMappings = JSON.parse(draft.input_variable_mappings_text || "{}");
+    const extraPayload = JSON.parse(draft.extra_payload_text || "{}");
+    const payload = {
+      display_name: draft.display_name,
+      flow_id: draft.flow_id,
+      trigger_url: draft.trigger_url,
+      auth_type: draft.auth_type,
+      from_number: draft.from_number,
+      qualification_config_id: draft.qualification_config_id,
+      enabled: draft.enabled,
+      is_default: draft.is_default,
+      input_variable_mappings: inputMappings,
+      extra_payload: extraPayload
+    };
+    if (draft.auth_type === "basic") {
+      if (draft.auth_username?.trim()) payload.auth_username = draft.auth_username.trim();
+      if (draft.auth_password?.trim()) payload.auth_password = draft.auth_password.trim();
+    }
+    if (draft.auth_type === "bearer" && draft.bearer_token?.trim()) {
+      payload.bearer_token = draft.bearer_token.trim();
+    }
+    return payload;
+  };
+
+  const savePlivoAgent = async (draft) => {
+    try {
+      setSaving(true);
+      const payload = agentPayloadFromDraft(draft);
+      if (draft.id && draft.id !== "environment") {
+        await api.patch(`/workspaces/${wsId}/crm/plivo/agents/${draft.id}`, payload);
+        toast.success("Plivo agent saved");
+      } else {
+        const { data } = await api.post(`/workspaces/${wsId}/crm/plivo/agents`, payload);
+        setSelectedAgentId(data.id);
+        toast.success("Plivo agent connected");
+      }
+      await refreshPlivoAgents();
+      return true;
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail || e.message));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const selectPlivoAgent = async (agent) => {
+    if (!agent?.id || agent.id === "environment") {
+      setSelectedAgentId(agent?.id || "");
+      return;
+    }
+    try {
+      setSaving(true);
+      const { data } = await api.post(`/workspaces/${wsId}/crm/plivo/agents/${agent.id}/select`, {});
+      setSelectedAgentId(data.id);
+      await refreshPlivoAgents();
+      toast.success("Default AI agent selected");
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const togglePlivoAgent = async (agent) => {
+    if (!agent?.id || agent.id === "environment") return;
+    try {
+      setSaving(true);
+      await api.patch(`/workspaces/${wsId}/crm/plivo/agents/${agent.id}`, { ...agent, enabled: agent.enabled === false });
+      await refreshPlivoAgents();
+      toast.success(agent.enabled === false ? "Plivo agent enabled" : "Plivo agent disabled");
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const callLead = async (lead) => {
     if (!lead?.id) return;
     try {
       setCallingLeadId(lead.id);
-      const r = await api.post(`/workspaces/${wsId}/crm/leads/${lead.id}/calls/outbound`, {});
+      const payload = selectedAgentId ? { agent_config_id: selectedAgentId } : {};
+      const r = await api.post(`/workspaces/${wsId}/crm/leads/${lead.id}/calls/outbound`, payload);
+      if (r.data?.status === "already_active") {
+        toast.info(r.data.reason || "AI qualification call is already in progress");
+        if (r.data?.lead) mergeLead(r.data.lead);
+        return;
+      }
       const leadPhone = r.data?.lead_phone;
-      toast.success(leadPhone ? `Qualification call started to ${leadPhone}` : "Qualification call started");
+      const agentName = r.data?.agent_display_name;
+      toast.success(leadPhone ? `Qualification call started to ${leadPhone}${agentName ? ` via ${agentName}` : ""}` : "Qualification call started");
       if (r.data?.lead) mergeLead(r.data.lead);
     } catch (e) {
       toast.error(formatError(e.response?.data?.detail));
@@ -505,6 +655,8 @@ export default function CrmInbox() {
           states={states}
           organization={settings.organization || {}}
           templates={settings.templates || []}
+          plivoAgents={plivoAgents}
+          selectedAgentId={selectedAgentId}
           newField={newField}
           setNewField={setNewField}
           newState={newState}
@@ -518,6 +670,10 @@ export default function CrmInbox() {
           saveStates={saveStates}
           saveOrganization={saveOrganization}
           saveTemplate={saveTemplate}
+          savePlivoAgent={savePlivoAgent}
+          selectPlivoAgent={selectPlivoAgent}
+          togglePlivoAgent={togglePlivoAgent}
+          saving={saving}
         />
       ) : (
         <>
@@ -528,6 +684,7 @@ export default function CrmInbox() {
               <FilterButton active={recordView === "trash"} onClick={() => { setRecordView("trash"); setStatusFilter("all"); setPage(1); }}><Trash2 className="w-3.5 h-3.5" /> Trash</FilterButton>
             </div>
             <div className="flex gap-2 w-full sm:w-auto">
+              <AgentCallSelector agents={enabledPlivoAgents} selectedAgentId={selectedAgentId} setSelectedAgentId={setSelectedAgentId} />
               <button onClick={openCreateLead} className="inline-flex items-center gap-2 px-3 h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold whitespace-nowrap"><Plus className="w-4 h-4" /> New Lead</button>
               <div className="relative flex-1 sm:w-72">
                 <Search className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
@@ -538,7 +695,7 @@ export default function CrmInbox() {
 
           <div className={`grid gap-6 items-start ${selectedLead ? "xl:grid-cols-[minmax(0,1fr)_560px]" : "grid-cols-1"}`}>
             <div className="space-y-3">
-              <LeadTable leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} onSelect={selectLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
+              <LeadTable leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} canCallWithAI={hasCallableAgent} onSelect={selectLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
               <Pagination page={page} totalPages={totalPages} total={pagination.total} onPage={setPage} />
             </div>
             {selectedLead && (
@@ -564,6 +721,7 @@ export default function CrmInbox() {
                 addLeadNote={addLeadNote}
                 deleteLeadNote={deleteLeadNote}
                 callingLeadId={callingLeadId}
+                canCallWithAI={hasCallableAgent}
                 cancellingCallId={cancellingCallId}
                 callLead={callLead}
                 cancelScheduledCall={cancelScheduledCall}
@@ -600,7 +758,28 @@ function Pagination({ page, totalPages, total, onPage }) {
   return <div className="flex items-center justify-between text-sm text-muted-foreground"><span>{total} leads</span><div className="flex items-center gap-2"><button disabled={page <= 1} onClick={() => onPage(page - 1)} className="px-3 h-8 rounded-lg border bg-card disabled:opacity-40">Previous</button><span>Page {page} of {totalPages}</span><button disabled={page >= totalPages} onClick={() => onPage(page + 1)} className="px-3 h-8 rounded-lg border bg-card disabled:opacity-40">Next</button></div></div>;
 }
 
-function LeadTable({ leads, fields, states, selectedLead, loading, trashed, callingLeadId, onSelect, onStatus, onTrash, onRestore, onCall }) {
+function AgentCallSelector({ agents, selectedAgentId, setSelectedAgentId }) {
+  if (!agents.length) {
+    return (
+      <div className="hidden md:flex h-10 items-center gap-2 rounded-lg border bg-muted px-3 text-xs font-semibold text-muted-foreground">
+        <Bot className="w-4 h-4" />
+        No AI agent
+      </div>
+    );
+  }
+  return (
+    <label className="relative min-w-0 flex-1 sm:flex-none sm:w-56">
+      <Bot className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
+      <select value={selectedAgentId} onChange={(e) => setSelectedAgentId(e.target.value)} className="w-full h-10 pl-9 pr-3 rounded-lg border bg-background text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-primary">
+        {agents.map((agent) => (
+          <option key={agent.id} value={agent.id}>{agent.display_name}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function LeadTable({ leads, fields, states, selectedLead, loading, trashed, callingLeadId, canCallWithAI, onSelect, onStatus, onTrash, onRestore, onCall }) {
   const primaryFields = fields.slice(0, 4);
   return (
     <div className={`rounded-xl border bg-card overflow-hidden ${loading ? "opacity-60" : ""}`}>
@@ -634,7 +813,7 @@ function LeadTable({ leads, fields, states, selectedLead, loading, trashed, call
                       <button onClick={() => onRestore(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
                     ) : (
                       <div className="flex items-center justify-end gap-2">
-                        <button onClick={() => onCall(lead)} disabled={!values.phone || callingLeadId === lead.id || isJunk} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-40" title={isJunk ? "Junk leads cannot be called" : values.phone ? "Call lead" : "Phone number required"}>
+                        <button onClick={() => onCall(lead)} disabled={!values.phone || callingLeadId === lead.id || isJunk || !canCallWithAI} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-40" title={isJunk ? "Junk leads cannot be called" : !canCallWithAI ? "Connect a Plivo AI agent first" : values.phone ? "Call with AI" : "Phone number required"}>
                           {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
                         </button>
                         <button onClick={() => onTrash(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
@@ -652,7 +831,7 @@ function LeadTable({ leads, fields, states, selectedLead, loading, trashed, call
 }
 
 function LeadDetail(props) {
-  const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, addLeadNote, deleteLeadNote, callingLeadId, cancellingCallId, callLead, cancelScheduledCall, trashLead, restoreLead, close, wsId } = props;
+  const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, addLeadNote, deleteLeadNote, callingLeadId, canCallWithAI, cancellingCallId, callLead, cancelScheduledCall, trashLead, restoreLead, close, wsId } = props;
   const [detailTab, setDetailTab] = useState("Details");
   const [activeStageId, setActiveStageId] = useState("");
   const [noteDraft, setNoteDraft] = useState("");
@@ -761,7 +940,7 @@ function LeadDetail(props) {
               <button onClick={() => restoreLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
             ) : (
               <>
-                <button onClick={() => callLead(lead)} disabled={saving || !values.phone || callingLeadId === lead.id || isJunkLead} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title={isJunkLead ? "Junk leads cannot be called" : values.phone ? "Call lead" : "Phone number required"}>
+                <button onClick={() => callLead(lead)} disabled={saving || !values.phone || callingLeadId === lead.id || isJunkLead || !canCallWithAI} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title={isJunkLead ? "Junk leads cannot be called" : !canCallWithAI ? "Connect a Plivo AI agent first" : values.phone ? "Call with AI" : "Phone number required"}>
                   {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
                 </button>
                 <button onClick={() => trashLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-50" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
@@ -1060,6 +1239,9 @@ function DynamicField({ field, value, onChange }) {
 function SmallInput({ label, value, onChange }) {
   return <label className="space-y-1 block"><span className="text-[11px] font-semibold text-muted-foreground uppercase">{label}</span><input value={value} onChange={(e) => onChange(e.target.value)} className="h-9 px-2 text-xs w-full rounded-lg border bg-background focus:outline-none focus:ring-1 focus:ring-primary" /></label>;
 }
+function SecretInput({ label, value, onChange }) {
+  return <label className="space-y-1 block"><span className="text-[11px] font-semibold text-muted-foreground uppercase">{label}</span><input type="password" value={value} onChange={(e) => onChange(e.target.value)} className="h-9 px-2 text-xs w-full rounded-lg border bg-background focus:outline-none focus:ring-1 focus:ring-primary" autoComplete="new-password" /></label>;
+}
 function ReadOnlyValue({ label, value }) {
   return <label className="space-y-1 block"><span className="text-[11px] font-semibold text-muted-foreground uppercase">{label}</span><div className="h-9 px-2 rounded-lg border bg-muted/40 text-xs flex items-center">{value}</div></label>;
 }
@@ -1087,7 +1269,118 @@ function StatusSelect({ value, onChange }) {
   );
 }
 
-function SettingsPanel({ fields, states, organization, templates, newField, setNewField, newState, setNewState, templateDraft, setTemplateDraft, addField, updateField, removeField, addState, saveStates, saveOrganization, saveTemplate }) {
+function agentDraftFrom(agent) {
+  if (!agent) return { ...EMPTY_AGENT_DRAFT };
+  return {
+    ...EMPTY_AGENT_DRAFT,
+    id: agent.id,
+    display_name: agent.display_name || "",
+    flow_id: agent.flow_id || agent.provider_agent_id || "",
+    trigger_url: agent.trigger_url || "",
+    auth_type: agent.auth_type || "basic",
+    from_number: agent.from_number || agent.authorized_calling_number || "",
+    qualification_config_id: agent.qualification_config_id || "indian_real_estate_v1",
+    enabled: agent.enabled !== false,
+    is_default: Boolean(agent.is_default),
+    input_variable_mappings_text: JSON.stringify(agent.input_variable_mappings || JSON.parse(DEFAULT_AGENT_MAPPINGS_TEXT), null, 2),
+    extra_payload_text: JSON.stringify(agent.extra_payload || {}, null, 2)
+  };
+}
+
+function PlivoAgentsPanel({ agents, selectedAgentId, onSave, onSelect, onToggle, saving }) {
+  const [draft, setDraft] = useState({ ...EMPTY_AGENT_DRAFT });
+  const editingStored = draft.id && draft.id !== "environment";
+  const setField = (key, value) => setDraft((current) => ({ ...current, [key]: value }));
+  const editAgent = (agent) => setDraft(agentDraftFrom(agent));
+  const newAgent = () => setDraft({ ...EMPTY_AGENT_DRAFT });
+  const submit = async () => {
+    const saved = await onSave(draft);
+    if (saved && !editingStored) newAgent();
+  };
+  return (
+    <section className="rounded-xl border bg-card p-5 space-y-4 xl:col-span-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <h3 className="font-bold flex items-center gap-2"><Bot className="w-4 h-4 text-primary" /> AI Voice Agents</h3>
+        <button onClick={newAgent} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Plus className="w-4 h-4" /> New Agent</button>
+      </div>
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(340px,0.9fr)]">
+        <div className="space-y-2">
+          {agents.length === 0 ? (
+            <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">No Plivo AI agents connected.</div>
+          ) : agents.map((agent) => {
+            const ready = agent.readiness?.ready !== false;
+            const missing = agent.readiness?.missing || [];
+            const active = selectedAgentId === agent.id || agent.is_default;
+            return (
+              <div key={agent.id} className="rounded-lg border bg-background p-3 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold truncate">{agent.display_name}</span>
+                      {active && <span className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-primary"><Star className="w-3 h-3" /> Default</span>}
+                      {agent.legacy_environment && <span className="rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase text-muted-foreground">Env</span>}
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground truncate">{agent.flow_id || "No flow ID"} - {agent.from_number || "No number"}</div>
+                  </div>
+                  <span className={`rounded-md border px-2 py-1 text-[10px] font-semibold uppercase ${agent.enabled === false ? "bg-muted text-muted-foreground" : ready ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-500" : "border-destructive/30 bg-destructive/10 text-destructive"}`}>
+                    {agent.enabled === false ? "Disabled" : ready ? "Ready" : "Missing"}
+                  </span>
+                </div>
+                {!ready && missing.length > 0 && <div className="text-xs text-destructive">Missing: {missing.join(", ")}</div>}
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={() => onSelect(agent)} disabled={!ready || agent.enabled === false || saving} className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border bg-card hover:bg-accent text-xs font-semibold disabled:opacity-40"><Star className="w-3.5 h-3.5" /> Select</button>
+                  {!agent.legacy_environment && <button onClick={() => editAgent(agent)} className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border bg-card hover:bg-accent text-xs font-semibold"><Settings className="w-3.5 h-3.5" /> Edit</button>}
+                  {!agent.legacy_environment && <button onClick={() => onToggle(agent)} disabled={saving} className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border bg-card hover:bg-accent text-xs font-semibold disabled:opacity-40"><Power className="w-3.5 h-3.5" /> {agent.enabled === false ? "Enable" : "Disable"}</button>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="rounded-lg border bg-background p-4 space-y-3">
+          <div className="grid sm:grid-cols-2 gap-3">
+            <SmallInput label="Display Name" value={draft.display_name} onChange={(v) => setField("display_name", v)} />
+            <SmallInput label="Flow ID" value={draft.flow_id} onChange={(v) => setField("flow_id", v)} />
+            <label className="space-y-1 block sm:col-span-2">
+              <span className="text-[11px] font-semibold text-muted-foreground uppercase">Trigger URL</span>
+              <input value={draft.trigger_url} onChange={(e) => setField("trigger_url", e.target.value)} className="h-9 px-2 text-xs w-full rounded-lg border bg-background focus:outline-none focus:ring-1 focus:ring-primary" />
+            </label>
+            <SmallInput label="From Number" value={draft.from_number} onChange={(v) => setField("from_number", v)} />
+            <SmallInput label="Qualification Config" value={draft.qualification_config_id} onChange={(v) => setField("qualification_config_id", v)} />
+            <label className="space-y-1 block">
+              <span className="text-[11px] font-semibold text-muted-foreground uppercase">Auth</span>
+              <select value={draft.auth_type} onChange={(e) => setField("auth_type", e.target.value)} className="h-9 px-2 text-xs w-full rounded-lg border bg-background focus:outline-none focus:ring-1 focus:ring-primary">
+                <option value="basic">Basic</option>
+                <option value="bearer">Bearer</option>
+                <option value="none">None</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-2 pt-6 text-xs font-semibold text-muted-foreground"><input type="checkbox" checked={draft.enabled} onChange={(e) => setField("enabled", e.target.checked)} /> Enabled</label>
+            {draft.auth_type === "basic" && (
+              <>
+                <SmallInput label="Plivo Auth ID" value={draft.auth_username} onChange={(v) => setField("auth_username", v)} />
+                <SecretInput label={editingStored ? "New Auth Token" : "Plivo Auth Token"} value={draft.auth_password} onChange={(v) => setField("auth_password", v)} />
+              </>
+            )}
+            {draft.auth_type === "bearer" && <SecretInput label={editingStored ? "New Bearer Token" : "Bearer Token"} value={draft.bearer_token} onChange={(v) => setField("bearer_token", v)} />}
+            <label className="flex items-center gap-2 text-xs font-semibold text-muted-foreground"><input type="checkbox" checked={draft.is_default} onChange={(e) => setField("is_default", e.target.checked)} /> Default agent</label>
+          </div>
+          <label className="space-y-1 block">
+            <span className="text-[11px] font-semibold text-muted-foreground uppercase">Input Variable Mappings</span>
+            <textarea value={draft.input_variable_mappings_text} onChange={(e) => setField("input_variable_mappings_text", e.target.value)} rows={9} className="w-full px-3 py-2 rounded-lg border bg-background text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary" />
+          </label>
+          <label className="space-y-1 block">
+            <span className="text-[11px] font-semibold text-muted-foreground uppercase">Extra Payload</span>
+            <textarea value={draft.extra_payload_text} onChange={(e) => setField("extra_payload_text", e.target.value)} rows={3} className="w-full px-3 py-2 rounded-lg border bg-background text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary" />
+          </label>
+          <div className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"><KeyRound className="w-3.5 h-3.5" /> Blank Basic Auth fields use the server Plivo credentials.</div>
+          <button onClick={submit} disabled={saving || !draft.display_name.trim() || !draft.trigger_url.trim() || !draft.from_number.trim()} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><Save className="w-4 h-4" /> {editingStored ? "Save Agent" : "Connect Agent"}</button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SettingsPanel({ fields, states, organization, templates, plivoAgents, selectedAgentId, newField, setNewField, newState, setNewState, templateDraft, setTemplateDraft, addField, updateField, removeField, addState, saveStates, saveOrganization, saveTemplate, savePlivoAgent, selectPlivoAgent, togglePlivoAgent, saving }) {
   const [org, setOrg] = useState(organization);
   const [fieldDrafts, setFieldDrafts] = useState({});
   const [stateDrafts, setStateDrafts] = useState({});
@@ -1180,6 +1473,14 @@ function SettingsPanel({ fields, states, organization, templates, newField, setN
 
   return (
     <div className="grid gap-6 xl:grid-cols-2 items-start">
+      <PlivoAgentsPanel
+        agents={plivoAgents}
+        selectedAgentId={selectedAgentId}
+        onSave={savePlivoAgent}
+        onSelect={selectPlivoAgent}
+        onToggle={togglePlivoAgent}
+        saving={saving}
+      />
       <section className="rounded-xl border bg-card p-5 space-y-4">
         <h3 className="font-bold flex items-center gap-2"><Columns3 className="w-4 h-4 text-primary" /> Field Columns</h3>
         <div className="space-y-2">{fields.map((field) => {

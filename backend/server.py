@@ -766,29 +766,50 @@ async def plivo_calls_debug(ws_id: str, request: Request, lead_id: str = None):
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/outbound/status", methods=["GET", "POST"])
 async def plivo_outbound_status(ws_id: str, request: Request):
-    from plivo_calls import log_call_note, require_plivo_signature, sync_qualification_status_from_payload
+    from plivo_calls import log_call_note, mark_plivo_event, require_plivo_signature, store_plivo_event, sync_qualification_status_from_payload
 
     params = await _plivo_params(request)
     await require_plivo_signature(request, await _plivo_body_params(request))
     lead_id = str(params.get("lead_id") or "").strip()
     if not lead_id:
         return {"ok": True, "logged": False}
-    await log_call_note(db, ws_id, lead_id, params, {
-        "event": "outbound_status",
-        "call_direction": "outbound",
-        "body": f"Outbound Plivo call status: {params.get('CallStatus') or params.get('HangupCause') or 'updated'}",
-        "outcome": params.get("CallStatus") or params.get("HangupCause") or "updated",
-    })
-    await sync_qualification_status_from_payload(db, ws_id, lead_id, params)
-    return {"ok": True, "logged": True}
+    event, duplicate = await store_plivo_event(db, ws_id, lead_id, "outbound_status", params)
+    if duplicate:
+        return {"ok": True, "logged": False, "duplicate": True, "event_id": str(event.get("_id"))}
+    await mark_plivo_event(db, ws_id, event["_id"], "processing")
+    try:
+        await log_call_note(db, ws_id, lead_id, params, {
+            "event": "outbound_status",
+            "call_direction": "outbound",
+            "body": f"Outbound Plivo call status: {params.get('CallStatus') or params.get('HangupCause') or 'updated'}",
+            "outcome": params.get("CallStatus") or params.get("HangupCause") or "updated",
+        })
+        await sync_qualification_status_from_payload(db, ws_id, lead_id, params)
+        await mark_plivo_event(db, ws_id, event["_id"], "processed")
+        return {"ok": True, "logged": True, "event_id": str(event["_id"])}
+    except Exception as exc:
+        await mark_plivo_event(db, ws_id, event["_id"], "failed", str(exc))
+        raise
 
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/{lead_id}/qualification/result", methods=["GET", "POST"])
 async def plivo_qualification_result(ws_id: str, lead_id: str, request: Request):
-    from plivo_calls import require_agent_callback_token, save_qualification_result
+    from plivo_calls import mark_plivo_event, require_agent_callback_token, save_qualification_result, store_plivo_event
 
     require_agent_callback_token(request)
-    return await save_qualification_result(db, ws_id, lead_id, await _plivo_result_payload(request))
+    payload = await _plivo_result_payload(request)
+    event, duplicate = await store_plivo_event(db, ws_id, lead_id, "qualification_result", payload)
+    if duplicate:
+        return {"ok": True, "duplicate": True, "event_id": str(event.get("_id"))}
+    await mark_plivo_event(db, ws_id, event["_id"], "processing")
+    try:
+        result = await save_qualification_result(db, ws_id, lead_id, payload)
+        await mark_plivo_event(db, ws_id, event["_id"], "processed")
+        result["event_id"] = str(event["_id"])
+        return result
+    except Exception as exc:
+        await mark_plivo_event(db, ws_id, event["_id"], "failed", str(exc))
+        raise
 
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/inbound/answer", methods=["GET", "POST"])
@@ -818,7 +839,7 @@ async def log_plivo_inbound_started(ws_id, lead_id, params, created):
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/recording", methods=["GET", "POST"])
 async def plivo_recording_callback(ws_id: str, request: Request):
-    from plivo_calls import log_call_note, require_plivo_signature
+    from plivo_calls import log_call_note, mark_plivo_event, require_plivo_signature, store_plivo_event
 
     params = await _plivo_params(request)
     await require_plivo_signature(request, await _plivo_body_params(request))
@@ -826,14 +847,23 @@ async def plivo_recording_callback(ws_id: str, request: Request):
     if not lead_id:
         return {"ok": True, "logged": False}
     direction = params.get("call_direction") or params.get("Direction") or "outbound"
-    await log_call_note(db, ws_id, lead_id, params, {
-        "event": "recording",
-        "call_direction": direction,
-        "body": f"{str(direction).title()} Plivo recording saved.",
-        "outcome": "recording_saved",
-        "summary": params.get("Transcription") or "Recording metadata received",
-    })
-    return {"ok": True, "logged": True}
+    event, duplicate = await store_plivo_event(db, ws_id, lead_id, "recording", params)
+    if duplicate:
+        return {"ok": True, "logged": False, "duplicate": True, "event_id": str(event.get("_id"))}
+    await mark_plivo_event(db, ws_id, event["_id"], "processing")
+    try:
+        await log_call_note(db, ws_id, lead_id, params, {
+            "event": "recording",
+            "call_direction": direction,
+            "body": f"{str(direction).title()} Plivo recording saved.",
+            "outcome": "recording_saved",
+            "summary": params.get("Transcription") or "Recording metadata received",
+        })
+        await mark_plivo_event(db, ws_id, event["_id"], "processed")
+        return {"ok": True, "logged": True, "event_id": str(event["_id"])}
+    except Exception as exc:
+        await mark_plivo_event(db, ws_id, event["_id"], "failed", str(exc))
+        raise
 
 
 # ---------------- PUBLIC (no auth) ----------------
@@ -1058,10 +1088,12 @@ async def google_sheets_poller_loop():
 from google_sheets import router as google_sheets_router
 from workflows import router as workflows_router
 from crm import router as crm_router
+from plivo_agents import router as plivo_agents_router
 
 api.include_router(google_sheets_router)
 api.include_router(workflows_router)
 api.include_router(crm_router)
+api.include_router(plivo_agents_router)
 
 app.include_router(build_auth_router(db))
 app.include_router(build_coding_router(db))
@@ -1090,6 +1122,11 @@ async def startup():
     await db.workflows.create_index([("workspace_id", 1), ("kind", 1)])
     await db.crm_leads.create_index([("workspace_id", 1), ("sheet_row_key", 1)], unique=True)
     await db.crm_settings.create_index("workspace_id", unique=True)
+    await db.plivo_agent_configs.create_index([("workspace_id", 1), ("enabled", 1), ("is_default", 1)])
+    await db.plivo_call_sessions.create_index([("workspace_id", 1), ("lead_id", 1), ("status", 1)])
+    await db.plivo_call_sessions.create_index([("workspace_id", 1), ("created_at", -1)])
+    await db.plivo_call_events.create_index([("workspace_id", 1), ("idempotency_key", 1)], unique=True)
+    await db.plivo_call_events.create_index([("workspace_id", 1), ("lead_id", 1), ("created_at", -1)])
     await seed_admin(db)
     asyncio.create_task(scheduler_loop())
     asyncio.create_task(google_sheets_poller_loop())
