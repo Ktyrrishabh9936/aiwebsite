@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { NavLink, Outlet, useParams, useNavigate, Link, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, Brain as BrainIcon, MessageSquare, ListChecks, FileText, Code2,
-  AlertCircle, Bell, CheckCircle2, Globe, Loader2, LogOut, Plus, Boxes, Settings as SettingsIcon,
+  AlertCircle, Bell, CheckCircle2, Globe, Loader2, LogOut, Plus, Boxes, Settings as SettingsIcon, Building2,
   UserCircle, Workflow, Users,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -20,6 +20,7 @@ import { Label } from "../components/ui/label";
 const nav = [
   { to: "", label: "Overview", icon: LayoutDashboard, end: true },
   { to: "projects", label: "Projects", icon: Boxes },
+  { to: "properties", label: "Properties", icon: Building2 },
   { to: "brain", label: "Brain", icon: BrainIcon },
   { to: "manager", label: "Manager", icon: MessageSquare },
   { to: "tasks", label: "Tasks", icon: ListChecks },

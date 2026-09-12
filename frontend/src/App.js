@@ -5,6 +5,7 @@ import { AuthProvider, useAuth } from "./context/AuthContext";
 import { ThemeProvider } from "./context/ThemeContext";
 
 import Landing from "./pages/Landing";
+import CheckDemo from "./pages/CheckDemo";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import ForgotPassword from "./pages/ForgotPassword";
@@ -26,6 +27,7 @@ import Workflows from "./pages/sections/Workflows";
 import AdsToCrmWorkflow from "./pages/sections/AdsToCrmWorkflow";
 import CrmInbox from "./pages/sections/CrmInbox";
 import Projects from "./pages/sections/Projects";
+import Properties from "./pages/sections/Properties";
 import Settings from "./pages/sections/Settings";
 
 function Protected() {
@@ -43,6 +45,7 @@ function App() {
           <BrowserRouter>
             <Routes>
               <Route path="/" element={<Landing />} />
+              <Route path="/check-demo" element={<CheckDemo />} />
               <Route path="/login" element={<Login />} />
               <Route path="/register" element={<Register />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
@@ -56,6 +59,7 @@ function App() {
                 <Route path="/app/w/:wsId" element={<WorkspaceLayout />}>
                   <Route index element={<Overview />} />
                   <Route path="projects" element={<Projects />} />
+                  <Route path="properties" element={<Properties />} />
                   <Route path="settings" element={<Settings />} />
                   <Route path="brain" element={<Brain />} />
                   <Route path="manager" element={<Manager />} />

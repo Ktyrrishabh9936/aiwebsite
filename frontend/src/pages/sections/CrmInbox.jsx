@@ -791,12 +791,13 @@ function LeadTable({ leads, fields, states, selectedLead, loading, trashed, call
               const values = valuesFrom(lead, fields);
               const state = states.find((s) => s.key === lead.status) || states[0];
               const qualification = lead.qualification_call || {};
+              const qualificationStatus = lead.qualification_status || qualification.qualification_status;
               const isJunk = qualification.qualification_category === "junk";
               const scheduledFor = qualification.status === "scheduled" && qualification.scheduled_for;
               return (
                 <tr key={lead.id} onClick={() => onSelect(lead)} className={`hover:bg-accent/40 cursor-pointer transition-colors ${selectedLead?.id === lead.id ? "bg-accent/50" : ""}`}>
                   <td className="p-4">
-                    <div className="font-semibold text-foreground flex items-center gap-2">{values.full_name || values.phone || values.email || "Unnamed Lead"}{lead.customer_status === "customer" && <span className="text-[10px] uppercase px-1.5 py-0.5 rounded border border-emerald-500/30 text-emerald-500">Customer</span>}{isJunk && <span className="text-[10px] uppercase px-1.5 py-0.5 rounded border border-destructive/30 text-destructive">Junk</span>}</div>
+                    <div className="font-semibold text-foreground flex items-center gap-2">{values.full_name || values.phone || values.email || "Unnamed Lead"}{lead.customer_status === "customer" && <span className="text-[10px] uppercase px-1.5 py-0.5 rounded border border-emerald-500/30 text-emerald-500">Customer</span>}{isJunk && <span className="text-[10px] uppercase px-1.5 py-0.5 rounded border border-destructive/30 text-destructive">Junk</span>}{qualificationStatus && <span className={`text-[10px] uppercase px-1.5 py-0.5 rounded border ${qualificationStatus === "qualified" ? "border-emerald-500/30 text-emerald-500" : qualificationStatus === "not_qualified" ? "border-destructive/30 text-destructive" : "border-border text-muted-foreground"}`}>{qualificationStatus.replace("_", " ")}</span>}</div>
                     <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground mt-2">{primaryFields.map((field) => values[field.key] ? <span key={field.key}>{field.label}: {String(values[field.key])}</span> : null)}</div>
                     {scheduledFor && <div className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-primary"><PhoneCall className="w-3 h-3" /> Scheduled {new Date(scheduledFor).toLocaleString()}</div>}
                   </td>
@@ -1126,7 +1127,9 @@ function QualificationSummary({ communication, qualification, saving, onCancel }
   if (!hasSummary) return null;
   const status = communication.last_call_status || qualification.status || "updated";
   const recording = communication.last_recording_url || qualification.recording_url;
+  const callTimestamp = qualification.call_timestamp;
   const category = communication.qualification_category || qualification.qualification_category;
+  const qualificationStatus = communication.qualification_status || qualification.qualification_status;
   const score = communication.qualification_score ?? qualification.qualification_score;
   const scheduledFor = qualification.status === "scheduled" && qualification.scheduled_for;
   const categoryClass = category === "hot" ? "border-red-500/30 text-red-500 bg-red-500/10" : category === "warm" ? "border-amber-500/30 text-amber-500 bg-amber-500/10" : category === "cold" ? "border-blue-500/30 text-blue-500 bg-blue-500/10" : category === "junk" ? "border-destructive/30 text-destructive bg-destructive/10" : "border-border text-muted-foreground bg-muted";
@@ -1136,6 +1139,7 @@ function QualificationSummary({ communication, qualification, saving, onCancel }
         <h4 className="font-bold flex items-center gap-2"><PhoneCall className="w-4 h-4 text-primary" /> Qualification</h4>
         <div className="flex flex-wrap justify-end gap-2">
           {category && <span className={`px-2 py-1 rounded-md border text-[11px] font-semibold uppercase ${categoryClass}`}>{category}</span>}
+          {qualificationStatus && <span className={`px-2 py-1 rounded-md border text-[11px] font-semibold uppercase ${qualificationStatus === "qualified" ? "border-emerald-500/30 text-emerald-500 bg-emerald-500/10" : qualificationStatus === "not_qualified" ? "border-destructive/30 text-destructive bg-destructive/10" : "border-border text-muted-foreground bg-muted"}`}>{qualificationStatus.replace("_", " ")}</span>}
           {score != null && score !== "" && <span className="px-2 py-1 rounded-md border bg-card text-[11px] font-semibold">{score}%</span>}
           <span className="px-2 py-1 rounded-md border bg-muted text-[11px] font-semibold uppercase text-muted-foreground">{status}</span>
         </div>
@@ -1159,6 +1163,7 @@ function QualificationSummary({ communication, qualification, saving, onCancel }
         {communication.total_call_count ? <span>{communication.total_call_count} call{communication.total_call_count === 1 ? "" : "s"} tracked</span> : null}
         {(communication.disconnection_reason || qualification.disconnection_reason) && <span>Reason: {communication.disconnection_reason || qualification.disconnection_reason}</span>}
         {(communication.last_duration || qualification.duration) && <span>{communication.last_duration || qualification.duration}s</span>}
+        {callTimestamp && <span>{new Date(callTimestamp).toLocaleString()}</span>}
         {recording && <a href={recording} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border bg-card hover:bg-accent text-foreground font-semibold"><ExternalLink className="w-3.5 h-3.5" /> Open recording</a>}
       </div>
     </section>

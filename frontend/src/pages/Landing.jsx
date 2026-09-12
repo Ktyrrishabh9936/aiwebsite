@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowRight, Brain, ListChecks, PenLine, Code2, Zap } from "lucide-react";
+import { ArrowRight, Brain, ListChecks, PenLine, Code2, Zap, PhoneCall } from "lucide-react";
 import { Logo } from "../components/Logo";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { useAuth } from "../context/AuthContext";
@@ -62,6 +62,13 @@ export default function Landing() {
               className="inline-flex items-center gap-2 px-6 h-12 rounded-full bg-primary text-primary-foreground font-semibold hover:-translate-y-0.5 transition-transform"
             >
               Build my brain <ArrowRight className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => nav("/check-demo")}
+              data-testid="check-demo-cta"
+              className="inline-flex items-center gap-2 px-6 h-12 rounded-full border border-primary text-primary font-semibold hover:bg-primary/10 transition-colors"
+            >
+              <PhoneCall className="w-4 h-4" /> Check Demo
             </button>
             <Link to="/login" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
               I already have an account →

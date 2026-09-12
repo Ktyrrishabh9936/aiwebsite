@@ -1665,6 +1665,11 @@ def qualification_payload(base, ws_id, lead_id, lead, lead_phone, agent_config=N
         ),
         "callbacks": callbacks,
         "callbacks_json": json.dumps(callbacks),
+        "status_url": callbacks["status_url"],
+        "recording_url": callbacks["recording_url"],
+        "result_url": callbacks["result_url"],
+        "qualification_result_url": callbacks["result_url"],
+        "transcript_callback_url": callbacks["result_url"],
     }
 
 
@@ -1885,6 +1890,7 @@ def communication_summary_from_result(lead, payload, status, summary, recording_
     next_steps = normalized_text_list(payload.get("recommended_next_steps") or payload.get("next_steps") or payload.get("strategy"))
     score = normalize_qualification_score(payload)
     category = normalize_qualification_category(payload, score)
+    qualification_status = "qualified" if category in {"hot", "warm"} else "not_qualified"
     disconnection_reason = normalize_disconnection_reason(payload)
     return {
         "latest_summary": summary,
@@ -1894,6 +1900,7 @@ def communication_summary_from_result(lead, payload, status, summary, recording_
         "last_duration": str(payload.get("duration") or payload.get("Duration") or payload.get("RecordingDuration") or ""),
         "qualification_score": score,
         "qualification_category": category,
+        "qualification_status": qualification_status,
         "disconnection_reason": disconnection_reason,
         "total_call_count": int(previous.get("total_call_count") or 0) + 1,
         "collected_information": merge_text_lists(previous.get("collected_information"), collected),
@@ -1945,7 +1952,14 @@ async def save_qualification_result(db, ws_id, lead_id, payload):
     category = normalize_qualification_category(payload, score)
     if not category:
         category = score_result.get("category") or ""
+    qualification_status = "qualified" if category in {"hot", "warm"} else "not_qualified"
     disconnection_reason = normalize_disconnection_reason(payload)
+    call_timestamp = str(
+        payload.get("call_timestamp")
+        or payload.get("timestamp")
+        or (lead.get("qualification_call") or {}).get("call_timestamp")
+        or now_iso()
+    )
     now = now_iso()
     session_id = str(
         payload.get("session_id")
@@ -1989,12 +2003,14 @@ async def save_qualification_result(db, ws_id, lead_id, payload):
         "transcript": payload.get("transcript") or "",
         "recording_url": recording_url,
         "duration": str(payload.get("duration") or payload.get("Duration") or payload.get("RecordingDuration") or ""),
+        "call_timestamp": call_timestamp,
         "qualification_score": score,
         "qualification_category": category,
         "qualification_processing_status": score_result.get("qualification_processing_status") or "processed",
         "structured_qualification": structured,
         "score_version": score_result.get("score_version"),
         "score_breakdown": score_result.get("breakdown") or [],
+        "qualification_status": qualification_status,
         "disconnection_reason": disconnection_reason,
         "answers": answers,
         "collected_information": collected,
@@ -2044,7 +2060,12 @@ async def save_qualification_result(db, ws_id, lead_id, payload):
     })
     if session_id:
         note["session_id"] = session_id
-    set_updates = {"qualification_call": qualification, "communication_summary": communication_summary, "updated_at": now}
+    set_updates = {
+        "qualification_call": qualification,
+        "communication_summary": communication_summary,
+        "qualification_status": qualification_status,
+        "updated_at": now,
+    }
     if category == "junk":
         set_updates["status"] = "lost"
     await db.crm_leads.update_one(
@@ -2055,7 +2076,6 @@ async def save_qualification_result(db, ws_id, lead_id, payload):
         },
     )
     await db[COLLECTION].insert_one({
-        "workspace_id": ws_id,
         "lead_id": str(lead_id),
         "call_key": note["call_key"],
         "kind": "ai_qualification_result",

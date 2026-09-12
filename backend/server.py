@@ -877,6 +877,80 @@ async def public_workspace(key: str, request: Request):
     return {"name": ws.get("name"), "website_url": ws.get("website_url")}
 
 
+@api.post("/public/check-demo")
+async def create_check_demo_lead(request: Request, body: dict = Body(...)):
+    from crm import build_manual_lead, ensure_crm_settings
+    from plivo_calls import normalize_lead_phone, start_qualification_call
+
+    name = str(body.get("name") or "").strip()
+    email = str(body.get("email") or "").strip()
+    phone = normalize_lead_phone(body.get("phone"))
+    if not name or not email or not phone:
+        raise HTTPException(400, "Name, email, and phone number are required")
+
+    configured_workspace = os.environ.get("CHECK_DEMO_WORKSPACE_ID", "").strip()
+    ws = None
+    if configured_workspace:
+        try:
+            ws = await db.workspaces.find_one({"_id": oid(configured_workspace)})
+        except Exception:
+            ws = None
+    if not ws:
+        ws = await db.workspaces.find_one({}, sort=[("created_at", 1)])
+    if not ws:
+        raise HTTPException(503, "Demo workspace is not configured")
+
+    ws_id = str(ws["_id"])
+    settings = await ensure_crm_settings(db, ws_id)
+    lead_doc = build_manual_lead(ws_id, {
+        "field_values": {
+            "full_name": name,
+            "email": email,
+            "phone": phone,
+            "source": "check_demo",
+        },
+    }, settings)
+    lead_doc["source"] = "check_demo"
+    lead_doc["qualification_status"] = "pending"
+    lead_doc["timeline"] = [{"type": "created", "label": "Check Demo request submitted", "created_at": now_iso()}]
+    await db.crm_leads.insert_one(lead_doc)
+    result = await start_qualification_call(db, ws_id, str(lead_doc["_id"]), request)
+    return {"status": result.get("status"), "lead_id": str(lead_doc["_id"]), "message": "Your AI demo call is being connected now."}
+
+
+@api.get("/public/check-demo/{lead_id}")
+async def get_check_demo_result(lead_id: str):
+    try:
+        lead = await db.crm_leads.find_one({"_id": oid(lead_id), "source": "check_demo"})
+    except Exception:
+        lead = None
+    if not lead:
+        raise HTTPException(404, "Demo call not found")
+
+    values = lead.get("field_values") or {}
+    qualification = lead.get("qualification_call") or {}
+    communication = lead.get("communication_summary") or {}
+    call_status = qualification.get("status") or communication.get("last_call_status") or "pending"
+    return {
+        "name": values.get("full_name") or lead.get("full_name") or "",
+        "email": values.get("email") or lead.get("email") or "",
+        "phone": values.get("phone") or lead.get("phone") or "",
+        "call_status": call_status,
+        "qualification_status": lead.get("qualification_status") or qualification.get("qualification_status") or "pending",
+        "qualification_category": qualification.get("qualification_category") or communication.get("qualification_category") or "",
+        "summary": qualification.get("summary") or communication.get("latest_summary") or "",
+        "transcript": qualification.get("transcript") or "",
+        "call_timestamp": qualification.get("call_timestamp") or lead.get("created_at") or "",
+        "duration": qualification.get("duration") or communication.get("last_duration") or "",
+        "recording_url": qualification.get("recording_url") or communication.get("last_recording_url") or "",
+        "completed": bool(
+            qualification.get("transcript")
+            or qualification.get("qualification_status")
+            or str(call_status).lower() in {"completed", "failed", "busy", "no_answer", "rejected", "cancelled", "canceled", "hangup"}
+        ),
+    }
+
+
 @api.get("/public/blogs")
 async def public_blogs(key: str, request: Request):
     ws = await db.workspaces.find_one({"public_key": key})
@@ -1089,11 +1163,13 @@ from google_sheets import router as google_sheets_router
 from workflows import router as workflows_router
 from crm import router as crm_router
 from plivo_agents import router as plivo_agents_router
+from properties import router as properties_router
 
 api.include_router(google_sheets_router)
 api.include_router(workflows_router)
 api.include_router(crm_router)
 api.include_router(plivo_agents_router)
+api.include_router(properties_router)
 
 app.include_router(build_auth_router(db))
 app.include_router(build_coding_router(db))
