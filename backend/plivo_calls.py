@@ -8,7 +8,7 @@ import os
 import re
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -22,6 +22,7 @@ from crm import (
     lead_query,
     normalize_lead_note,
 )
+from llm_service import DEFAULT_MODEL, generate_json
 from models import now_iso
 
 
@@ -32,8 +33,8 @@ CALL_EVENTS_COLLECTION = "plivo_call_events"
 WORKFLOW_CONFIGS_COLLECTION = "plivo_workflow_configs"
 logger = logging.getLogger("plivo_calls")
 QUALIFICATION_CATEGORIES = {"hot", "warm", "cold", "junk"}
-JUNK_DISCONNECTION_REASONS = {"invalid_number", "number_unreachable", "unreachable", "wrong_contact", "fake_lead", "do_not_call", "not_interested"}
-JUNK_RESULT_VALUES = {"declined", "not_interested", "do_not_call", "wrong_contact", "invalid_number", "number_unreachable", "fake_lead", "junk"}
+JUNK_DISCONNECTION_REASONS = {"invalid_number", "wrong_contact", "wrong_number", "fake_lead", "duplicate", "spam"}
+JUNK_RESULT_VALUES = {"wrong_contact", "wrong_number", "invalid_number", "fake_lead", "duplicate", "spam", "junk"}
 TERMINAL_CALL_STATUSES = {"completed", "failed", "busy", "no_answer", "rejected", "cancelled", "canceled", "hangup"}
 ACTIVE_CALL_SESSION_STATUSES = {"queued", "started", "accepted", "answered", "reconcile_required"}
 PLIVO_AGENT_AUTH_TYPES = {"none", "bearer", "basic"}
@@ -83,24 +84,24 @@ DEFAULT_CALLING_WORKFLOW_CONFIG = {
     "warm_followup_task": True,
     "cold_nurture": True,
 }
-SUMMARY_KEYS = {
-    "summary",
-    "call_summary",
-    "callSummary",
+SUMMARY_KEYS = (
     "conversation_summary",
     "conversationSummary",
+    "call_summary",
+    "callSummary",
     "qualification_summary",
     "qualificationSummary",
     "final_summary",
     "finalSummary",
     "lead_summary",
     "leadSummary",
+    "summary",
     "message",
     "text",
     "content",
     "notes",
     "transcript",
-}
+)
 
 
 def normalize_phone(value):
@@ -456,6 +457,29 @@ def extract_provider_identifiers(response_data):
     if "call_uuid" not in identifiers and identifiers.get("request_uuid"):
         identifiers["call_uuid"] = identifiers["request_uuid"]
     return identifiers
+
+
+async def assign_plivo_call_uuid(db, ws_id, lead_id, call_uuid):
+    call_uuid = str(call_uuid or "").strip()
+    if not call_uuid:
+        return False
+    try:
+        target_id = ObjectId(str(lead_id))
+    except Exception:
+        return False
+    await db.crm_leads.update_many(
+        {"workspace_id": ws_id, "plivo_call_uuid": call_uuid, "_id": {"$ne": target_id}},
+        {"$unset": {"plivo_call_uuid": ""}},
+    )
+    await db.crm_leads.update_many(
+        {"workspace_id": ws_id, "qualification_call.call_uuid": call_uuid, "_id": {"$ne": target_id}},
+        {"$unset": {"qualification_call.call_uuid": ""}},
+    )
+    await db.crm_leads.update_one(
+        {"workspace_id": ws_id, "_id": target_id},
+        {"$set": {"plivo_call_uuid": call_uuid, "qualification_call.call_uuid": call_uuid, "updated_at": now_iso()}},
+    )
+    return True
 
 
 async def find_active_call_session(db, ws_id, lead_id):
@@ -1083,8 +1107,9 @@ def plivo_config():
         "auth_token": os.environ.get("PLIVO_AUTH_TOKEN", "").strip(),
         "from_number": normalize_phone(os.environ.get("PLIVO_FROM_NUMBER", "")),
         "staff_number": normalize_phone(os.environ.get("PLIVO_STAFF_NUMBER", "")),
+        "agent_trigger_url": os.environ.get("PLIVO_AGENT_TRIGGER_URL", "").strip(),
     }
-    missing = [key for key, value in cfg.items() if not value]
+    missing = [key for key, value in cfg.items() if key != "agent_trigger_url" and not value]
     if missing:
         raise HTTPException(status_code=400, detail=f"Plivo is not configured: missing {', '.join(missing)}")
     return cfg
@@ -1188,17 +1213,38 @@ def plivo_xml(body):
     return Response(content=f'<?xml version="1.0" encoding="UTF-8"?><Response>{body}</Response>', media_type="text/xml")
 
 
-def outbound_bridge_xml(lead_phone, recording_url, caller_id=None, timeout=45):
+def agent_flow_xml(agent_url, callback_url=None):
+    """
+    Redirect the call to the configured Plivo Agent Flow.
+
+    The Agent Flow is responsible for the conversation and the final
+    result callback. We keep the XML simple and direct the call to the
+    configured flow URL rather than dialing a lead number directly.
+    """
+    redirect_url = str(agent_url or "").strip()
+    if not redirect_url:
+        raise HTTPException(status_code=400, detail="Plivo agent flow URL is required")
+    # The callback is normally configured inside the Plivo Agent Flow itself.
+    # We intentionally avoid mutating the Agent Flow URL here so Plivo dials
+    # the agent flow as-is and the flow can report the result back to the
+    # qualification callback endpoint configured elsewhere.
+    return plivo_xml(f'<Redirect>{html.escape(redirect_url)}</Redirect>')
+
+
+def outbound_bridge_xml(lead_phone, result_url, caller_id=None, timeout=45, recording_url=None):
     attrs = []
     if caller_id:
         attrs.append(f'callerId="{html.escape(caller_id)}"')
     if timeout:
         attrs.append(f'timeout="{int(timeout)}"')
+    if result_url:
+        attrs.append(f'action="{html.escape(result_url)}"')
+        attrs.append('method="POST"')
     dial_tag = f"<Dial{' ' + ' '.join(attrs) if attrs else ''}>"
-    return plivo_xml(
-        f'<Record startOnDialAnswer="true" redirect="false" callbackUrl="{html.escape(recording_url)}" callbackMethod="POST" />'
-        f"{dial_tag}<Number>{html.escape(lead_phone)}</Number></Dial>"
-    )
+    record_tag = ''
+    if recording_url:
+        record_tag = f'<Record startOnDialAnswer="true" redirect="false" callbackUrl="{html.escape(recording_url)}" callbackMethod="POST" />'
+    return plivo_xml(f'{record_tag}{dial_tag}<Number>{html.escape(lead_phone)}</Number></Dial>')
 
 
 def inbound_bridge_xml(staff_phone, recording_url):
@@ -1402,13 +1448,133 @@ def first_nested_value(payload, keys, depth=0):
 
 
 def unwrap_qualification_payload(payload):
-    payload = dict(payload or {})
+    if payload is None:
+        return {}
+    if isinstance(payload, list):
+        merged = {}
+        for item in payload:
+            merged.update(unwrap_qualification_payload(item))
+        return merged
+    if not isinstance(payload, dict):
+        return {}
+
+    payload = dict(payload)
     merged = dict(payload)
-    for key in ("data", "result", "output", "payload", "variables", "callback", "response", "body", "arguments"):
-        nested = parse_jsonish_dict(payload.get(key))
-        if nested:
-            merged.update(unwrap_qualification_payload(nested))
+    for key in ("data", "result", "output", "payload", "variables", "callback", "response", "body", "arguments", "object", "event_data"):
+        nested = payload.get(key)
+        if nested is None:
+            continue
+        if isinstance(nested, str):
+            nested = parse_jsonish_dict(nested)
+        if isinstance(nested, dict):
+            nested_flat = unwrap_qualification_payload(nested)
+            if nested_flat:
+                merged.update(nested_flat)
+        elif isinstance(nested, list):
+            for item in nested:
+                merged.update(unwrap_qualification_payload(item))
+    if isinstance(payload.get("object"), dict):
+        merged.update(unwrap_qualification_payload(payload["object"]))
     return merged
+
+
+def normalize_contacto_qualification_payload(payload):
+    payload = payload or {}
+    normalized = deepcopy(dict(payload))
+    if "event_data" in normalized and isinstance(normalized["event_data"], dict):
+        for key, value in list(normalized["event_data"].items()):
+            normalized.setdefault(key, value)
+    data_obj = normalized.get("data") if isinstance(normalized.get("data"), dict) else {}
+    if isinstance(data_obj.get("object"), dict):
+        nested = data_obj["object"]
+        if isinstance(nested.get("event_data"), dict):
+            for key, value in nested["event_data"].items():
+                normalized.setdefault(key, value)
+    flattened_keys = {}
+    for key, value in list(normalized.items()):
+        if isinstance(value, dict):
+            if key == "event_data":
+                for inner_key, inner_value in value.items():
+                    flattened_keys[inner_key] = inner_value
+    for key, value in flattened_keys.items():
+        normalized.setdefault(key, value)
+
+    for key in [
+        "Property Qualification.qualification_status",
+        "Qualification.qualification_status",
+        "qualification_status",
+    ]:
+        value = normalized.get(key)
+        if value not in (None, ""):
+            normalized["qualification_status"] = str(value).strip()
+            break
+
+    for key in [
+        "Property Qualification.qualification_category",
+        "Qualification.qualification_category",
+        "qualification_category",
+    ]:
+        value = normalized.get(key)
+        if value not in (None, ""):
+            normalized["qualification_category"] = str(value).strip()
+            break
+
+    for key in [
+        "Property Qualification.budget",
+        "Qualification.budget",
+        "budget",
+    ]:
+        value = normalized.get(key)
+        if value not in (None, ""):
+            normalized.setdefault("budget", str(value).strip())
+            normalized.setdefault("answers", {})
+            normalized["answers"]["budget"] = str(value).strip()
+            break
+
+    for key in [
+        "Property Qualification.preferred_location",
+        "Qualification.preferred_location",
+        "preferred_location",
+    ]:
+        value = normalized.get(key)
+        if value not in (None, ""):
+            normalized.setdefault("preferred_location", str(value).strip())
+            normalized.setdefault("answers", {})
+            normalized["answers"]["preferred_location"] = str(value).strip()
+            break
+
+    for key in [
+        "Property Qualification.property_type",
+        "Qualification.property_type",
+        "property_type",
+    ]:
+        value = normalized.get(key)
+        if value not in (None, ""):
+            normalized.setdefault("property_type", str(value).strip())
+            normalized.setdefault("answers", {})
+            normalized["answers"]["property_type"] = str(value).strip()
+            break
+
+    for key in [
+        "Property Qualification.recommended_next_steps",
+        "Qualification.recommended_next_steps",
+        "recommended_next_steps",
+    ]:
+        value = normalized.get(key)
+        if value not in (None, ""):
+            normalized["recommended_next_steps"] = str(value).strip()
+            break
+
+    if isinstance(normalized.get("qualification_status"), str):
+        normalized["qualification_status"] = normalized["qualification_status"].strip()
+    if isinstance(normalized.get("qualification_category"), str):
+        normalized["qualification_category"] = normalized["qualification_category"].strip().lower()
+    if normalized.get("qualification_category") in {"hot", "warm", "cold", "junk"}:
+        normalized["qualification_category"] = str(normalized["qualification_category"]).lower()
+    elif isinstance(normalized.get("qualification_category"), str):
+        normalized["qualification_category"] = str(normalized["qualification_category"]).strip().lower()
+
+    return normalized
 
 
 def category_from_score(score):
@@ -1434,6 +1600,108 @@ def normalize_qualification_category(payload, score=None):
     if raw in QUALIFICATION_CATEGORIES:
         return raw
     return category_from_score(score) or ""
+
+
+async def run_ai_qualification(transcript, config=None, model_id=None):
+    transcript_text = _clean_text(transcript, 12000)
+    cfg = (config or {}) if isinstance(config, dict) else {}
+    is_enabled = bool(cfg.get("is_enabled", True))
+    passing_score = int(cfg.get("passing_score") or 70)
+    if not transcript_text:
+        return {
+            "score": 0,
+            "status": "manual_review",
+            "tags": ["Needs review"],
+            "summary": "AI qualification skipped because no transcript was captured.",
+            "qualification_processing_status": "missing_transcript",
+            "manual_review": True,
+        }
+    if not is_enabled:
+        return {
+            "score": 0,
+            "status": "manual_review",
+            "tags": ["Needs review"],
+            "summary": "AI qualification is disabled for this workspace.",
+            "qualification_processing_status": "disabled",
+            "manual_review": True,
+        }
+    criteria = cfg.get("criteria") or []
+    if not isinstance(criteria, list):
+        criteria = []
+    criterion_summary = []
+    for idx, criterion in enumerate(criteria[:10], start=1):
+        if not isinstance(criterion, dict):
+            continue
+        field = str(criterion.get("field") or "").strip()
+        condition = str(criterion.get("condition") or "contains").strip().lower()
+        value = str(criterion.get("value") or "").strip()
+        weight = int(criterion.get("weight") or 0)
+        if not field or not value:
+            continue
+        criterion_summary.append({
+            "index": idx,
+            "field": field,
+            "condition": condition,
+            "value": value,
+            "weight": weight,
+        })
+    system = (
+        "You are evaluating a sales lead transcript against the workspace qualification rules. "
+        "Return ONLY valid JSON with keys: score (0-100 integer), status (qualified or manual_review), "
+        "tags (array of strings), and summary (one short sentence)."
+    )
+    prompt = json.dumps({
+        "transcript": transcript_text,
+        "passing_score": passing_score,
+        "criteria": criterion_summary,
+        "instructions": [
+            "Interpret the transcript literally and weigh each rule against what the caller actually said.",
+            "Use 'qualified' when the score meets or exceeds the passing score, otherwise use 'manual_review'.",
+            "Keep the summary concise but specific to the transcript content and the target lead profile."
+        ],
+    }, ensure_ascii=False)
+    try:
+        result = await generate_json(model_id or DEFAULT_MODEL, system, prompt, temperature=0.2, max_tokens=1800)
+    except Exception as exc:
+        logger.exception("AI qualification generation failed")
+        return {
+            "score": 0,
+            "status": "manual_review",
+            "tags": ["Needs review"],
+            "summary": "AI qualification review required: the transcript could not be scored automatically.",
+            "qualification_processing_status": "manual_review",
+            "manual_review": True,
+            "error": str(exc),
+        }
+    if not isinstance(result, dict):
+        return {
+            "score": 0,
+            "status": "manual_review",
+            "tags": ["Needs review"],
+            "summary": "AI qualification review required: the model returned an invalid response.",
+            "qualification_processing_status": "manual_review",
+            "manual_review": True,
+        }
+    score = int(result.get("score") or 0)
+    status = str(result.get("status") or "manual_review").strip().lower()
+    tags = [str(tag) for tag in (result.get("tags") or []) if str(tag).strip()]
+    summary = _clean_text(result.get("summary") or "AI qualification review required.", 500)
+    if not status or status not in {"qualified", "manual_review", "not_qualified"}:
+        status = "manual_review" if score < passing_score else "qualified"
+    if status == "not_qualified":
+        status = "manual_review" if score < passing_score else "qualified"
+    if not tags:
+        tags = ["Needs review"] if status == "manual_review" else ["Qualified"]
+    if score < passing_score and status == "qualified":
+        status = "manual_review"
+    return {
+        "score": max(0, min(100, score)),
+        "status": status,
+        "tags": tags[:10],
+        "summary": summary or "AI qualification review required.",
+        "qualification_processing_status": status,
+        "manual_review": status == "manual_review",
+    }
 
 
 def normalize_disconnection_reason(payload):
@@ -1500,7 +1768,7 @@ async def mark_lead_junk(db, ws_id, lead_id, reason, payload=None):
         "mode": "agent_direct_to_lead",
         "phone": lead_phone_from_doc(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)}) or {}),
         "qualification_category": "junk",
-        "qualification_score": 0,
+        "qualification_score": None,
         "summary": reason,
         "last_error": reason,
         "disconnection_reason": reason,
@@ -1509,7 +1777,7 @@ async def mark_lead_junk(db, ws_id, lead_id, reason, payload=None):
     }
     await db.crm_leads.update_one(
         {"workspace_id": ws_id, "_id": ObjectId(lead_id)},
-        {"$set": {"status": "lost", "qualification_call": qualification, "updated_at": now}, "$push": {"lead_notes": note}},
+        {"$set": {"status": "lost", "lead_status": "JUNK", "last_call_outcome": "INVALID_NUMBER", "call_outcome": "INVALID_NUMBER", "qualification_score": None, "lead_temperature": None, "retry_eligible": False, "next_action": "NO_ACTION", "qualification_call": qualification, "updated_at": now}, "$push": {"lead_notes": note}},
     )
     await db[COLLECTION].insert_one({
         "workspace_id": ws_id,
@@ -1529,6 +1797,8 @@ async def schedule_first_qualification_call(db, ws_id, lead_id, delay_minutes=5)
     lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)})
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
+    if lead.get("do_not_call") or lead.get("lead_status") == "JUNK":
+        return {"status": "skipped", "reason": "DND or junk"}
     if is_junk_lead(lead):
         settings = await ensure_crm_settings(db, ws_id)
         return {"status": "skipped", "reason": "lead is marked junk", "lead": decorate_lead(lead, settings)}
@@ -1924,198 +2194,36 @@ def require_agent_callback_token(request: Request):
 
 
 async def save_qualification_result(db, ws_id, lead_id, payload):
-    payload = unwrap_qualification_payload(payload)
-    lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)})
-    if not lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    status = qualification_result_status(payload)
-    summary = qualification_result_summary(payload)
-    call_uuid = str(payload.get("call_uuid") or payload.get("CallUUID") or payload.get("request_uuid") or "")
-    recording_url = str(
-        payload.get("recording_url")
-        or payload.get("recordingUrl")
-        or payload.get("recording")
-        or payload.get("RecordUrl")
-        or payload.get("RecordingUrl")
-        or ""
-    ).strip()
-    answers = normalized_answers(payload)
-    collected = normalized_text_list(payload.get("collected_information") or payload.get("collected_info") or payload.get("important_information"))
-    objections = normalized_text_list(payload.get("objections") or payload.get("key_objections"))
-    pending = normalized_text_list(payload.get("pending_discussion") or payload.get("missing_information") or payload.get("open_questions"))
-    next_steps = normalized_text_list(payload.get("recommended_next_steps") or payload.get("next_steps") or payload.get("strategy"))
-    structured = structured_qualification_from_payload(payload)
-    score_result = score_structured_qualification(structured)
-    score = normalize_qualification_score(payload)
-    if score is None:
-        score = score_result.get("score")
-    category = normalize_qualification_category(payload, score)
-    if not category:
-        category = score_result.get("category") or ""
-    qualification_status = "qualified" if category in {"hot", "warm"} else "not_qualified"
-    disconnection_reason = normalize_disconnection_reason(payload)
-    call_timestamp = str(
-        payload.get("call_timestamp")
-        or payload.get("timestamp")
-        or (lead.get("qualification_call") or {}).get("call_timestamp")
-        or now_iso()
-    )
-    now = now_iso()
-    session_id = str(
-        payload.get("session_id")
-        or payload.get("call_session_id")
-        or (lead.get("qualification_call") or {}).get("session_id")
-        or ""
-    )
-    if category == "junk" or is_mandatory_junk_result(payload):
-        status = "failed"
-        category = "junk"
-        score = 0 if score is None else score
-        disconnection_reason = disconnection_reason or raw_qualification_result_value(payload) or "junk"
-        payload = {**payload, "qualification_score": score, "qualification_category": category, "disconnection_reason": disconnection_reason}
-    elif score is not None or category:
-        payload = {**payload, "qualification_score": score, "qualification_category": category}
-    next_action = recommended_next_action(structured, {**score_result, "score": score, "category": category}, status)
-    agent_actions = normalized_agent_actions(payload)
-    communication_summary = communication_summary_from_result(lead, payload, status, summary, recording_url)
-    communication_summary.update({
-        "structured_qualification": structured,
-        "qualification_processing_status": score_result.get("qualification_processing_status") or "processed",
-        "score_version": score_result.get("score_version"),
-        "score_breakdown": score_result.get("breakdown") or [],
-        "agent_actions": agent_actions,
-        "next_action": next_action,
-    })
-    if category:
-        communication_summary["qualification_category"] = category
-    if score is not None:
-        communication_summary["qualification_score"] = score
-    qualification = {
-        **(lead.get("qualification_call") or {}),
-        "status": status,
-        "provider": "plivo",
-        "mode": "agent_direct_to_lead",
-        "session_id": session_id,
-        "call_uuid": call_uuid or (lead.get("qualification_call") or {}).get("call_uuid", ""),
-        "phone": lead_phone_from_doc(lead),
-        "result": payload,
-        "summary": summary,
-        "transcript": payload.get("transcript") or "",
-        "recording_url": recording_url,
-        "duration": str(payload.get("duration") or payload.get("Duration") or payload.get("RecordingDuration") or ""),
-        "call_timestamp": call_timestamp,
-        "qualification_score": score,
-        "qualification_category": category,
-        "qualification_processing_status": score_result.get("qualification_processing_status") or "processed",
-        "structured_qualification": structured,
-        "score_version": score_result.get("score_version"),
-        "score_breakdown": score_result.get("breakdown") or [],
-        "qualification_status": qualification_status,
-        "disconnection_reason": disconnection_reason,
-        "answers": answers,
-        "collected_information": collected,
-        "objections": objections,
-        "pending_discussion": pending,
-        "recommended_next_steps": next_steps,
-        "agent_actions": agent_actions,
-        "next_action": next_action,
-        "result_status": "received",
-        "crm_sync_status": "synced",
-        "last_error": "" if status == "completed" else summary,
-        "updated_at": now,
-    }
-    note = normalize_lead_note({
-        "body": f"AI qualification result: {summary}",
-        "author": "Plivo",
-        "source": "call_agent",
-        "call_provider": "plivo",
-        "call_id": qualification.get("call_uuid", ""),
-        "direction": "outbound",
-        "outcome": status,
-        "summary": summary,
-        "transcript": payload.get("transcript") or "",
-    })
-    note.update({
-        "call_key": f"qualification_result:{qualification.get('call_uuid') or now}:{status}",
-        "call_direction": "outbound",
-        "call_uuid": qualification.get("call_uuid", ""),
-        "to_number": qualification.get("phone", ""),
-        "status": status,
-        "call_status": status,
-        "recording_url": recording_url,
-        "duration": qualification.get("duration", ""),
-        "qualification_score": score,
-        "qualification_category": category,
-        "disconnection_reason": disconnection_reason,
-        "answers": answers,
-        "collected_information": collected,
-        "objections": objections,
-        "pending_discussion": pending,
-        "recommended_next_steps": next_steps,
-        "structured_qualification": structured,
-        "qualification_processing_status": score_result.get("qualification_processing_status") or "processed",
-        "score_breakdown": score_result.get("breakdown") or [],
-        "agent_actions": agent_actions,
-        "next_action": next_action,
-    })
-    if session_id:
-        note["session_id"] = session_id
-    set_updates = {
-        "qualification_call": qualification,
-        "communication_summary": communication_summary,
-        "qualification_status": qualification_status,
-        "updated_at": now,
-    }
-    if category == "junk":
-        set_updates["status"] = "lost"
-    await db.crm_leads.update_one(
-        {"workspace_id": ws_id, "_id": ObjectId(lead_id)},
-        {
-            "$set": set_updates,
-            "$push": {"lead_notes": note},
-        },
-    )
-    await db[COLLECTION].insert_one({
-        "lead_id": str(lead_id),
-        "call_key": note["call_key"],
-        "kind": "ai_qualification_result",
-        "status": status,
-        "session_id": session_id,
-        "payload": payload,
-        "created_at": now,
-        "updated_at": now,
-    })
-    if session_id:
-        await update_call_session(db, ws_id, session_id, {
-            "status": status,
-            "result_status": "received",
-            "crm_sync_status": "synced",
-            "result_payload": payload,
-            "summary": summary,
-            "qualification_score": score,
-            "qualification_category": category,
-            "qualification_processing_status": score_result.get("qualification_processing_status") or "processed",
-            "score_breakdown": score_result.get("breakdown") or [],
-            "structured_qualification": structured,
-            "next_action": next_action,
-            "agent_actions": agent_actions,
-            "provider_identifiers": {
-                **((lead.get("qualification_call") or {}).get("provider_identifiers") or {}),
-                **extract_provider_identifiers(payload),
-            },
-        })
-    settings = await ensure_crm_settings(db, ws_id)
-    return {
-        "ok": True,
-        "status": status,
-        "lead": decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)}), settings),
-    }
+    from qualification_service import PlivoWebhookController
+    return await PlivoWebhookController(db).process(ws_id, lead_id, payload)
 
 
 async def start_qualification_call(db, ws_id, lead_id, request: Request, auto=False, raise_on_error=True, agent_config_id=None):
+    from qualification_service import PlivoCallTriggerService
+    return await PlivoCallTriggerService.trigger(db, ws_id, lead_id, request, auto=auto, raise_on_error=raise_on_error, agent_config_id=agent_config_id)
+
+
+async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=False, raise_on_error=True, agent_config_id=None):
     lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)})
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
+    if lead.get("do_not_call") or lead.get("lead_status") == "JUNK":
+        if raise_on_error:
+            raise HTTPException(409, "Calling is blocked for this lead (DND or junk)")
+        await db.crm_leads.update_one({"_id": lead["_id"]}, {"$set": {"qualification_call.status": "blocked"}})
+        return {"status": "skipped", "reason": "DND or junk"}
+    if auto:
+        from qualification_service import resolve_profile
+        workspace = await db.workspaces.find_one({"_id": ObjectId(ws_id)}) or {}
+        profile, _ = await resolve_profile(db, ws_id, lead, workspace)
+        workflow = await ensure_calling_workflow_config(db, ws_id)
+        attempts = max(int(lead.get("call_attempt_count") or 0), await db.plivo_call_sessions.count_documents({"workspace_id": ws_id, "lead_id": str(lead_id)}))
+        if not workflow.get("enabled", True) or attempts >= profile.retry.max_attempts:
+            await db.crm_leads.update_one({"_id": lead["_id"]}, {"$set": {"qualification_call.status": "retry_exhausted", "retry_eligible": False}})
+            return {"status": "skipped", "reason": "Calling disabled or attempt limit reached"}
+        if not within_calling_window(workflow):
+            await db.crm_leads.update_one({"_id": lead["_id"]}, {"$set": {"qualification_call.scheduled_for": next_calling_window_start(workflow).isoformat()}})
+            return {"status": "scheduled", "reason": "Outside calling window"}
     if is_junk_lead(lead):
         message = "Lead is marked junk and cannot be called until an admin changes its qualification status"
         if raise_on_error:
@@ -2162,8 +2270,12 @@ async def start_qualification_call(db, ws_id, lead_id, request: Request, auto=Fa
             raise
         settings = await ensure_crm_settings(db, ws_id)
         return {"status": "junk", "error": str(exc.detail), "lead": decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)}), settings)}
+    from qualification_service import resolve_profile
+    workspace = await db.workspaces.find_one({"_id": ObjectId(ws_id)}) or {}
+    profile, profile_id = await resolve_profile(db, ws_id, lead, workspace)
     session = await create_call_session(db, ws_id, lead_id, lead_phone, agent_config, auto=auto)
     session_id = str(session["_id"])
+    await update_call_session(db, ws_id, session_id, {"profile_snapshot": profile.model_dump(mode="json"), "profile_id": profile_id})
     base_payload = qualification_payload(public_base_url(request), ws_id, lead_id, lead, lead_phone, agent_config, session_id)
     payload = build_agent_trigger_payload(base_payload, agent_config, session_id)
     headers, auth = trigger_auth_for_agent(agent_config)

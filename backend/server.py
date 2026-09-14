@@ -153,6 +153,9 @@ async def list_models():
         return importlib.util.find_spec(name) is not None
 
     def provider_status(provider):
+        if provider == "bedrock_mantle":
+            ok = bool(llm_service.mantle_config()["key"])
+            return {"configured": ok, "reason": "" if ok else "BEDROCK_MANTLE_API_KEY or AWS_BEARER_TOKEN_BEDROCK is missing"}
         if provider == "bedrock":
             has_creds = bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or os.environ.get("AWS_ACCESS_KEY_ID"))
             has_boto3 = has_python_package("boto3")
@@ -175,6 +178,7 @@ async def list_models():
     models = [{**m, **provider_status(m.get("provider"))} for m in visible_models]
     return {"models": models, "default": llm_service.DEFAULT_MODEL,
             "providers": {
+                "bedrock_mantle": {**provider_status("bedrock_mantle"), "env": "BEDROCK_MANTLE_API_KEY (or AWS_BEARER_TOKEN_BEDROCK)"},
                 "openrouter": {**statuses["openrouter"], "env": "OPENROUTER_API_KEY"},
                 "nvidia": {**statuses["nvidia"], "env": "NVIDIA_NIM_API_KEY"},
             }}
@@ -234,7 +238,7 @@ async def get_workspace(ws_id: str, request: Request):
 async def update_workspace(ws_id: str, request: Request, body: dict = Body(...)):
     user = await require_user(request)
     await owned_workspace(ws_id, user)
-    updates = {k: v for k, v in body.items() if k in ("model_id", "name")}
+    updates = {k: v for k, v in body.items() if k in ("model_id", "name", "ai_qualification_config")}
     if "allowed_blog_origins" in body:
         updates["allowed_blog_origins"] = _clean_origins(body.get("allowed_blog_origins"))
     if updates:
@@ -739,7 +743,7 @@ async def _plivo_result_payload(request: Request):
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/{lead_id}/outbound/answer", methods=["GET", "POST"])
 async def plivo_outbound_answer(ws_id: str, lead_id: str, request: Request):
-    from plivo_calls import callback_urls, normalize_phone, outbound_bridge_xml, plivo_config, public_base_url, require_plivo_signature
+    from plivo_calls import agent_flow_xml, callback_urls, plivo_config, public_base_url, require_plivo_signature
 
     params = await _plivo_params(request)
     await require_plivo_signature(request, await _plivo_body_params(request))
@@ -747,12 +751,83 @@ async def plivo_outbound_answer(ws_id: str, lead_id: str, request: Request):
     lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
     if not lead:
         raise HTTPException(404, "Lead not found")
-    values = lead.get("field_values") or {}
-    lead_phone = normalize_phone(values.get("phone") or lead.get("phone"))
-    if not lead_phone:
-        raise HTTPException(400, "Lead phone number is required")
+    call_uuid = str(params.get("CallUUID") or params.get("call_uuid") or "").strip()
+    if call_uuid:
+        from plivo_calls import assign_plivo_call_uuid
+        await assign_plivo_call_uuid(db, ws_id, lead_id, call_uuid)
+    agent_url = (cfg.get("agent_trigger_url") or "").strip()
+    if not agent_url:
+        raise HTTPException(500, "PLIVO_AGENT_TRIGGER_URL is not configured")
     urls = callback_urls(public_base_url(request), ws_id, lead_id)
-    return outbound_bridge_xml(lead_phone, urls["recording"], caller_id=cfg["from_number"])
+    return agent_flow_xml(agent_url, urls["qualification_result"])
+
+
+@api.api_route("/plivo/agent/callback", methods=["GET", "POST"])
+async def plivo_agent_callback(request: Request):
+    from plivo_calls import (
+        normalize_contacto_qualification_payload,
+        normalize_lead_note,
+        require_agent_callback_token,
+        save_qualification_result,
+    )
+
+    require_agent_callback_token(request)
+
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await request.json()
+    else:
+        form_data = await request.form()
+        payload = dict(form_data)
+
+    payload = normalize_contacto_qualification_payload(payload)
+    nested_object = None
+    if isinstance(payload, dict) and "data" in payload and isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("object"), dict):
+        nested_object = payload["data"]["object"]
+
+    call_uuid = (
+        payload.get("call_uuid")
+        or payload.get("CallUUID")
+        or payload.get("callUuid")
+        or payload.get("request_uuid")
+        or payload.get("RecordingCallUUID")
+        or (nested_object or {}).get("call_uuid")
+        or (nested_object or {}).get("CallUUID")
+        or ""
+    )
+    conversation_id = (
+        payload.get("conversation_id")
+        or payload.get("conversationId")
+        or payload.get("session_id")
+        or payload.get("call_session_id")
+        or (nested_object or {}).get("conversation_id")
+        or ""
+    )
+    logger.info("Plivo agent callback received call_uuid=%s conversation_id=%s", call_uuid, conversation_id)
+
+    if not call_uuid:
+        logger.warning("Plivo agent callback missing call_uuid payload=%s", json.dumps(payload, default=str)[:500])
+        raise HTTPException(422, "Missing CallUUID")
+
+    lead = await db.crm_leads.find_one({"plivo_call_uuid": str(call_uuid)})
+    if not lead:
+        lead = await db.crm_leads.find_one({"qualification_call.call_uuid": str(call_uuid)})
+    if not lead and conversation_id:
+        lead = await db.crm_leads.find_one({"qualification_call.session_id": str(conversation_id)})
+    if not lead:
+        session = await db.plivo_call_sessions.find_one({"$or": [{"provider_identifiers.call_uuid": str(call_uuid)}, {"provider_identifiers.request_uuid": str(call_uuid)}]})
+        if session and ObjectId.is_valid(session.get("lead_id", "")):
+            lead = await db.crm_leads.find_one({"_id": ObjectId(session["lead_id"]), "workspace_id": session["workspace_id"]})
+    if not lead:
+        logger.warning("Plivo agent callback could not resolve CRM lead for call_uuid=%s conversation_id=%s payload=%s", call_uuid, conversation_id, json.dumps(payload, default=str)[:500])
+        raise HTTPException(404, "Call could not be matched to a lead")
+
+    ws_id = lead.get("workspace_id")
+    lead_id = str(lead.get("_id"))
+    logger.info("Plivo agent callback resolved workspace_id=%s lead_id=%s call_uuid=%s", ws_id, lead_id, call_uuid)
+
+    result = await save_qualification_result(db, ws_id, lead_id, payload)
+    return {"status": "success", "result": result, "call_uuid": call_uuid, "lead_id": lead_id, "workspace_id": ws_id}
 
 
 @api.get("/plivo/workspaces/{ws_id}/calls/debug")
@@ -773,23 +848,8 @@ async def plivo_outbound_status(ws_id: str, request: Request):
     lead_id = str(params.get("lead_id") or "").strip()
     if not lead_id:
         return {"ok": True, "logged": False}
-    event, duplicate = await store_plivo_event(db, ws_id, lead_id, "outbound_status", params)
-    if duplicate:
-        return {"ok": True, "logged": False, "duplicate": True, "event_id": str(event.get("_id"))}
-    await mark_plivo_event(db, ws_id, event["_id"], "processing")
-    try:
-        await log_call_note(db, ws_id, lead_id, params, {
-            "event": "outbound_status",
-            "call_direction": "outbound",
-            "body": f"Outbound Plivo call status: {params.get('CallStatus') or params.get('HangupCause') or 'updated'}",
-            "outcome": params.get("CallStatus") or params.get("HangupCause") or "updated",
-        })
-        await sync_qualification_status_from_payload(db, ws_id, lead_id, params)
-        await mark_plivo_event(db, ws_id, event["_id"], "processed")
-        return {"ok": True, "logged": True, "event_id": str(event["_id"])}
-    except Exception as exc:
-        await mark_plivo_event(db, ws_id, event["_id"], "failed", str(exc))
-        raise
+    from plivo_calls import save_qualification_result
+    return await save_qualification_result(db, ws_id, lead_id, params)
 
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/{lead_id}/qualification/result", methods=["GET", "POST"])
@@ -798,18 +858,7 @@ async def plivo_qualification_result(ws_id: str, lead_id: str, request: Request)
 
     require_agent_callback_token(request)
     payload = await _plivo_result_payload(request)
-    event, duplicate = await store_plivo_event(db, ws_id, lead_id, "qualification_result", payload)
-    if duplicate:
-        return {"ok": True, "duplicate": True, "event_id": str(event.get("_id"))}
-    await mark_plivo_event(db, ws_id, event["_id"], "processing")
-    try:
-        result = await save_qualification_result(db, ws_id, lead_id, payload)
-        await mark_plivo_event(db, ws_id, event["_id"], "processed")
-        result["event_id"] = str(event["_id"])
-        return result
-    except Exception as exc:
-        await mark_plivo_event(db, ws_id, event["_id"], "failed", str(exc))
-        raise
+    return await save_qualification_result(db, ws_id, lead_id, payload)
 
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/inbound/answer", methods=["GET", "POST"])
@@ -837,6 +886,55 @@ async def log_plivo_inbound_started(ws_id, lead_id, params, created):
     })
 
 
+async def maybe_process_recording_as_qualification(db, ws_id, lead_id, payload):
+    from plivo_calls import normalize_contacto_qualification_payload, save_qualification_result
+
+    candidate = normalize_contacto_qualification_payload(payload)
+    if not isinstance(candidate, dict):
+        return None
+    text_signal = (
+        candidate.get("conversation_summary")
+        or candidate.get("summary")
+        or candidate.get("call_summary")
+        or candidate.get("final_summary")
+        or candidate.get("transcript")
+        or candidate.get("transcription")
+        or candidate.get("recording_url")
+        or candidate.get("recordingUrl")
+    )
+    if not text_signal:
+        return None
+
+    target_lead_id = str(lead_id or "").strip()
+    if not target_lead_id:
+        call_uuid = (
+            candidate.get("call_uuid")
+            or candidate.get("CallUUID")
+            or candidate.get("callUuid")
+            or candidate.get("request_uuid")
+            or candidate.get("RecordingCallUUID")
+            or ""
+        )
+        if not call_uuid:
+            return None
+        for query in (
+            {"workspace_id": ws_id, "plivo_call_uuid": str(call_uuid)},
+            {"workspace_id": ws_id, "qualification_call.call_uuid": str(call_uuid)},
+        ):
+            lead = await db.crm_leads.find_one(query)
+            if lead:
+                target_lead_id = str(lead.get("_id"))
+                break
+        if not target_lead_id:
+            return None
+
+    try:
+        return await save_qualification_result(db, ws_id, target_lead_id, candidate)
+    except Exception:
+        logger.exception("Application-side qualification evaluation failed for recording callback ws_id=%s lead_id=%s", ws_id, target_lead_id)
+        raise
+
+
 @api.api_route("/plivo/workspaces/{ws_id}/calls/recording", methods=["GET", "POST"])
 async def plivo_recording_callback(ws_id: str, request: Request):
     from plivo_calls import log_call_note, mark_plivo_event, require_plivo_signature, store_plivo_event
@@ -844,26 +942,37 @@ async def plivo_recording_callback(ws_id: str, request: Request):
     params = await _plivo_params(request)
     await require_plivo_signature(request, await _plivo_body_params(request))
     lead_id = str(params.get("lead_id") or "").strip()
-    if not lead_id:
-        return {"ok": True, "logged": False}
+    payload = dict(params)
+    nested_object = params.get("data") if isinstance(params.get("data"), dict) else {}
+    if isinstance(nested_object.get("object"), dict):
+        nested_event_data = nested_object["object"].get("event_data") or {}
+        if isinstance(nested_event_data, dict):
+            payload.update({k: v for k, v in nested_event_data.items()})
     direction = params.get("call_direction") or params.get("Direction") or "outbound"
-    event, duplicate = await store_plivo_event(db, ws_id, lead_id, "recording", params)
-    if duplicate:
-        return {"ok": True, "logged": False, "duplicate": True, "event_id": str(event.get("_id"))}
-    await mark_plivo_event(db, ws_id, event["_id"], "processing")
-    try:
-        await log_call_note(db, ws_id, lead_id, params, {
-            "event": "recording",
-            "call_direction": direction,
-            "body": f"{str(direction).title()} Plivo recording saved.",
-            "outcome": "recording_saved",
-            "summary": params.get("Transcription") or "Recording metadata received",
-        })
-        await mark_plivo_event(db, ws_id, event["_id"], "processed")
-        return {"ok": True, "logged": True, "event_id": str(event["_id"])}
-    except Exception as exc:
-        await mark_plivo_event(db, ws_id, event["_id"], "failed", str(exc))
-        raise
+    if not lead_id:
+        candidate_call_uuid = (
+            payload.get("call_uuid")
+            or payload.get("CallUUID")
+            or payload.get("callUuid")
+            or payload.get("request_uuid")
+            or (nested_object.get("object") or {}).get("call_uuid")
+            or ""
+        )
+        if candidate_call_uuid:
+            for query in (
+                {"workspace_id": ws_id, "plivo_call_uuid": str(candidate_call_uuid)},
+                {"workspace_id": ws_id, "qualification_call.call_uuid": str(candidate_call_uuid)},
+            ):
+                lead = await db.crm_leads.find_one(query)
+                if lead:
+                    lead_id = str(lead.get("_id"))
+                    break
+    if not lead_id and not payload.get("conversation_summary") and not payload.get("transcript") and not payload.get("transcription"):
+        return {"ok": True, "logged": False}
+    if not lead_id:
+        raise HTTPException(404, "Call could not be matched to a lead")
+    from plivo_calls import save_qualification_result
+    return await save_qualification_result(db, ws_id, lead_id, payload)
 
 
 # ---------------- PUBLIC (no auth) ----------------
@@ -1163,12 +1272,14 @@ from google_sheets import router as google_sheets_router
 from workflows import router as workflows_router
 from crm import router as crm_router
 from plivo_agents import router as plivo_agents_router
+from qualification_api import router as qualification_router
 from properties import router as properties_router
 
 api.include_router(google_sheets_router)
 api.include_router(workflows_router)
 api.include_router(crm_router)
 api.include_router(plivo_agents_router)
+api.include_router(qualification_router)
 api.include_router(properties_router)
 
 app.include_router(build_auth_router(db))
@@ -1197,12 +1308,15 @@ async def startup():
     await db.code_projects.create_index("workspace_id")
     await db.workflows.create_index([("workspace_id", 1), ("kind", 1)])
     await db.crm_leads.create_index([("workspace_id", 1), ("sheet_row_key", 1)], unique=True)
+    await db.crm_leads.create_index([("workspace_id", 1), ("plivo_call_uuid", 1)])
     await db.crm_settings.create_index("workspace_id", unique=True)
     await db.plivo_agent_configs.create_index([("workspace_id", 1), ("enabled", 1), ("is_default", 1)])
     await db.plivo_call_sessions.create_index([("workspace_id", 1), ("lead_id", 1), ("status", 1)])
     await db.plivo_call_sessions.create_index([("workspace_id", 1), ("created_at", -1)])
     await db.plivo_call_events.create_index([("workspace_id", 1), ("idempotency_key", 1)], unique=True)
     await db.plivo_call_events.create_index([("workspace_id", 1), ("lead_id", 1), ("created_at", -1)])
+    await db.qualification_profiles.create_index([("workspace_id", 1), ("campaign_id", 1)], unique=True, partialFilterExpression={"campaign_id": {"$type": "string"}})
+    await db.crm_call_logs.create_index([("workspace_id", 1), ("lead_id", 1), ("kind", 1)])
     await seed_admin(db)
     asyncio.create_task(scheduler_loop())
     asyncio.create_task(google_sheets_poller_loop())

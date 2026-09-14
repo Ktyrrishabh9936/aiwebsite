@@ -3,7 +3,7 @@ import { NavLink, Outlet, useParams, useNavigate, Link, useLocation } from "reac
 import {
   LayoutDashboard, Brain as BrainIcon, MessageSquare, ListChecks, FileText, Code2,
   AlertCircle, Bell, CheckCircle2, Globe, Loader2, LogOut, Plus, Boxes, Settings as SettingsIcon, Building2,
-  UserCircle, Workflow, Users,
+  UserCircle, Workflow, Users, Bot,
 } from "lucide-react";
 import { toast } from "sonner";
 import api from "../lib/api";
@@ -23,11 +23,12 @@ const nav = [
   { to: "properties", label: "Properties", icon: Building2 },
   { to: "brain", label: "Brain", icon: BrainIcon },
   { to: "manager", label: "Manager", icon: MessageSquare },
+  { to: "agents", label: "AI Agents", icon: Bot },
   { to: "tasks", label: "Tasks", icon: ListChecks },
   { to: "blogs", label: "Blogs", icon: FileText },
   { to: "embed", label: "Add Blog System", icon: Code2 },
   { to: "workflows", label: "Workflows", icon: Workflow },
-  { to: "crm", label: "CRM Leads", icon: Users },
+  { to: "crm", label: "CRM", icon: Users },
 ];
 
 const kindDot = { success: "bg-primary", approval: "bg-amber-500", error: "bg-destructive", info: "bg-muted-foreground" };
@@ -48,7 +49,7 @@ export default function WorkspaceLayout() {
   const [workspaces, setWorkspaces] = useState([]);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceUrl, setWorkspaceUrl] = useState("");
-  const [workspaceModelId, setWorkspaceModelId] = useState("gemini-3-flash-preview");
+  const [workspaceModelId, setWorkspaceModelId] = useState("openai.gpt-oss-120b");
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [notFound, setNotFound] = useState(false);
 
@@ -71,6 +72,12 @@ export default function WorkspaceLayout() {
   }, []);
 
   useEffect(() => { refresh(); loadNotes(); }, [refresh, loadNotes]);
+  useEffect(() => {
+    const sync = () => { if (!document.hidden) refresh(); };
+    window.addEventListener("focus", sync);
+    const timer = setInterval(sync, 15000);
+    return () => { window.removeEventListener("focus", sync); clearInterval(timer); };
+  }, [refresh]);
   useEffect(() => { loadWorkspaces(); }, [loadWorkspaces]);
 
   // poll while brain building

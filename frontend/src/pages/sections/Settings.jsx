@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useOutletContext } from "react-router-dom";
+import { Link, useOutletContext } from "react-router-dom";
 import { Check, Copy, KeyRound, Loader2, RotateCw, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../../context/AuthContext";
@@ -12,7 +12,6 @@ export default function Settings() {
   const [savingOrigins, setSavingOrigins] = useState(false);
   const [rotatingKey, setRotatingKey] = useState(false);
   const [copied, setCopied] = useState(false);
-
   useEffect(() => {
     setOriginsText((ws.allowed_blog_origins || []).join("\n"));
   }, [ws.allowed_blog_origins]);
@@ -116,6 +115,12 @@ export default function Settings() {
             {savingOrigins ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />} Save Blog Security
           </button>
         </div>
+      </section>
+
+      <section className="border border-border rounded-md bg-card p-6 space-y-3">
+        <h2 className="font-display text-xl font-bold">Lead Qualification</h2>
+        <p className="text-sm text-muted-foreground">Manage product and campaign rules, scoring, retries and next actions.</p>
+        <Link className="text-sm text-primary" to={`/app/w/${ws.id}/qualification`}>Open qualification profiles</Link>
       </section>
 
       <section className="border border-border rounded-md bg-card p-6">

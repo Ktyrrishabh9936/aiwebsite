@@ -4,14 +4,17 @@ import hmac
 import json
 
 import anyio
+import pytest
 import httpx
 from fastapi import HTTPException
 
 from plivo_calls import (
     DEFAULT_AGENT_INPUT_MAPPINGS,
+    agent_flow_xml,
     callback_urls,
     cancel_scheduled_qualification_call,
     build_agent_trigger_payload,
+    assign_plivo_call_uuid,
     inbound_bridge_xml,
     lead_phone_from_doc,
     is_junk_lead,
@@ -36,6 +39,7 @@ from plivo_calls import (
     recommended_next_action,
     qualification_result_status,
     qualification_status_from_plivo,
+    run_ai_qualification,
     save_qualification_result,
     score_structured_qualification,
     schedule_first_qualification_call,
@@ -66,13 +70,32 @@ class FakeCollection:
 
     async def update_one(self, query, update, upsert=False):
         doc = await self.find_one(query)
-        if not doc:
-            return FakeUpdateResult(0)
+        if doc is None:
+            if not upsert:
+                return FakeUpdateResult(0)
+            doc = {**query, **update.get("$setOnInsert", {})}
+            self.docs.append(doc)
+        for key, value in (update.get("$addToSet") or {}).items():
+            items = doc.setdefault(key, [])
+            if value not in items:
+                items.append(value)
         for key, value in (update.get("$set") or {}).items():
             self._set_path(doc, key, value)
+        for key, value in (update.get("$unset") or {}).items():
+            self._unset_path(doc, key)
         for key, value in (update.get("$push") or {}).items():
             doc.setdefault(key, []).append(value)
         return FakeUpdateResult(1)
+
+    async def find_one_and_update(self, query, update, **kwargs):
+        doc = await self.find_one(query)
+        if doc is None:
+            return None
+        await self.update_one(query, update)
+        return doc
+
+    async def count_documents(self, query):
+        return sum(self._matches(doc, query) for doc in self.docs)
 
     async def update_many(self, query, update):
         matched = 0
@@ -81,6 +104,8 @@ class FakeCollection:
                 matched += 1
                 for key, value in (update.get("$set") or {}).items():
                     self._set_path(doc, key, value)
+                for key, value in (update.get("$unset") or {}).items():
+                    self._unset_path(doc, key)
         return FakeUpdateResult(matched)
 
     async def insert_one(self, doc):
@@ -96,6 +121,10 @@ class FakeCollection:
                 continue
             if isinstance(value, dict):
                 current = self._get_path(doc, key) if "." in key else doc.get(key)
+                if "$exists" in value and (current is not None) != value["$exists"]:
+                    return False
+                if "$lt" in value and (current is None or current >= value["$lt"]):
+                    return False
                 if "$in" in value and current not in value["$in"]:
                     return False
                 if "$ne" in value and current == value["$ne"]:
@@ -114,7 +143,7 @@ class FakeCollection:
     def _get_path(self, doc, key):
         cur = doc
         for part in key.split("."):
-            cur = cur.get(part, {}) if isinstance(cur, dict) else {}
+            cur = cur.get(part) if isinstance(cur, dict) else None
         return cur
 
     def _set_path(self, doc, key, value):
@@ -124,18 +153,45 @@ class FakeCollection:
             cur = cur.setdefault(part, {})
         cur[parts[-1]] = value
 
+    def _unset_path(self, doc, key):
+        parts = key.split(".")
+        if len(parts) == 1:
+            doc.pop(parts[0], None)
+            return
+        cur = doc
+        for part in parts[:-1]:
+            if not isinstance(cur, dict):
+                return
+            cur = cur.get(part)
+            if cur is None:
+                return
+        if isinstance(cur, dict):
+            cur.pop(parts[-1], None)
+
 
 class FakeDb:
     def __init__(self, lead, agents=None):
         self.crm_leads = FakeCollection([lead])
         self.crm_settings = FakeCollection([{"workspace_id": lead["workspace_id"], "fields": [], "states": [], "templates": [], "organization": {}}])
         self.crm_call_logs = FakeCollection([])
+        self.workspaces = FakeCollection([])
         self.plivo_agent_configs = FakeCollection(agents or [])
         self.plivo_call_sessions = FakeCollection([])
         self.plivo_call_events = FakeCollection([])
+        self.qualification_profiles = FakeCollection([])
+        self.plivo_workflow_configs = FakeCollection([])
+        self.tasks = FakeCollection([])
 
     def __getitem__(self, name):
         return getattr(self, name)
+
+
+@pytest.fixture(autouse=True)
+def default_fact_extraction(monkeypatch):
+    import llm_service
+    async def unavailable(*args, **kwargs):
+        raise RuntimeError("No live AI in unit tests")
+    monkeypatch.setattr(llm_service, "generate_json", unavailable)
 
 
 def test_plivo_config_requires_all_runtime_values(monkeypatch):
@@ -240,7 +296,7 @@ def test_build_agent_trigger_payload_uses_configured_input_mappings(monkeypatch)
     })
     base = qualification_payload(
         "https://public.example",
-        "ws-1",
+        "111111111111111111111111",
         "lead-1",
         {"field_values": {"phone": "+919876543210", "full_name": "Riya", "source": "Meta Ads"}},
         "+919876543210",
@@ -252,7 +308,7 @@ def test_build_agent_trigger_payload_uses_configured_input_mappings(monkeypatch)
     assert payload == {
         "customer_mobile": "+919876543210",
         "customer_name": "Riya",
-        "callback": "https://public.example/api/plivo/workspaces/ws-1/calls/lead-1/qualification/result",
+        "callback": "https://public.example/api/plivo/workspaces/111111111111111111111111/calls/lead-1/qualification/result",
         "fixed_campaign": "AREVEI Demo",
         "session": "session-1",
     }
@@ -299,10 +355,10 @@ def test_start_qualification_call_creates_session_and_uses_selected_agent(monkey
                 "session_id": "session.id",
             },
         })
-        agent.update({"_id": agent_id, "workspace_id": "ws-1", "enabled": True, "is_default": True})
+        agent.update({"_id": agent_id, "workspace_id": "111111111111111111111111", "enabled": True, "is_default": True})
         lead = {
             "_id": lead_id,
-            "workspace_id": "ws-1",
+            "workspace_id": "111111111111111111111111",
             "field_values": {"phone": "8299752170", "full_name": "Aarav"},
             "qualification_call": {},
             "lead_notes": [],
@@ -313,7 +369,7 @@ def test_start_qualification_call_creates_session_and_uses_selected_agent(monkey
             "url": type("UrlContext", (), {"scheme": "https", "netloc": "public.example", "path": "", "query": ""})(),
         })()
 
-        result = await start_qualification_call(db, "ws-1", str(lead_id), request, agent_config_id=str(agent_id))
+        result = await start_qualification_call(db, "111111111111111111111111", str(lead_id), request, agent_config_id=str(agent_id))
 
         session = db.plivo_call_sessions.docs[0]
         sent = FakeAsyncClient.last_request
@@ -376,12 +432,12 @@ def test_store_plivo_event_deduplicates_by_kind_and_event_identity():
     from bson import ObjectId
 
     async def run():
-        lead = {"_id": ObjectId(), "workspace_id": "ws-1", "field_values": {"phone": "8299752170"}}
+        lead = {"_id": ObjectId(), "workspace_id": "111111111111111111111111", "field_values": {"phone": "8299752170"}}
         db = FakeDb(lead)
 
-        first, duplicate_first = await store_plivo_event(db, "ws-1", str(lead["_id"]), "outbound_status", {"CallUUID": "call-1", "Event": "Ring", "CallStatus": "ringing"})
-        second, duplicate_second = await store_plivo_event(db, "ws-1", str(lead["_id"]), "outbound_status", {"CallUUID": "call-1", "Event": "Ring", "CallStatus": "ringing"})
-        result, duplicate_result = await store_plivo_event(db, "ws-1", str(lead["_id"]), "qualification_result", {"call_uuid": "call-1", "qualification_status": "completed"})
+        first, duplicate_first = await store_plivo_event(db, "111111111111111111111111", str(lead["_id"]), "outbound_status", {"CallUUID": "call-1", "Event": "Ring", "CallStatus": "ringing"})
+        second, duplicate_second = await store_plivo_event(db, "111111111111111111111111", str(lead["_id"]), "outbound_status", {"CallUUID": "call-1", "Event": "Ring", "CallStatus": "ringing"})
+        result, duplicate_result = await store_plivo_event(db, "111111111111111111111111", str(lead["_id"]), "qualification_result", {"call_uuid": "call-1", "qualification_status": "completed"})
 
         assert duplicate_first is False
         assert duplicate_second is True
@@ -389,6 +445,59 @@ def test_store_plivo_event_deduplicates_by_kind_and_event_identity():
         assert first["_id"] == second["_id"]
         assert first["_id"] != result["_id"]
         assert len(db.plivo_call_events.docs) == 2
+
+    anyio.run(run)
+
+
+def test_assign_plivo_call_uuid_clears_duplicate_values_from_other_leads():
+    from bson import ObjectId
+
+    async def run():
+        old_lead = {"_id": ObjectId(), "workspace_id": "111111111111111111111111", "plivo_call_uuid": "call-duplicate", "qualification_call": {"call_uuid": "call-duplicate"}}
+        new_lead = {"_id": ObjectId(), "workspace_id": "111111111111111111111111", "field_values": {"phone": "+919999999999"}}
+        db = FakeDb(old_lead)
+        db.crm_leads.docs.append(new_lead)
+
+        await assign_plivo_call_uuid(db, "111111111111111111111111", str(new_lead["_id"]), "call-duplicate")
+
+        old_doc = await db.crm_leads.find_one({"_id": old_lead["_id"]})
+        new_doc = await db.crm_leads.find_one({"_id": new_lead["_id"]})
+
+        assert old_doc.get("plivo_call_uuid") is None
+        assert old_doc.get("qualification_call", {}).get("call_uuid") is None
+        assert new_doc["plivo_call_uuid"] == "call-duplicate"
+        assert new_doc["qualification_call"]["call_uuid"] == "call-duplicate"
+
+    anyio.run(run)
+
+
+def test_save_qualification_result_flattens_nested_data_object_and_preserves_call_uuid():
+    from bson import ObjectId
+
+    async def run():
+        lead = {"_id": ObjectId(), "workspace_id": "111111111111111111111111", "field_values": {"phone": "+919999999999"}}
+        db = FakeDb(lead)
+
+        payload = {
+            "data": {
+                "object": {
+                    "call_uuid": "call-xyz",
+                    "CallStatus": "answered",
+                    "qualification_status": "completed",
+                    "conversation_summary": "Buyer wants a 2 BHK in Gurgaon",
+                    "transcript": "Detailed call transcript",
+                    "recording_url": "https://example.com/recording.mp3",
+                }
+            }
+        }
+
+        result = await save_qualification_result(db, "111111111111111111111111", str(lead["_id"]), payload)
+        updated = await db.crm_leads.find_one({"_id": lead["_id"]})
+
+        assert result["ok"] is True
+        assert updated["qualification_call"]["call_uuid"] == "call-xyz"
+        assert updated["lead_status"] == "PARTIALLY_QUALIFIED"
+        assert updated["communication_summary"]["latest_summary"] == "Buyer wants a 2 BHK in Gurgaon"
 
     anyio.run(run)
 
@@ -420,7 +529,7 @@ def test_plivo_config_debug_masks_secrets_and_generates_urls(monkeypatch):
     monkeypatch.setenv("PLIVO_FROM_NUMBER", "+91 80 3170 3100")
     monkeypatch.setenv("PLIVO_STAFF_NUMBER", "+91 63948 32742")
 
-    debug = plivo_config_debug("https://public.example", "ws-1", "lead-1")
+    debug = plivo_config_debug("https://public.example", "111111111111111111111111", "lead-1")
 
     assert debug["configured"] is True
     assert debug["public_base_url_https"] is True
@@ -428,7 +537,7 @@ def test_plivo_config_debug_masks_secrets_and_generates_urls(monkeypatch):
     assert debug["auth_token_configured"] is True
     assert debug["dial_sequence"] == "agent_direct_to_lead"
     assert "real-auth-token" not in str(debug)
-    assert debug["urls"]["inbound_answer"] == "https://public.example/api/plivo/workspaces/ws-1/calls/inbound/answer"
+    assert debug["urls"]["inbound_answer"] == "https://public.example/api/plivo/workspaces/111111111111111111111111/calls/inbound/answer"
     assert debug["urls"]["outbound_answer"].endswith("/calls/lead-1/outbound/answer")
 
 
@@ -436,7 +545,7 @@ def test_qualification_payload_targets_lead_phone(monkeypatch):
     monkeypatch.setenv("PLIVO_FROM_NUMBER", "+91 80 3170 3100")
     payload = qualification_payload(
         "https://public.example",
-        "ws-1",
+        "111111111111111111111111",
         "lead-1",
         {
             "field_values": {
@@ -467,7 +576,7 @@ def test_qualification_payload_includes_previous_context(monkeypatch):
     monkeypatch.setenv("PLIVO_FROM_NUMBER", "+91 80 3170 3100")
     payload = qualification_payload(
         "https://public.example",
-        "ws-1",
+        "111111111111111111111111",
         "lead-1",
         {
             "field_values": {"phone": "+91 98765 43210", "full_name": "Lead One"},
@@ -521,16 +630,16 @@ def test_qualification_status_maps_plivo_outcomes():
 
 def test_qualification_result_status_maps_agent_outcomes():
     assert qualification_result_status({"qualification_status": "qualified"}) == "completed"
-    assert qualification_result_status({"outcome": "not_interested"}) == "failed"
+    assert qualification_result_status({"outcome": "not_interested"}) == "not_interested"
     assert qualification_result_status({"status": "busy"}) == "busy"
     assert qualification_result_status({"status": "rejected"}) == "failed"
     assert qualification_result_status({}) == "completed"
 
 
 def test_mandatory_junk_result_detects_policy_outcomes():
-    assert is_mandatory_junk_result({"outcome": "not_interested"})
+    assert not is_mandatory_junk_result({"outcome": "not_interested"})
     assert is_mandatory_junk_result({"qualification_status": "wrong_contact"})
-    assert is_mandatory_junk_result({"disconnection_reason": "do_not_call"})
+    assert not is_mandatory_junk_result({"disconnection_reason": "do_not_call"})
     assert is_mandatory_junk_result({"reason": "invalid"})
     assert not is_mandatory_junk_result({"qualification_status": "completed", "qualification_category": "cold"})
 
@@ -570,6 +679,75 @@ def test_qualification_result_normalizes_communication_summary():
     assert summary["objections"] == ["Needs director approval"]
 
 
+def test_normalize_contacto_qualification_payload_maps_event_data_fields():
+    from plivo_calls import normalize_contacto_qualification_payload
+
+    payload = {
+        "call_uuid": "b1930339-455d-4e50-aecc-6dc02fcac598",
+        "conversation_id": "9522-1845327839",
+        "event_data": {
+            "Property Qualification.budget": "2000000",
+            "Property Qualification.preferred_location": "Noida",
+            "Property Qualification.property_type": "2 BHK",
+            "Property Qualification.qualification_category": "Warm",
+            "Property Qualification.qualification_status": "completed",
+            "Property Qualification.recommended_next_steps": "requested salesperson callback",
+        },
+    }
+
+    normalized = normalize_contacto_qualification_payload(payload)
+
+    assert normalized["qualification_status"] == "completed"
+    assert normalized["qualification_category"] == "warm"
+    assert normalized["budget"] == "2000000"
+    assert normalized["preferred_location"] == "Noida"
+    assert normalized["property_type"] == "2 BHK"
+    assert normalized["recommended_next_steps"] == "requested salesperson callback"
+    assert normalized["call_uuid"] == "b1930339-455d-4e50-aecc-6dc02fcac598"
+    assert normalized["conversation_id"] == "9522-1845327839"
+    assert normalized["event_data"]["Property Qualification.qualification_category"] == "Warm"
+
+
+def test_save_qualification_result_accepts_contacto_event_data_payload():
+    from bson import ObjectId
+
+    async def run():
+        lead_id = ObjectId()
+        lead = {
+            "_id": lead_id,
+            "workspace_id": "111111111111111111111111",
+            "field_values": {"phone": "8299752170"},
+            "qualification_call": {"status": "started"},
+            "communication_summary": {},
+            "lead_notes": [],
+        }
+        db = FakeDb(lead)
+
+        result = await save_qualification_result(db, "111111111111111111111111", str(lead_id), {
+            "call_uuid": "b1930339-455d-4e50-aecc-6dc02fcac598",
+            "conversation_id": "9522-1845327839",
+            "event_data": {
+                "Property Qualification.budget": "2000000",
+                "Property Qualification.preferred_location": "Noida",
+                "Property Qualification.property_type": "2 BHK",
+                "Property Qualification.qualification_category": "Warm",
+                "Property Qualification.qualification_status": "completed",
+                "Property Qualification.recommended_next_steps": "requested salesperson callback",
+            },
+        })
+
+        assert result["status"] == "completed"
+        assert lead["lead_status"] == "PARTIALLY_QUALIFIED"
+        assert lead["qualification_status"] == "manual_review"
+        assert lead["qualification_call"]["qualification_category"] == ""
+        assert db.crm_call_logs.docs[0]["call_result"]["raw_provider_data"]["event_data"]["Property Qualification.budget"] == "2000000"
+        assert db.crm_call_logs.docs[0]["call_result"]["raw_provider_data"]["event_data"]["Property Qualification.preferred_location"] == "Noida"
+        assert db.crm_call_logs.docs[0]["call_result"]["raw_provider_data"]["event_data"]["Property Qualification.property_type"] == "2 BHK"
+        assert lead["next_action"] == "FOLLOW_UP"
+
+    anyio.run(run)
+
+
 def test_qualification_result_summary_accepts_call_summary_alias():
     from plivo_calls import qualification_result_summary
 
@@ -601,10 +779,10 @@ def test_schedule_first_qualification_call_sets_five_minute_state():
 
     async def run():
         lead_id = ObjectId()
-        lead = {"_id": lead_id, "workspace_id": "ws-1", "field_values": {"phone": "8299752170"}, "qualification_call": {}, "lead_notes": []}
+        lead = {"_id": lead_id, "workspace_id": "111111111111111111111111", "field_values": {"phone": "8299752170"}, "qualification_call": {}, "lead_notes": []}
         db = FakeDb(lead)
 
-        result = await schedule_first_qualification_call(db, "ws-1", str(lead_id))
+        result = await schedule_first_qualification_call(db, "111111111111111111111111", str(lead_id))
 
         assert result["status"] == "scheduled"
         assert lead["qualification_call"]["status"] == "scheduled"
@@ -619,10 +797,10 @@ def test_schedule_invalid_phone_marks_junk_and_blocks_call():
 
     async def run():
         lead_id = ObjectId()
-        lead = {"_id": lead_id, "workspace_id": "ws-1", "field_values": {"phone": "123"}, "qualification_call": {}, "lead_notes": []}
+        lead = {"_id": lead_id, "workspace_id": "111111111111111111111111", "field_values": {"phone": "123"}, "qualification_call": {}, "lead_notes": []}
         db = FakeDb(lead)
 
-        result = await schedule_first_qualification_call(db, "ws-1", str(lead_id))
+        result = await schedule_first_qualification_call(db, "111111111111111111111111", str(lead_id))
 
         assert result["status"] == "junk"
         assert lead["status"] == "lost"
@@ -639,14 +817,14 @@ def test_cancel_scheduled_qualification_call_updates_state():
         lead_id = ObjectId()
         lead = {
             "_id": lead_id,
-            "workspace_id": "ws-1",
+            "workspace_id": "111111111111111111111111",
             "field_values": {"phone": "8299752170"},
             "qualification_call": {"status": "scheduled", "scheduled_for": "2030-01-01T00:00:00+00:00"},
             "lead_notes": [],
         }
         db = FakeDb(lead)
 
-        result = await cancel_scheduled_qualification_call(db, "ws-1", str(lead_id), "admin@example.com")
+        result = await cancel_scheduled_qualification_call(db, "111111111111111111111111", str(lead_id), "admin@example.com")
 
         assert result["status"] == "cancelled"
         assert lead["qualification_call"]["status"] == "cancelled"
@@ -655,14 +833,145 @@ def test_cancel_scheduled_qualification_call_updates_state():
     anyio.run(run)
 
 
-def test_save_qualification_result_marks_not_interested_as_junk_without_category():
+def test_run_ai_qualification_returns_structured_score_and_tags():
+    async def run():
+        transcript = "I need a 2 BHK in Gurgaon for my family and budget is around 90 lakh. I am ready to visit this week."
+        config = {
+            "is_enabled": True,
+            "passing_score": 70,
+            "criteria": [
+                {"field": "budget", "condition": "contains", "value": "90 lakh", "weight": 30},
+                {"field": "location", "condition": "contains", "value": "gurgaon", "weight": 25},
+                {"field": "timeline", "condition": "contains", "value": "this week", "weight": 20},
+            ],
+        }
+
+        async def fake_generate_json(*args, **kwargs):
+            return {"score": 88, "status": "qualified", "tags": ["High intent", "Ready to visit"], "summary": "Strong fit for a premium family home in Gurgaon."}
+
+        import plivo_calls
+        monkeypatch = globals()["monkeypatch"] if "monkeypatch" in globals() else None
+        if monkeypatch is None:
+            from pytest import MonkeyPatch
+            monkeypatch = MonkeyPatch()
+        monkeypatch.setattr(plivo_calls, "generate_json", fake_generate_json)
+        result = await run_ai_qualification(transcript, config)
+        assert result["status"] == "qualified"
+        assert result["score"] >= 70
+        assert "High intent" in result["tags"]
+        assert "Gurgaon" in result["summary"]
+
+    anyio.run(run)
+
+
+def test_recording_callback_payload_is_processed_as_application_qualification():
+    from bson import ObjectId
+    from server import maybe_process_recording_as_qualification
+
+    async def run():
+        lead_id = ObjectId()
+        lead = {
+            "_id": lead_id,
+            "workspace_id": "111111111111111111111111",
+            "field_values": {"phone": "8299752170"},
+            "qualification_call": {"status": "started"},
+            "communication_summary": {},
+            "lead_notes": [],
+        }
+        db = FakeDb(lead)
+        db.workspaces = FakeCollection([{
+            "_id": ObjectId(),
+            "workspace_id": "111111111111111111111111",
+            "user_id": "u-1",
+            "ai_qualification_config": {"is_enabled": True, "passing_score": 70, "criteria": []},
+        }])
+
+        import plivo_calls
+        from pytest import MonkeyPatch
+        monkeypatch = MonkeyPatch()
+
+        async def fake_generate_json(*args, **kwargs):
+            return {"score": 82, "status": "qualified", "tags": ["Strong fit", "Wants site visit"], "summary": "Interested in a 2 BHK in Noida with immediate move-in."}
+
+        monkeypatch.setattr(plivo_calls, "generate_json", fake_generate_json)
+
+        payload = {
+            "data": {
+                "object": {
+                    "call_uuid": "394c780f-d158-40d9-bdf2-2bcc489242a7",
+                    "conversation_id": "9522-1772654112",
+                    "event_data": {
+                        "conversation_summary": "Customer is interested in a 2 BHK in Noida for personal use and wants an immediate move-in and a site visit.",
+                        "transcription": "I want a 2 BHK in Noida for personal use. I can move in immediately and I want a site visit on 14 September at 6 PM.",
+                        "recording_url": "https://example.test/recording.wav",
+                    },
+                }
+            }
+        }
+
+        result = await maybe_process_recording_as_qualification(db, "111111111111111111111111", str(lead_id), payload)
+
+        assert result["status"] == "completed"
+        assert lead["lead_status"] == "PARTIALLY_QUALIFIED"
+        assert lead["qualification_status"] == "manual_review"
+        assert lead["communication_summary"]["latest_summary"]
+        monkeypatch.undo()
+
+    anyio.run(run)
+
+
+def test_save_qualification_result_uses_manual_review_when_llm_fails():
     from bson import ObjectId
 
     async def run():
         lead_id = ObjectId()
         lead = {
             "_id": lead_id,
-            "workspace_id": "ws-1",
+            "workspace_id": "111111111111111111111111",
+            "field_values": {"phone": "8299752170"},
+            "qualification_call": {"status": "started"},
+            "communication_summary": {},
+            "lead_notes": [],
+        }
+        db = FakeDb(lead)
+        db.workspaces = FakeCollection([{
+            "_id": ObjectId(),
+            "workspace_id": "111111111111111111111111",
+            "user_id": "u-1",
+            "ai_qualification_config": {"is_enabled": True, "passing_score": 70, "criteria": []},
+        }])
+
+        import plivo_calls
+        from pytest import MonkeyPatch
+        monkeypatch = MonkeyPatch()
+
+        async def fake_fail(*args, **kwargs):
+            raise RuntimeError("LLM down")
+
+        monkeypatch.setattr(plivo_calls, "generate_json", fake_fail)
+
+        result = await save_qualification_result(db, "111111111111111111111111", str(lead_id), {
+            "qualification_status": "completed",
+            "summary": "Lead wants a 2 BHK in Gurgaon and is very interested.",
+            "transcript": "I need a 2 BHK in Gurgaon, my budget is 90 lakh and I want to visit this week.",
+        })
+
+        assert result["status"] == "completed"
+        assert lead["qualification_status"] == "manual_review"
+        assert lead["qualification_call"]["engine_result"]["confidence_score"] == 0
+        monkeypatch.undo()
+
+    anyio.run(run)
+
+
+def test_save_qualification_result_marks_not_interested_as_unqualified_without_category():
+    from bson import ObjectId
+
+    async def run():
+        lead_id = ObjectId()
+        lead = {
+            "_id": lead_id,
+            "workspace_id": "111111111111111111111111",
             "field_values": {"phone": "8299752170"},
             "qualification_call": {"status": "started"},
             "communication_summary": {},
@@ -670,17 +979,17 @@ def test_save_qualification_result_marks_not_interested_as_junk_without_category
         }
         db = FakeDb(lead)
 
-        result = await save_qualification_result(db, "ws-1", str(lead_id), {
+        result = await save_qualification_result(db, "111111111111111111111111", str(lead_id), {
             "qualification_status": "not_interested",
             "summary": "Lead declined future contact.",
         })
 
-        assert result["status"] == "failed"
+        assert result["status"] == "completed"
         assert lead["status"] == "lost"
-        assert lead["qualification_call"]["qualification_category"] == "junk"
+        assert lead["qualification_call"]["qualification_category"] == ""
         assert lead["qualification_call"]["qualification_score"] == 0
-        assert lead["communication_summary"]["qualification_category"] == "junk"
-        assert lead["communication_summary"]["disconnection_reason"] == "not_interested"
+        assert lead["communication_summary"]["qualification_category"] == ""
+        assert lead["lead_status"] == "UNQUALIFIED"
 
     anyio.run(run)
 
@@ -692,7 +1001,7 @@ def test_save_qualification_result_stores_wrapped_vibe_payload_context():
         lead_id = ObjectId()
         lead = {
             "_id": lead_id,
-            "workspace_id": "ws-1",
+            "workspace_id": "111111111111111111111111",
             "field_values": {"phone": "8299752170"},
             "qualification_call": {"status": "started"},
             "communication_summary": {},
@@ -700,7 +1009,7 @@ def test_save_qualification_result_stores_wrapped_vibe_payload_context():
         }
         db = FakeDb(lead)
 
-        result = await save_qualification_result(db, "ws-1", str(lead_id), {
+        result = await save_qualification_result(db, "111111111111111111111111", str(lead_id), {
             "output": {
                 "qualification_status": "completed",
                 "qualification_score": "74",
@@ -712,11 +1021,95 @@ def test_save_qualification_result_stores_wrapped_vibe_payload_context():
         })
 
         assert result["status"] == "completed"
-        assert lead["qualification_call"]["qualification_category"] == "warm"
-        assert lead["qualification_call"]["qualification_score"] == 74
+        assert lead["qualification_call"]["qualification_category"] == ""
+        assert lead["qualification_call"]["qualification_score"] is None
         assert lead["communication_summary"]["latest_summary"] == "Lead needs a demo and pricing."
         assert lead["communication_summary"]["last_recording_url"] == "https://recordings.example/warm.mp3"
-        assert lead["communication_summary"]["answers"] == {"timeline": "next week"}
+        assert db.crm_call_logs.docs[0]["call_result"]["raw_provider_data"]["output"]["answers"] == {"timeline": "next week"}
+
+    anyio.run(run)
+
+
+def test_save_qualification_result_sets_ai_qualified_status_for_positive_results():
+    from bson import ObjectId
+
+    async def run():
+        lead_id = ObjectId()
+        lead = {
+            "_id": lead_id,
+            "workspace_id": "111111111111111111111111",
+            "field_values": {"phone": "8299752170"},
+            "qualification_call": {"status": "started"},
+            "communication_summary": {},
+            "lead_notes": [],
+        }
+        db = FakeDb(lead)
+
+        await save_qualification_result(db, "111111111111111111111111", str(lead_id), {
+            "qualification_status": "completed",
+            "qualification_score": "81",
+            "qualification_category": "hot",
+            "summary": "Lead is interested and wants a site visit.",
+        })
+
+        assert lead["lead_status"] == "PARTIALLY_QUALIFIED"
+        assert lead["qualification_status"] == "manual_review"
+        assert "PARTIALLY_QUALIFIED" in lead["lead_notes"][-1]["body"]
+
+    anyio.run(run)
+
+
+def test_save_qualification_result_sets_ai_qualified_when_status_is_positive_without_category():
+    from bson import ObjectId
+
+    async def run():
+        lead_id = ObjectId()
+        lead = {
+            "_id": lead_id,
+            "workspace_id": "111111111111111111111111",
+            "field_values": {"phone": "8299752170"},
+            "qualification_call": {"status": "started"},
+            "communication_summary": {},
+            "lead_notes": [],
+        }
+        db = FakeDb(lead)
+
+        await save_qualification_result(db, "111111111111111111111111", str(lead_id), {
+            "qualification_status": "qualified",
+            "summary": "Lead wants a site visit and budget is 90 lakh.",
+            "transcript": "I am interested in a 2BHK in Gurgaon and budget is around 90 lakh.",
+        })
+
+        assert lead["lead_status"] == "PARTIALLY_QUALIFIED"
+        assert lead["qualification_status"] == "manual_review"
+        assert "PARTIALLY_QUALIFIED" in lead["lead_notes"][-1]["body"]
+
+    anyio.run(run)
+
+
+def test_save_qualification_result_formats_failed_call_notes_for_disconnected_outcomes():
+    from bson import ObjectId
+
+    async def run():
+        lead_id = ObjectId()
+        lead = {
+            "_id": lead_id,
+            "workspace_id": "111111111111111111111111",
+            "field_values": {"phone": "8299752170"},
+            "qualification_call": {"status": "started"},
+            "communication_summary": {},
+            "lead_notes": [],
+        }
+        db = FakeDb(lead)
+
+        await save_qualification_result(db, "111111111111111111111111", str(lead_id), {
+            "CallStatus": "busy",
+            "summary": "Call was busy and dropped.",
+        })
+
+        assert lead["lead_status"] == "PENDING"
+        assert lead["qualification_status"] == "pending"
+        assert "BUSY" in lead["lead_notes"][-1]["body"]
 
     anyio.run(run)
 
@@ -728,7 +1121,7 @@ def test_log_call_note_updates_communication_summary_for_status_only_callbacks()
         lead_id = ObjectId()
         lead = {
             "_id": lead_id,
-            "workspace_id": "ws-1",
+            "workspace_id": "111111111111111111111111",
             "field_values": {"phone": "8299752170"},
             "qualification_call": {"status": "started"},
             "communication_summary": {},
@@ -736,7 +1129,7 @@ def test_log_call_note_updates_communication_summary_for_status_only_callbacks()
         }
         db = FakeDb(lead)
 
-        await log_call_note(db, "ws-1", str(lead_id), {
+        await log_call_note(db, "111111111111111111111111", str(lead_id), {
             "CallUUID": "call-123",
             "CallStatus": "completed",
             "Duration": "42",
@@ -781,10 +1174,31 @@ def test_plivo_xml_escapes_phone_and_recording_url():
     outbound = outbound_bridge_xml("+919876543210", "https://example.com/recording?lead_id=a&call_direction=outbound", caller_id="+918031703100")
     inbound = inbound_bridge_xml("+919999999999", "https://example.com/recording?lead_id=b&call_direction=inbound")
 
-    assert '<Dial callerId="+918031703100" timeout="45"><Number>+919876543210</Number></Dial>' in outbound.body.decode()
-    assert "&amp;call_direction=outbound" in outbound.body.decode()
+    assert 'action="https://example.com/recording?lead_id=a&amp;call_direction=outbound"' in outbound.body.decode()
+    assert "<Number>+919876543210</Number>" in outbound.body.decode()
     assert "<Dial><Number>+919999999999</Number></Dial>" in inbound.body.decode()
     assert "&amp;call_direction=inbound" in inbound.body.decode()
+
+
+def test_agent_flow_redirect_xml_uses_trigger_url(monkeypatch):
+    monkeypatch.setenv("PLIVO_AGENT_TRIGGER_URL", "https://agentflow.plivo.com/v1/account/auth/flow/flow-123")
+
+    xml = agent_flow_xml("https://agentflow.plivo.com/v1/account/auth/flow/flow-123", "https://example.com/result")
+
+    body = xml.body.decode()
+    assert "<Redirect>https://agentflow.plivo.com/v1/account/auth/flow/flow-123</Redirect>" in body
+    assert "result_url=" not in body
+
+
+def test_plivo_config_includes_agent_trigger_url(monkeypatch):
+    monkeypatch.setenv("PLIVO_AUTH_ID", "auth-id")
+    monkeypatch.setenv("PLIVO_AUTH_TOKEN", "auth-token")
+    monkeypatch.setenv("PLIVO_FROM_NUMBER", "+918031703100")
+    monkeypatch.setenv("PLIVO_STAFF_NUMBER", "+918794856351")
+    monkeypatch.setenv("PLIVO_AGENT_TRIGGER_URL", "https://agentflow.plivo.com/v1/account/auth/flow/flow-123")
+
+    cfg = plivo_config()
+    assert cfg["agent_trigger_url"] == "https://agentflow.plivo.com/v1/account/auth/flow/flow-123"
 
 
 def test_plivo_error_detail_includes_response_message():

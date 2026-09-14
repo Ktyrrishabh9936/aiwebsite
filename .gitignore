@@ -86,4 +86,5 @@ android-sdk/
 credentials.json
 *.key
 .credentials
+backend-mantle.*.log
 frontend/node_modules/.cache/default-development/0.pack

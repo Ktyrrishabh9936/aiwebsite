@@ -42,8 +42,9 @@ DEFAULT_FIELDS = [
 DEFAULT_STATES = [
     {"key": "new", "label": "New", "color": "blue", "order": 1},
     {"key": "contacted", "label": "Contacted", "color": "amber", "order": 2},
-    {"key": "won", "label": "Won", "color": "emerald", "order": 3},
-    {"key": "lost", "label": "Lost", "color": "red", "order": 4},
+    {"key": "ai_qualified", "label": "AI Qualified", "color": "emerald", "order": 3},
+    {"key": "won", "label": "Won", "color": "emerald", "order": 4},
+    {"key": "lost", "label": "Lost", "color": "red", "order": 5},
 ]
 DEFAULT_PAYMENT_STAGES = []
 DEFAULT_TEMPLATE = {
@@ -174,6 +175,13 @@ def normalize_states(states):
         clean = deepcopy(DEFAULT_STATES)
     if not any(s["key"] == "new" for s in clean):
         clean.insert(0, deepcopy(DEFAULT_STATES[0]))
+    if not any(s["key"] == "ai_qualified" for s in clean):
+        clean.append({
+            "key": "ai_qualified",
+            "label": "AI Qualified",
+            "color": "emerald",
+            "order": max((s.get("order", 0) for s in clean), default=0) + 1,
+        })
     return sorted(clean, key=lambda s: s.get("order", 0))
 
 
@@ -221,9 +229,13 @@ async def ensure_crm_settings(db, ws_id):
     settings = await db.crm_settings.find_one({"workspace_id": ws_id})
     if settings:
         fields = phone_first_fields(settings.get("fields") or [])
+        states = normalize_states(settings.get("states") or [])
         if fields != (settings.get("fields") or []):
             await db.crm_settings.update_one({"workspace_id": ws_id}, {"$set": {"fields": fields, "updated_at": now_iso()}})
             settings["fields"] = fields
+        if states != (settings.get("states") or []):
+            await db.crm_settings.update_one({"workspace_id": ws_id}, {"$set": {"states": states, "updated_at": now_iso()}})
+            settings["states"] = states
         return settings
     settings = {
         "workspace_id": ws_id,
@@ -320,6 +332,12 @@ def build_manual_lead(ws_id, body, settings):
         "lead_notes": [],
         "communication_summary": {},
         "qualification_call": {},
+        "lead_status": "NEW",
+        "call_outcome": None,
+        "qualification_score": None,
+        "lead_temperature": None,
+        "call_attempt_count": 0,
+        "campaign_id": body.get("campaign_id"),
         "fields": {},
         "field_values": values,
         "status": status,
@@ -418,7 +436,7 @@ def money_value(value):
 
 
 def money_text(value):
-    value = max(0, float(value or 0))
+    value = max(0.0, float(value or 0))
     return str(int(value)) if value.is_integer() else f"{value:.2f}".rstrip("0").rstrip(".")
 
 

@@ -3,16 +3,20 @@ import { useOutletContext } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Send, Sparkles, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
-import api, { API } from "../../lib/api";
+import api from "../../lib/api";
+import { AiStatus, useAiStatus, aiErrorMessage } from "../../components/AiStatus";
+import { ChatText } from "../../components/ChatText";
 
 export default function Manager() {
   const { ws, refresh } = useOutletContext();
+  const aiStatus = useAiStatus(ws);
   const [messages, setMessages] = useState([
-    { role: "assistant", content: `I'm your growth manager for ${ws.name}. Ask me about strategy, or say "draft a blog about ..." to direct the content agent.` },
+    { role: "assistant", content: `I'm your AI manager for ${ws.name}. Ask me about your business, CRM leads, or growth strategy.` },
   ]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [genning, setGenning] = useState(false);
+  const [showRoadmap, setShowRoadmap] = useState(false);
   const scrollRef = useRef(null);
 
   useEffect(() => { scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight); }, [messages]);
@@ -20,31 +24,27 @@ export default function Manager() {
   const send = async (e) => {
     e?.preventDefault();
     const msg = input.trim();
-    if (!msg || streaming) return;
+    if (!msg || streaming || aiStatus.state === "checking") return;
     const history = messages.slice(-6);
     setMessages((m) => [...m, { role: "user", content: msg }, { role: "assistant", content: "" }]);
     setInput("");
     setStreaming(true);
     try {
-      const res = await fetch(`${API}/workspaces/${ws.id}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("arevei_token")}` },
-        body: JSON.stringify({ message: msg, history, model_id: ws.model_id }),
-      });
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        setMessages((m) => {
-          const copy = [...m];
-          copy[copy.length - 1] = { role: "assistant", content: copy[copy.length - 1].content + chunk };
+      await aiStatus.run(msg, history, (text) => {
+        setMessages((current) => {
+          const copy = [...current];
+          copy[copy.length - 1] = { role: "assistant", content: text };
           return copy;
         });
-      }
+      });
     } catch (err) {
-      toast.error("Chat failed");
+      const explanation = aiErrorMessage(err);
+      toast.error(explanation);
+      setMessages((current) => {
+        const copy = [...current];
+        copy[copy.length - 1] = { role: "assistant", content: explanation };
+        return copy;
+      });
     } finally {
       setStreaming(false);
     }
@@ -60,12 +60,12 @@ export default function Manager() {
   const roadmap = ws.roadmap || [];
 
   return (
-    <div className="grid lg:grid-cols-[1fr_380px] h-[calc(100vh-4rem)]">
+    <div className="flex flex-col lg:flex-row h-[calc(100dvh-4rem)] min-h-0">
       {/* Roadmap */}
-      <div className="overflow-y-auto p-6 sm:p-10 border-r border-border">
+      {showRoadmap && <div id="manager-roadmap" className="order-last shrink-0 w-full lg:w-[360px] max-h-[40vh] lg:max-h-none overflow-y-auto p-6 border-t lg:border-t-0 lg:border-l border-border">
         <div className="flex items-end justify-between mb-6 flex-wrap gap-3">
           <div>
-            <h1 className="font-display text-3xl font-black tracking-tight">Growth Roadmap</h1>
+            <h2 className="font-display text-xl font-bold tracking-tight">Growth Roadmap</h2>
             <p className="text-muted-foreground mt-1">12-month plan owned by the AI manager.</p>
           </div>
           {ws.brain_status === "ready" && (
@@ -102,19 +102,23 @@ export default function Manager() {
             ))}
           </div>
         )}
-      </div>
+      </div>}
 
       {/* Chat */}
-      <div className="flex flex-col h-[calc(100vh-4rem)] bg-card/40">
-        <div className="px-5 py-4 border-b border-border flex items-center gap-2">
-          <Sparkles className="w-4 h-4 text-primary" />
-          <span className="font-display font-bold">Manager chat</span>
+      <div className="flex flex-1 min-w-0 min-h-0 flex-col bg-card/40">
+        <div className="px-5 sm:px-8 py-4 border-b border-border flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Sparkles className="w-5 h-5 text-primary shrink-0" />
+            <div><h1 className="font-display text-xl font-bold">AI Manager</h1><p className="text-xs text-muted-foreground">Your business, leads, and strategy in one conversation.</p></div>
+          </div>
+          <button type="button" onClick={() => setShowRoadmap((open) => !open)} aria-expanded={showRoadmap} aria-controls="manager-roadmap" className="shrink-0 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-accent">{showRoadmap ? "Hide roadmap" : "Growth roadmap"}</button>
         </div>
-        <div ref={scrollRef} className="flex-1 overflow-y-auto p-5 space-y-4" data-testid="chat-messages">
+        <AiStatus status={aiStatus} busy={streaming} />
+        <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-5 sm:px-8 py-6 space-y-5" data-testid="chat-messages">
           {messages.map((m, i) => (
             <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-              <div className={`max-w-[85%] rounded-md px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${m.role === "user" ? "bg-primary text-primary-foreground" : "bg-secondary"}`}>
-                {m.content || (streaming && i === messages.length - 1 ? <Loader2 className="w-4 h-4 animate-spin" /> : "")}
+              <div className={`max-w-[90%] sm:max-w-[85%] rounded-xl px-5 py-3.5 text-sm leading-relaxed ${m.role === "user" ? "bg-primary text-primary-foreground whitespace-pre-wrap" : "bg-secondary"}`}>
+                {m.content ? (m.role === "assistant" ? <ChatText text={m.content} /> : m.content) : (streaming && i === messages.length - 1 ? <Loader2 className="w-4 h-4 animate-spin" /> : "")}
               </div>
             </div>
           ))}
@@ -127,7 +131,7 @@ export default function Manager() {
             data-testid="chat-input"
             className="flex-1 h-11 px-4 rounded-full bg-background border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring"
           />
-          <button type="submit" disabled={streaming} data-testid="chat-send" className="grid place-items-center w-11 h-11 rounded-full bg-primary text-primary-foreground disabled:opacity-60 shrink-0">
+          <button type="submit" disabled={streaming || aiStatus.state === "checking"} data-testid="chat-send" className="grid place-items-center w-11 h-11 rounded-full bg-primary text-primary-foreground disabled:opacity-60 shrink-0">
             {streaming ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
           </button>
         </form>

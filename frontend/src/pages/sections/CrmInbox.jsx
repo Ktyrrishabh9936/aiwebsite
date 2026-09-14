@@ -1,5 +1,6 @@
+import LeadQualificationPanel from "../../components/LeadQualificationPanel";
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import {
   Users, Calendar, Info, Search, XCircle, Save, BadgeIndianRupee,
   Plus, CheckCircle2, Settings, Trash2, Columns3, Palette, Building2,
@@ -44,6 +45,29 @@ const EMPTY_AGENT_DRAFT = {
   input_variable_mappings_text: DEFAULT_AGENT_MAPPINGS_TEXT,
   extra_payload_text: "{}"
 };
+const DEFAULT_AI_QUALIFICATION_CONFIG = {
+  is_enabled: true,
+  passing_score: 70,
+  criteria: [
+    { field: "budget", condition: "contains", value: "90 lakh", weight: 30 },
+    { field: "location", condition: "contains", value: "gurgaon", weight: 25 },
+    { field: "timeline", condition: "contains", value: "this week", weight: 20 },
+  ],
+};
+
+function normalizeAiQualificationConfig(value) {
+  const source = value && typeof value === "object" ? value : DEFAULT_AI_QUALIFICATION_CONFIG;
+  return {
+    is_enabled: Boolean(source.is_enabled ?? true),
+    passing_score: Number(source.passing_score ?? 70),
+    criteria: Array.isArray(source.criteria) ? source.criteria.filter((criterion) => criterion && (criterion.field || criterion.value)).map((criterion) => ({
+      field: String(criterion.field || "").trim(),
+      condition: String(criterion.condition || "contains").trim() || "contains",
+      value: String(criterion.value || "").trim(),
+      weight: Number(criterion.weight ?? 0),
+    })) : [],
+  };
+}
 
 function selectableAgentIds(agentState) {
   return [
@@ -191,6 +215,8 @@ export default function CrmInbox() {
   const [settings, setSettings] = useState({ fields: [], states: [], templates: [], organization: {} });
   const [plivoAgentState, setPlivoAgentState] = useState({ agents: [], selected_agent_config_id: "", legacy_environment_agent: null });
   const [selectedAgentId, setSelectedAgentId] = useState("");
+  const [aiQualificationConfig, setAiQualificationConfig] = useState(DEFAULT_AI_QUALIFICATION_CONFIG);
+  const [aiQualificationPrompt, setAiQualificationPrompt] = useState("Passing score 70. Budget contains 90 lakh. Location contains Gurgaon. Timeline contains this week.");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [callingLeadId, setCallingLeadId] = useState("");
@@ -211,7 +237,11 @@ export default function CrmInbox() {
   const [templateDraft, setTemplateDraft] = useState({ name: "Receipt", type: "receipt", button_label: "Download Receipt", active: true, html: "<h1>Receipt</h1><p>{{full_name}}</p><p>{{email}}</p><table>{{payment_plan.stages}}</table>" });
 
   const activeFields = useMemo(() => (settings.fields || []).filter((field) => field.active !== false), [settings.fields]);
-  const states = settings.states?.length ? settings.states : [{ key: "new", label: "New", color: "blue" }];
+  const states = useMemo(() => {
+    const base = settings.states?.length ? settings.states : [{ key: "new", label: "New", color: "blue" }];
+    const hasAiQualified = base.some((state) => state.key === "ai_qualified");
+    return hasAiQualified ? base : [...base, { key: "ai_qualified", label: "AI Qualified", color: "emerald", order: (base.length || 1) + 1 }];
+  }, [settings.states]);
   const plivoAgents = useMemo(() => {
     const stored = plivoAgentState.agents || [];
     return plivoAgentState.legacy_environment_agent ? [...stored, plivoAgentState.legacy_environment_agent] : stored;
@@ -249,12 +279,19 @@ export default function CrmInbox() {
       if (statusFilter !== "all") params.set("status", statusFilter);
       if (searchQuery.trim()) params.set("search", searchQuery.trim());
       if (recordView === "trash") params.set("trashed", "true");
-      const [settingsRes, leadsRes, plivoAgentsRes] = await Promise.all([
+      const [workspaceRes, settingsRes, leadsRes, plivoAgentsRes] = await Promise.all([
+        api.get(`/workspaces/${wsId}`),
         api.get(`/workspaces/${wsId}/crm/settings`),
         api.get(`/workspaces/${wsId}/crm/leads?${params.toString()}`),
         api.get(`/workspaces/${wsId}/crm/plivo/agents`)
       ]);
       setSettings(settingsRes.data);
+      const nextConfig = normalizeAiQualificationConfig(workspaceRes.data?.ai_qualification_config);
+      setAiQualificationConfig(nextConfig);
+      const criteriaText = nextConfig.criteria.length
+        ? nextConfig.criteria.map((criterion) => `${criterion.field || "field"} ${criterion.condition || "contains"} ${criterion.value || "value"} (${criterion.weight || 0} pts)`).join(". ")
+        : "No rules configured yet.";
+      setAiQualificationPrompt(`Passing score ${nextConfig.passing_score}. ${criteriaText}`);
       const nextPlivoAgents = plivoAgentsRes.data || { agents: [], selected_agent_config_id: "", legacy_environment_agent: null };
       setPlivoAgentState(nextPlivoAgents);
       setSelectedAgentId((current) => nextSelectedAgentId(current, nextPlivoAgents));
@@ -289,16 +326,21 @@ export default function CrmInbox() {
   };
 
   useEffect(() => {
-    if (!selectedLead?.id || !needsLiveCallRefresh(selectedLead)) return undefined;
+    if (!selectedLead?.id) return undefined;
+    let cancelled = false;
     const interval = setInterval(async () => {
+      if (document.hidden) return;
       try {
         const r = await api.get(`/workspaces/${wsId}/crm/leads/${selectedLead.id}`);
-        mergeLead(r.data);
+        if (!cancelled) {
+          setLeads((prev) => prev.map((lead) => lead.id === r.data.id ? r.data : lead));
+          setSelectedLead((prev) => prev?.id === r.data.id ? r.data : prev);
+        }
       } catch {
         clearInterval(interval);
       }
     }, 6000);
-    return () => clearInterval(interval);
+    return () => { cancelled = true; clearInterval(interval); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wsId, selectedLead?.id, selectedLead?.qualification_call?.status]);
 
@@ -545,17 +587,62 @@ export default function CrmInbox() {
     return payload;
   };
 
+  const parseAiQualificationPrompt = (prompt) => {
+    const text = String(prompt || "").trim();
+    const fallback = normalizeAiQualificationConfig(aiQualificationConfig);
+    const passingMatch = text.match(/passing score\s*(?:is|=|:)?\s*(\d{1,3})/i);
+    const passing_score = passingMatch ? Number(passingMatch[1]) : fallback.passing_score;
+    const criteria = [];
+    const rulePatterns = [
+      { field: "budget", regex: /budget\s*(?:is|=|:|contains|about|around)?\s*([^,.]+(?:\s+[^,.]+){0,4})/i },
+      { field: "location", regex: /location\s*(?:is|=|:|contains|in)?\s*([^,.]+(?:\s+[^,.]+){0,4})/i },
+      { field: "timeline", regex: /timeline\s*(?:is|=|:|contains|in|by)?\s*([^,.]+(?:\s+[^,.]+){0,4})/i },
+      { field: "budget", regex: /price\s*(?:is|=|:|contains|about|around)?\s*([^,.]+(?:\s+[^,.]+){0,4})/i },
+      { field: "status", regex: /status\s*(?:is|=|:|contains)?\s*([^,.]+(?:\s+[^,.]+){0,4})/i },
+    ];
+    for (const pattern of rulePatterns) {
+      const match = text.match(pattern.regex);
+      if (!match) continue;
+      const value = String(match[1] || "").trim().replace(/[.;]+$/, "");
+      if (!value) continue;
+      if (criteria.some((criterion) => criterion.field === pattern.field && criterion.value === value)) continue;
+      criteria.push({ field: pattern.field, condition: "contains", value, weight: pattern.field === "budget" ? 30 : pattern.field === "location" ? 25 : pattern.field === "timeline" ? 20 : 10 });
+    }
+    if (criteria.length === 0 && fallback.criteria.length) {
+      return { ...fallback, passing_score, criteria: fallback.criteria.map((criterion) => ({ ...criterion, weight: Number(criterion.weight || 10) })) };
+    }
+    return { is_enabled: true, passing_score, criteria };
+  };
+
+  const saveAiQualificationConfig = async () => {
+    try {
+      setSaving(true);
+      const cleaned = parseAiQualificationPrompt(aiQualificationPrompt);
+      const { data } = await api.patch(`/workspaces/${wsId}`, { ai_qualification_config: cleaned });
+      const nextConfig = normalizeAiQualificationConfig(data.ai_qualification_config);
+      setAiQualificationConfig(nextConfig);
+      setAiQualificationPrompt(`Passing score ${nextConfig.passing_score}. ${nextConfig.criteria.map((criterion) => `${criterion.field} ${criterion.condition} ${criterion.value} (${criterion.weight} pts)`).join(". ")}`);
+      toast.success("AI qualification settings saved");
+      return true;
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail || e.message));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const savePlivoAgent = async (draft) => {
     try {
       setSaving(true);
       const payload = agentPayloadFromDraft(draft);
       if (draft.id && draft.id !== "environment") {
         await api.patch(`/workspaces/${wsId}/crm/plivo/agents/${draft.id}`, payload);
-        toast.success("Plivo agent saved");
+        toast.success("AI agent saved");
       } else {
         const { data } = await api.post(`/workspaces/${wsId}/crm/plivo/agents`, payload);
         setSelectedAgentId(data.id);
-        toast.success("Plivo agent connected");
+        toast.success("AI agent connected");
       }
       await refreshPlivoAgents();
       return true;
@@ -591,7 +678,7 @@ export default function CrmInbox() {
       setSaving(true);
       await api.patch(`/workspaces/${wsId}/crm/plivo/agents/${agent.id}`, { ...agent, enabled: agent.enabled === false });
       await refreshPlivoAgents();
-      toast.success(agent.enabled === false ? "Plivo agent enabled" : "Plivo agent disabled");
+      toast.success(agent.enabled === false ? "AI agent enabled" : "AI agent disabled");
     } catch (e) {
       toast.error(formatError(e.response?.data?.detail));
     } finally {
@@ -640,7 +727,7 @@ export default function CrmInbox() {
     <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2"><Users className="w-6 h-6 text-primary" /> CRM Leads</h1>
+          <h1 className="text-2xl font-bold flex items-center gap-2"><Users className="w-6 h-6 text-primary" /> CRM</h1>
           <p className="text-sm text-muted-foreground mt-1">Manage records, states, organization details, receipts, and invoices.</p>
         </div>
         <div className="flex rounded-lg border bg-card p-1 w-fit">
@@ -670,6 +757,11 @@ export default function CrmInbox() {
           saveStates={saveStates}
           saveOrganization={saveOrganization}
           saveTemplate={saveTemplate}
+          aiQualificationConfig={aiQualificationConfig}
+          aiQualificationPrompt={aiQualificationPrompt}
+          setAiQualificationPrompt={setAiQualificationPrompt}
+          setAiQualificationConfig={setAiQualificationConfig}
+          saveAiQualificationConfig={saveAiQualificationConfig}
           savePlivoAgent={savePlivoAgent}
           selectPlivoAgent={selectPlivoAgent}
           togglePlivoAgent={togglePlivoAgent}
@@ -758,6 +850,15 @@ function Pagination({ page, totalPages, total, onPage }) {
   return <div className="flex items-center justify-between text-sm text-muted-foreground"><span>{total} leads</span><div className="flex items-center gap-2"><button disabled={page <= 1} onClick={() => onPage(page - 1)} className="px-3 h-8 rounded-lg border bg-card disabled:opacity-40">Previous</button><span>Page {page} of {totalPages}</span><button disabled={page >= totalPages} onClick={() => onPage(page + 1)} className="px-3 h-8 rounded-lg border bg-card disabled:opacity-40">Next</button></div></div>;
 }
 
+function normalizeAgentDisplayName(name) {
+  const cleaned = String(name || "")
+    .replace(/\bPlivo\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+AI\s+agent/gi, " AI agent")
+    .trim();
+  return cleaned || "AI agent";
+}
+
 function AgentCallSelector({ agents, selectedAgentId, setSelectedAgentId }) {
   if (!agents.length) {
     return (
@@ -772,7 +873,7 @@ function AgentCallSelector({ agents, selectedAgentId, setSelectedAgentId }) {
       <Bot className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
       <select value={selectedAgentId} onChange={(e) => setSelectedAgentId(e.target.value)} className="w-full h-10 pl-9 pr-3 rounded-lg border bg-background text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-primary">
         {agents.map((agent) => (
-          <option key={agent.id} value={agent.id}>{agent.display_name}</option>
+          <option key={agent.id} value={agent.id}>{normalizeAgentDisplayName(agent.display_name)}</option>
         ))}
       </select>
     </label>
@@ -814,7 +915,7 @@ function LeadTable({ leads, fields, states, selectedLead, loading, trashed, call
                       <button onClick={() => onRestore(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
                     ) : (
                       <div className="flex items-center justify-end gap-2">
-                        <button onClick={() => onCall(lead)} disabled={!values.phone || callingLeadId === lead.id || isJunk || !canCallWithAI} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-40" title={isJunk ? "Junk leads cannot be called" : !canCallWithAI ? "Connect a Plivo AI agent first" : values.phone ? "Call with AI" : "Phone number required"}>
+                        <button onClick={() => onCall(lead)} disabled={!values.phone || callingLeadId === lead.id || isJunk || !canCallWithAI} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-40" title={isJunk ? "Junk leads cannot be called" : !canCallWithAI ? "Connect an AI agent first" : values.phone ? "Call with AI" : "Phone number required"}>
                           {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
                         </button>
                         <button onClick={() => onTrash(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
@@ -941,7 +1042,7 @@ function LeadDetail(props) {
               <button onClick={() => restoreLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
             ) : (
               <>
-                <button onClick={() => callLead(lead)} disabled={saving || !values.phone || callingLeadId === lead.id || isJunkLead || !canCallWithAI} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title={isJunkLead ? "Junk leads cannot be called" : !canCallWithAI ? "Connect a Plivo AI agent first" : values.phone ? "Call with AI" : "Phone number required"}>
+                <button onClick={() => callLead(lead)} disabled={saving || !values.phone || callingLeadId === lead.id || isJunkLead || !canCallWithAI} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title={isJunkLead ? "Junk leads cannot be called" : !canCallWithAI ? "Connect an AI agent first" : values.phone ? "Call with AI" : "Phone number required"}>
                   {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
                 </button>
                 <button onClick={() => trashLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-50" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
@@ -951,6 +1052,7 @@ function LeadDetail(props) {
           </div>
         </div>
         {isTrashed && <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs text-destructive">This lead is in trash and can be restored until {new Date(lead.delete_after).toLocaleDateString()}.</div>}
+        <LeadQualificationPanel key={lead.id} lead={lead} />
         <QualificationSummary communication={communication} qualification={qualification} saving={saving || cancellingCallId === lead.id} onCancel={() => cancelScheduledCall(lead)} />
         <div className="flex rounded-lg border bg-background p-1 overflow-x-auto">
           {DETAIL_TABS.map((tab) => <button key={tab} onClick={() => setDetailTab(tab)} className={`px-3 h-9 rounded-md text-sm font-semibold whitespace-nowrap ${detailTab === tab ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{tab}</button>)}
@@ -1067,7 +1169,7 @@ function LeadDetail(props) {
                     {note.source === "call_agent" && (
                       <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[10px] font-semibold uppercase opacity-80">
                         <PhoneCall className="w-3 h-3" />
-                        <span>{note.call_provider || "call"}</span>
+                        <span>{note.call_provider === "plivo" ? "AI call" : note.call_provider || "call"}</span>
                         {note.call_direction && <span>{note.call_direction}</span>}
                         {note.status && <span>{note.status}</span>}
                         {note.duration && <span>{note.duration}s</span>}
@@ -1292,6 +1394,56 @@ function agentDraftFrom(agent) {
   };
 }
 
+function AIQualificationPanel({ config, prompt, setPrompt, onSave, saving }) {
+  return (
+    <section className="rounded-xl border bg-card p-5 space-y-4 xl:col-span-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <h3 className="font-bold flex items-center gap-2"><Bot className="w-4 h-4 text-primary" /> AI Qualification Chat</h3>
+      </div>
+
+      <div className="rounded-lg border bg-background p-4 space-y-4">
+        <div className="rounded-xl border border-primary/20 bg-primary/5 p-3 text-sm text-foreground">
+          <div className="font-semibold text-primary">AI assistant</div>
+          <p className="mt-1 text-muted-foreground">Describe the lead profile in plain language. Example: “Passing score 70. Budget contains 90 lakh. Location contains Gurgaon. Timeline contains this week.”</p>
+        </div>
+
+        <div className="space-y-2 rounded-lg border bg-card p-3">
+          <div className="flex items-center justify-between text-[11px] font-semibold uppercase text-muted-foreground">
+            <span>Saved qualification</span>
+            <span>{config.criteria.length} rules</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {config.criteria.length === 0 ? (
+              <span className="text-sm text-muted-foreground">No rules saved yet.</span>
+            ) : (
+              config.criteria.map((criterion, index) => (
+                <span key={`${criterion.field}-${index}`} className="rounded-full border bg-background px-2 py-1 text-xs">
+                  {criterion.field}: {criterion.condition} {criterion.value} ({criterion.weight} pts)
+                </span>
+              ))
+            )}
+          </div>
+        </div>
+
+        <label className="block text-sm font-medium">
+          <span className="mb-1 block">Tell the AI how to qualify a lead</span>
+          <textarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            rows={6}
+            className="w-full resize-none rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+            placeholder="Passing score 70. Budget contains 90 lakh. Location contains Gurgaon. Timeline contains this week."
+          />
+        </label>
+
+        <button onClick={onSave} disabled={saving} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50">
+          <Save className="w-4 h-4" /> Save AI Rules
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function PlivoAgentsPanel({ agents, selectedAgentId, onSave, onSelect, onToggle, saving }) {
   const [draft, setDraft] = useState({ ...EMPTY_AGENT_DRAFT });
   const editingStored = draft.id && draft.id !== "environment";
@@ -1311,7 +1463,7 @@ function PlivoAgentsPanel({ agents, selectedAgentId, onSave, onSelect, onToggle,
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(340px,0.9fr)]">
         <div className="space-y-2">
           {agents.length === 0 ? (
-            <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">No Plivo AI agents connected.</div>
+            <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">No AI agents connected.</div>
           ) : agents.map((agent) => {
             const ready = agent.readiness?.ready !== false;
             const missing = agent.readiness?.missing || [];
@@ -1321,7 +1473,7 @@ function PlivoAgentsPanel({ agents, selectedAgentId, onSave, onSelect, onToggle,
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-semibold truncate">{agent.display_name}</span>
+                      <span className="font-semibold truncate">{normalizeAgentDisplayName(agent.display_name)}</span>
                       {active && <span className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-primary"><Star className="w-3 h-3" /> Default</span>}
                       {agent.legacy_environment && <span className="rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase text-muted-foreground">Env</span>}
                     </div>
@@ -1362,8 +1514,8 @@ function PlivoAgentsPanel({ agents, selectedAgentId, onSave, onSelect, onToggle,
             <label className="flex items-center gap-2 pt-6 text-xs font-semibold text-muted-foreground"><input type="checkbox" checked={draft.enabled} onChange={(e) => setField("enabled", e.target.checked)} /> Enabled</label>
             {draft.auth_type === "basic" && (
               <>
-                <SmallInput label="Plivo Auth ID" value={draft.auth_username} onChange={(v) => setField("auth_username", v)} />
-                <SecretInput label={editingStored ? "New Auth Token" : "Plivo Auth Token"} value={draft.auth_password} onChange={(v) => setField("auth_password", v)} />
+                <SmallInput label="Auth ID" value={draft.auth_username} onChange={(v) => setField("auth_username", v)} />
+                <SecretInput label={editingStored ? "New Auth Token" : "Auth Token"} value={draft.auth_password} onChange={(v) => setField("auth_password", v)} />
               </>
             )}
             {draft.auth_type === "bearer" && <SecretInput label={editingStored ? "New Bearer Token" : "Bearer Token"} value={draft.bearer_token} onChange={(v) => setField("bearer_token", v)} />}
@@ -1377,7 +1529,7 @@ function PlivoAgentsPanel({ agents, selectedAgentId, onSave, onSelect, onToggle,
             <span className="text-[11px] font-semibold text-muted-foreground uppercase">Extra Payload</span>
             <textarea value={draft.extra_payload_text} onChange={(e) => setField("extra_payload_text", e.target.value)} rows={3} className="w-full px-3 py-2 rounded-lg border bg-background text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary" />
           </label>
-          <div className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"><KeyRound className="w-3.5 h-3.5" /> Blank Basic Auth fields use the server Plivo credentials.</div>
+          <div className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"><KeyRound className="w-3.5 h-3.5" /> Blank Basic Auth fields use the server credentials.</div>
           <button onClick={submit} disabled={saving || !draft.display_name.trim() || !draft.trigger_url.trim() || !draft.from_number.trim()} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><Save className="w-4 h-4" /> {editingStored ? "Save Agent" : "Connect Agent"}</button>
         </div>
       </div>
@@ -1385,7 +1537,7 @@ function PlivoAgentsPanel({ agents, selectedAgentId, onSave, onSelect, onToggle,
   );
 }
 
-function SettingsPanel({ fields, states, organization, templates, plivoAgents, selectedAgentId, newField, setNewField, newState, setNewState, templateDraft, setTemplateDraft, addField, updateField, removeField, addState, saveStates, saveOrganization, saveTemplate, savePlivoAgent, selectPlivoAgent, togglePlivoAgent, saving }) {
+function SettingsPanel({ fields, states, organization, templates, plivoAgents, selectedAgentId, newField, setNewField, newState, setNewState, templateDraft, setTemplateDraft, addField, updateField, removeField, addState, saveStates, saveOrganization, saveTemplate, aiQualificationConfig, aiQualificationPrompt, setAiQualificationPrompt, setAiQualificationConfig, saveAiQualificationConfig, savePlivoAgent, selectPlivoAgent, togglePlivoAgent, saving }) {
   const [org, setOrg] = useState(organization);
   const [fieldDrafts, setFieldDrafts] = useState({});
   const [stateDrafts, setStateDrafts] = useState({});
@@ -1478,6 +1630,7 @@ function SettingsPanel({ fields, states, organization, templates, plivoAgents, s
 
   return (
     <div className="grid gap-6 xl:grid-cols-2 items-start">
+      <QualificationSettingsLink />
       <PlivoAgentsPanel
         agents={plivoAgents}
         selectedAgentId={selectedAgentId}
@@ -1533,4 +1686,9 @@ function SettingsPanel({ fields, states, organization, templates, plivoAgents, s
       </section>
     </div>
   );
+}
+
+function QualificationSettingsLink() {
+  const { wsId } = useParams();
+  return <section className="rounded-xl border bg-card p-5 space-y-3"><h3 className="font-bold">Lead qualification</h3><p className="text-sm text-muted-foreground">Configure product rules, scoring, next actions and retries. Results appear inside each lead.</p><Link className="inline-block text-sm text-primary" to={`/app/w/${wsId}/qualification`}>Open qualification profiles</Link></section>;
 }

@@ -43,7 +43,9 @@ class Workspace(BaseDocument):
     website_url: str
     public_key: str
     allowed_blog_origins: List[str] = Field(default_factory=list)
-    model_id: str = "gemini-3-flash-preview"
+    model_id: str = "openai.gpt-oss-120b"
+    ai_qualification_config: dict = Field(default_factory=dict)
+    qualification_profile_id: Optional[str] = None
     brain: dict = Field(default_factory=dict)
     brain_status: str = "pending"  # pending | building | ready | error
     roadmap: List[dict] = Field(default_factory=list)
@@ -134,6 +136,13 @@ class CRMLead(BaseDocument):
     lead_notes: List[dict] = Field(default_factory=list)
     communication_summary: dict = Field(default_factory=dict)
     qualification_call: dict = Field(default_factory=dict)
+    lead_status: str = "NEW"
+    call_outcome: Optional[str] = None
+    qualification_score: Optional[int] = None
+    lead_temperature: Optional[str] = None
+    call_attempt_count: int = 0
+    campaign_id: Optional[str] = None
+    qualification_profile_id: Optional[str] = None
     fields: dict = Field(default_factory=dict)
     field_values: dict = Field(default_factory=dict)
     status: str = "new"  # new | contacted | won | lost

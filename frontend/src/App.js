@@ -18,6 +18,8 @@ import WorkspaceLayout from "./pages/WorkspaceLayout";
 import Overview from "./pages/sections/Overview";
 import Brain from "./pages/sections/Brain";
 import Manager from "./pages/sections/Manager";
+import Agents from "./pages/sections/Agents";
+import Qualification from "./pages/sections/Qualification";
 import Tasks from "./pages/sections/Tasks";
 import Blogs from "./pages/sections/Blogs";
 import BlogEditor from "./pages/sections/BlogEditor";
@@ -63,6 +65,8 @@ function App() {
                   <Route path="settings" element={<Settings />} />
                   <Route path="brain" element={<Brain />} />
                   <Route path="manager" element={<Manager />} />
+                  <Route path="agents" element={<Agents />} />
+                  <Route path="qualification" element={<Qualification />} />
                   <Route path="tasks" element={<Tasks />} />
                   <Route path="blogs" element={<Blogs />} />
                   <Route path="blogs/:blogId" element={<BlogEditor />} />
