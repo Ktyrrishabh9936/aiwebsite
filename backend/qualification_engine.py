@@ -37,9 +37,9 @@ ACTIONS = ["RETRY_CALL", "CALLBACK", "SALES_CALL", "SITE_VISIT", "BOOK_DEMO", "S
 
 
 class Budget(BaseModel):
-    value: float | None = None
-    min: float | None = None
-    max: float | None = None
+    value: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    min: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    max: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     currency: str | None = None
 
 
@@ -332,7 +332,7 @@ class LeadQualificationEngine:
     def process(self, call: CallResult, profile: QualificationProfile, data: QualificationData | None = None, attempts=1, extraction_confidence=100):
         data = data or QualificationData.model_validate(call.extracted_data)
         outcome = CallOutcomeClassifier().classify(call, data)
-        meaningful = bool(len(call.transcript.split()) >= 4 or data.not_interested or data.dnd_requested or any(has_fact(v) for k, v in data.model_dump().items() if k not in {"not_interested", "dnd_requested"}))
+        meaningful = bool(data.not_interested or data.dnd_requested or any(has_fact(v) for k, v in data.model_dump().items() if k not in {"not_interested", "dnd_requested", "budget"}) or any(v is not None for v in (data.budget.value, data.budget.min, data.budget.max)))
         result = QualificationResult(lead_id=call.lead_id, call_outcome=outcome, lead_status=LeadStatus.PENDING, qualification_reason=outcome.value.replace("_", " ").capitalize(), qualification_data=data, conversation_summary=call.summary, callback_at=call.callback_at)
         if outcome == Outcome.DND_REQUESTED:
             result.lead_status = LeadStatus.UNQUALIFIED
@@ -367,7 +367,7 @@ class LeadQualificationEngine:
                 result.lead_status = LeadStatus.UNQUALIFIED
                 result.disqualification_reason = "Below qualification threshold"
             # A failed mandatory rule must not produce a misleading HOT label.
-            if result.qualification_score is not None and not failures:
+            if result.qualification_score is not None and not failures and not missing:
                 result.lead_temperature = LeadTemperatureEngine.temperature(result.qualification_score)
         result.retry_eligible = RetryPolicyEngine.eligible(outcome, attempts, profile.retry)
         result.next_action = NextActionEngine.determine(outcome, result.lead_status, result.retry_eligible, profile)

@@ -21,6 +21,14 @@ def stable_id(*values):
     return ObjectId(hashlib.sha256(json.dumps(values, sort_keys=True, default=str).encode()).hexdigest()[:24])
 
 
+def audit_payload(value):
+    if isinstance(value, dict):
+        return {key: "[redacted]" if str(key).lower() in {"token", "authorization", "access_token", "api_key", "password"} else audit_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [audit_payload(item) for item in value]
+    return value
+
+
 def profile_body(doc):
     return {key: value for key, value in (doc or {}).items() if key in QualificationProfile.model_fields}
 
@@ -158,6 +166,9 @@ class PlivoWebhookController:
 
     async def process(self, ws_id, lead_id, raw):
         from crm import decorate_lead, ensure_crm_settings
+        if not ObjectId.is_valid(lead_id) or not ObjectId.is_valid(ws_id):
+            raise HTTPException(422, "Invalid lead or workspace identifier")
+        raw = audit_payload(raw)
         query = {"workspace_id": ws_id, "_id": ObjectId(lead_id)}
         lead = await self.db.crm_leads.find_one(query)
         if not lead:
@@ -198,6 +209,9 @@ class PlivoWebhookController:
                 profile, profile_id = await resolve_profile(self.db, ws_id, lead, workspace)
             if previous:
                 old = CallResult.model_validate(previous["call_result"])
+                if not call.outcome_hint and not call.transcript and not call.extracted_data and not call.callback_requested:
+                    call.outcome_hint = old.outcome_hint
+                    call.connection_status = old.connection_status
                 call.transcript = call.transcript or old.transcript
                 call.summary = call.summary or old.summary
                 call.recording_url = call.recording_url or old.recording_url
@@ -218,17 +232,24 @@ class PlivoWebhookController:
                         call.outcome_hint = old.outcome_hint or Outcome.CONNECTED
                 call.callback_at = call.callback_at or old.callback_at
                 call.callback_requested = call.callback_requested or old.callback_requested
-            history = {"workspace_id": ws_id, "lead_id": lead_id, "kind": "qualification_engine", "provider": call.provider, "provider_call_id": call.provider_call_id, "call_result": call.model_dump(mode="json"), "updated_at": now.isoformat()}
+            history = {"workspace_id": ws_id, "lead_id": lead_id, "kind": "qualification_engine", "provider": call.provider, "provider_call_id": call.provider_call_id, "call_result": call.model_dump(mode="json"), "profile_snapshot": profile.model_dump(mode="json"), "profile_id": profile_id, "updated_at": now.isoformat()}
             await self.db.crm_call_logs.update_one({"_id": history_id}, {"$set": history, "$setOnInsert": {"created_at": event["received_at"]}, "$addToSet": {"event_ids": str(event_id)}}, upsert=True)
             attempts = await self.db.crm_call_logs.count_documents({"workspace_id": ws_id, "lead_id": lead_id, "kind": "qualification_engine"})
             attempts = max(attempts, await self.db.plivo_call_sessions.count_documents({"workspace_id": ws_id, "lead_id": lead_id}))
             active_id = (lead.get("qualification_call") or {}).get("call_uuid")
+            session_aliases = {str(session["_id"])} if session else set()
+            if session:
+                identifiers = session.get("provider_identifiers") or {}
+                session_aliases.update(str(identifiers[key]) for key in ("call_uuid", "request_uuid") if identifiers.get(key))
+            same_call = active_id == call.provider_call_id or active_id in session_aliases
             prior_time = parse_time(lead.get("last_call_at"))
             event_time = call.ended_at or call.started_at
-            stale = bool(active_id and active_id != call.provider_call_id and (previous or event_time and prior_time and event_time < prior_time))
+            stale = bool(active_id and not same_call and (previous or event_time and prior_time and event_time < prior_time))
             if not call.terminal:
                 await self.db.plivo_call_events.update_one({"_id": event_id}, {"$set": {"processing_status": "processed", "result": "nonterminal"}})
                 return {"ok": True, "status": "in_progress"}
+            if not stale:
+                await self.db.crm_leads.update_one(query, {"$set": {"qualification_processing": {"status": "processing", "event_id": str(event_id), "updated_at": now.isoformat()}}})
             hint = call.outcome_hint
             if saved.get("decision"):
                 result = QualificationResult.model_validate(saved["decision"])
@@ -246,9 +267,11 @@ class PlivoWebhookController:
                 await CRMLeadUpdateService(self.db).apply(ws_id, lead, call, result, profile, profile_id, event, history_id, attempts)
             await self.db.crm_call_logs.update_one({"_id": history_id}, {"$set": {"result": result.model_dump(mode="json"), "profile_id": profile_id, "profile_snapshot": profile.model_dump(mode="json"), "status": "processed", "call_result": call.model_dump(mode="json")}})
             await self.db.plivo_call_events.update_one({"_id": event_id}, {"$set": {"processing_status": "processed", "result": result.model_dump(mode="json"), "processed_at": datetime.now(timezone.utc).isoformat()}})
+            await self.db.crm_leads.update_one({**query, "qualification_processing.event_id": str(event_id)}, {"$set": {"qualification_processing.status": "completed"}})
             return {"ok": True, "status": "completed", "event_id": str(event_id), "qualification_result": result.model_dump(mode="json"), "lead": decorate_lead(await self.db.crm_leads.find_one(query), await ensure_crm_settings(self.db, ws_id))}
         except Exception as exc:
             await self.db.plivo_call_events.update_one({"_id": event_id}, {"$set": {"processing_status": "failed", "error_type": type(exc).__name__}})
+            await self.db.crm_leads.update_one({**query, "qualification_processing.event_id": str(event_id)}, {"$set": {"qualification_processing.status": "failed"}})
             raise
         finally:
             await self.db.crm_leads.update_one({**query, "qualification_lock.event": str(event_id)}, {"$unset": {"qualification_lock": ""}})

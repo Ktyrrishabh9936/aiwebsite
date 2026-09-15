@@ -13,7 +13,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import qualification_service as service
 from qualification_api import router
 from qualification_engine import QualificationData, QualificationProfile
-from test_qualification_engine import full_data
+from tests.test_qualification_engine import full_data
 
 
 async def isolated(run):
@@ -106,6 +106,11 @@ def test_session_snapshot_old_calls_and_callback_task(facts_only):
         assert first["qualification_result"]["lead_status"] == "SALES_READY"
         await controller.process(ws, lead_id, {"CallUUID": "call-1", "CallStatus": "completed", "recording_url": "https://example.test/recording"})
         assert await db.crm_call_logs.count_documents({}) == 1  # Request/call aliases are one attempt.
+        updated = await db.crm_leads.find_one({"_id": ObjectId(lead_id)})
+        assert updated["qualification_call"]["recording_url"] == "https://example.test/recording"
+        assert updated["qualification_call"]["call_uuid"] == "call-1"
+        assert updated["call_attempt_count"] == 1
+        assert await db.tasks.count_documents({"action_type": "SALES_CALL"}) == 1
         await controller.process(ws, lead_id, {"CallUUID": "call-2", "CallStatus": "completed", "callback_requested": True, "ended_at": "2030-01-02T10:00:00Z"})
         assert await db.tasks.count_documents({"action_type": "CALLBACK"}) == 1  # Missing time goes to a person.
         await controller.process(ws, lead_id, {"CallUUID": "call-1", "CallStatus": "completed", "ended_at": "2030-01-01T10:00:00Z", "event_id": "late"})
@@ -161,4 +166,36 @@ def test_profiles_api_auth_isolation_assignment_and_preview(monkeypatch):
             from qualification_engine import CallResult, LeadQualificationEngine
             decision = LeadQualificationEngine().process(CallResult(provider="test", provider_call_id="unconfigured", lead_id=lead_id, extracted_data=full_data()), fallback)
             assert decision.lead_status == "PARTIALLY_QUALIFIED"
+    asyncio.run(isolated(run))
+
+
+def test_webhook_requires_auth_and_redacts_token(monkeypatch, facts_only):
+    import base64
+    import hashlib
+    import hmac
+    import server
+    from plivo_calls import _signature_payload
+    monkeypatch.setenv("PLIVO_AGENT_CALLBACK_TOKEN", "synthetic-callback-token")
+    monkeypatch.setenv("PLIVO_AUTH_TOKEN", "synthetic-plivo-secret")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://test")
+    async def run(db):
+        ws, lead_id, _ = await seed(db)
+        monkeypatch.setattr(server, "db", db)
+        app = FastAPI()
+        app.add_api_route("/workspaces/{ws_id}/leads/{lead_id}/result", server.plivo_qualification_result, methods=["POST"])
+        url = f"/workspaces/{ws}/leads/{lead_id}/result"
+        payload = {"CallUUID": "auth-call", "CallStatus": "busy"}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            assert (await client.post(url, json=payload)).status_code == 403
+            assert await db.plivo_call_events.count_documents({}) == 0
+            assert (await client.post(url + "?token=synthetic-callback-token", json=payload)).status_code == 200
+            event = await db.plivo_call_events.find_one({})
+            assert event["payload"]["token"] == "[redacted]"
+            monkeypatch.delenv("PLIVO_AGENT_CALLBACK_TOKEN")
+            assert (await client.post(url, json=payload)).status_code == 403
+            nonce = "synthetic-nonce"
+            signature = base64.b64encode(hmac.new(b"synthetic-plivo-secret", _signature_payload("POST", "http://test" + url, nonce, payload).encode(), hashlib.sha256).digest()).decode()
+            response = await client.post(url, data=payload, headers={"X-Plivo-Signature-V3": signature, "X-Plivo-Signature-V3-Nonce": nonce})
+            assert response.status_code == 200
+            assert response.json()["qualification_result"]["lead_status"] == "PENDING"
     asyncio.run(isolated(run))

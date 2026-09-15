@@ -47,8 +47,12 @@ export default function Qualification() {
     setBusy(true); setError("");
     try {
       const { data } = selected ? await api.put(`${base}/profiles/${selected}`, draft) : await api.post(`${base}/profiles`, draft);
+      // Remember a successful save even if setting the default fails afterward.
+      setSelected(data.id);
+      setCatalog((current) => ({ ...current, profiles: [data, ...current.profiles.filter((p) => p.id !== data.id)] }));
+      setDraft(Object.fromEntries(Object.keys(catalog.template).map((key) => [key, data[key] ?? catalog.template[key]])));
       if (makeDefault) await api.post(`${base}/profiles/${data.id}/default`);
-      setSelected(data.id); await load(); await refresh(); toast.success(makeDefault ? "Profile saved as workspace default" : "Qualification profile saved");
+      await load(); await refresh(); toast.success(makeDefault ? "Profile saved as workspace default" : "Qualification profile saved");
     } catch (e) { setError(qualificationError(e)); }
     finally { setBusy(false); }
   };
@@ -60,9 +64,9 @@ export default function Qualification() {
   return <div className="p-5 sm:p-8 max-w-6xl mx-auto space-y-6">
     <div><Link to={`/app/w/${ws.id}/agents`} className="text-sm text-primary">AI Agents</Link><h1 className="text-3xl font-bold mt-2">Lead qualification</h1><p className="text-muted-foreground text-sm mt-2">Plivo runs the call. Arevei evaluates the facts, applies your rules, and updates the CRM.</p></div>
     {error && <p role="alert" className="rounded-lg border border-destructive p-3 text-sm text-destructive">{error}</p>}
-    {!catalog && <button className={buttonClass} onClick={load}>Load qualification profiles</button>}
+    {!catalog && <button className={buttonClass} onClick={() => load().then((data) => { if (data) setDraft(data.template); })}>Load qualification profiles</button>}
     {catalog && draft && <>
-      <section className="border rounded-xl p-5 bg-card space-y-3"><Field label="Product / campaign profile"><select className={inputClass} value={selected} onChange={(e) => choose(e.target.value)}><option value="">New profile</option>{catalog.profiles.map((p) => <option key={p.id} value={p.id}>{p.product_name}{catalog.default_profile_id === p.id ? " (workspace default)" : ""}</option>)}</select></Field><p className="text-xs text-muted-foreground">Selection order: lead override, campaign profile, workspace default. Calls keep a snapshot of the profile used.</p>{!catalog.default_profile_id && <p className="text-sm text-amber-600">Set a default profile to enable automatic qualification for leads without an assigned campaign profile. Until then, connected calls require review.</p>}
+      <section className="border rounded-xl p-5 bg-card space-y-3"><Field label="Product / campaign profile"><select className={inputClass} disabled={busy} value={selected} onChange={(e) => choose(e.target.value)}><option value="">New profile</option>{catalog.profiles.map((p) => <option key={p.id} value={p.id}>{p.product_name}{catalog.default_profile_id === p.id ? " (workspace default)" : ""}</option>)}</select></Field><p className="text-xs text-muted-foreground">Selection order: lead override, campaign profile, workspace default. Calls keep a snapshot of the profile used.</p><p className="text-xs text-muted-foreground">Webhook authentication: {catalog.callback_authentication}. This indicates configuration, not a successful live call.</p>{!catalog.default_profile_id && <p className="text-sm text-amber-600">Set a default profile to enable automatic qualification for leads without an assigned campaign profile. Until then, connected calls require review.</p>}
       {catalog.legacy_config?.criteria?.length > 0 && <details className="text-sm"><summary className="cursor-pointer">Previous rules to review</summary><p className="my-2 text-muted-foreground">Your previous text rules are preserved here. Recreate them as explicit comparisons below, then save a default profile. They are not applied by the new engine.</p><pre className="text-xs overflow-auto p-3 bg-secondary rounded">{JSON.stringify(catalog.legacy_config, null, 2)}</pre></details>}</section>
       <div className="grid lg:grid-cols-[1fr_320px] gap-6 items-start">
         <fieldset disabled={busy} className="border rounded-xl bg-card p-5 space-y-5 min-w-0">

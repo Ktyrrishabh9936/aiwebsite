@@ -1,5 +1,10 @@
 # Bedrock Mantle integration
 
+Lead qualification now uses the application-owned engine described in
+[QUALIFICATION_ENGINE.md](QUALIFICATION_ENGINE.md). Mantle extracts conversation
+facts; deterministic product rules decide qualification, scores and next actions.
+The historical qualification checks below describe the earlier implementation.
+
 ## Configuration
 
 The growth AI service now registers `openai.gpt-oss-120b` with provider

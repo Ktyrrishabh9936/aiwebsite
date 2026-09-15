@@ -1,3 +1,4 @@
+import os
 from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -29,7 +30,7 @@ async def profiles(ws_id: str, request: Request):
     from plivo_calls import ensure_calling_workflow_config
     workflow = await ensure_calling_workflow_config(db, ws_id)
     template = QualificationProfile(retry={"max_attempts": workflow.get("max_attempts", 4), "retry_rules": [{"outcome": o.value, "delay_minutes": workflow.get("retry_delay_minutes", 30)} for o in sorted(RETRYABLE)]})
-    return {"profiles": [public(doc) for doc in docs], "default_profile_id": ws.get("qualification_profile_id"), "legacy_config": ws.get("ai_qualification_config"), "template": template.model_dump(mode="json")}
+    return {"profiles": [public(doc) for doc in docs], "default_profile_id": ws.get("qualification_profile_id"), "legacy_config": ws.get("ai_qualification_config"), "template": template.model_dump(mode="json"), "callback_authentication": "Shared callback token" if os.environ.get("PLIVO_AGENT_CALLBACK_TOKEN", "").strip() else "Plivo signature required"}
 
 
 @router.post("/profiles")
@@ -77,7 +78,7 @@ async def assign_profile(ws_id: str, lead_id: str, request: Request, body: Assig
     db = db_from(request)
     if body.profile_id and not await db.qualification_profiles.find_one({"_id": oid(body.profile_id), "workspace_id": ws_id}):
         raise HTTPException(404, "Profile not found")
-    result = await db.crm_leads.update_one({"_id": oid(lead_id), "workspace_id": ws_id}, {"$set": {"qualification_profile_id": body.profile_id}})
+    result = await db.crm_leads.update_one({"_id": oid(lead_id), "workspace_id": ws_id}, {"$set": {"qualification_profile_id": body.profile_id, "updated_at": now_iso()}})
     if not result.matched_count:
         raise HTTPException(404, "Lead not found")
     return {"profile_id": body.profile_id}

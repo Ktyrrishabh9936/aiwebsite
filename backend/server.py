@@ -326,6 +326,8 @@ async def list_tasks(ws_id: str, request: Request):
 
 async def execute_task(task_doc):
     """Run a task through its specialist agent."""
+    if task_doc.get("source") == "qualification_engine":
+        raise HTTPException(409, "This is a human follow-up task. Complete the action in CRM and mark it done.")
     ws = await db.workspaces.find_one({"_id": oid(task_doc["workspace_id"])})
     if not ws:
         return
@@ -420,7 +422,7 @@ async def approve_task(task_id: str, request: Request):
         await db.blogs.update_one({"_id": oid(task["output_ref"])},
                                   {"$set": {"status": "published", "published_at": now_iso()}})
     await db.tasks.update_one({"_id": oid(task_id)}, {"$set": {"status": "done"}})
-    await notify(task["workspace_id"], "success", "Approved & published", task["title"])
+    await notify(task["workspace_id"], "success", "Follow-up completed" if task.get("source") == "qualification_engine" else "Approved & published", task["title"])
     doc = await db.tasks.find_one({"_id": oid(task_id)})
     return doc_out(doc)
 
@@ -767,11 +769,11 @@ async def plivo_agent_callback(request: Request):
     from plivo_calls import (
         normalize_contacto_qualification_payload,
         normalize_lead_note,
-        require_agent_callback_token,
+        require_qualification_callback_auth,
         save_qualification_result,
     )
 
-    require_agent_callback_token(request)
+    await require_qualification_callback_auth(request, await _plivo_body_params(request))
 
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
@@ -780,6 +782,7 @@ async def plivo_agent_callback(request: Request):
         form_data = await request.form()
         payload = dict(form_data)
 
+    raw_payload = payload
     payload = normalize_contacto_qualification_payload(payload)
     nested_object = None
     if isinstance(payload, dict) and "data" in payload and isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("object"), dict):
@@ -826,7 +829,7 @@ async def plivo_agent_callback(request: Request):
     lead_id = str(lead.get("_id"))
     logger.info("Plivo agent callback resolved workspace_id=%s lead_id=%s call_uuid=%s", ws_id, lead_id, call_uuid)
 
-    result = await save_qualification_result(db, ws_id, lead_id, payload)
+    result = await save_qualification_result(db, ws_id, lead_id, raw_payload)
     return {"status": "success", "result": result, "call_uuid": call_uuid, "lead_id": lead_id, "workspace_id": ws_id}
 
 
@@ -854,9 +857,9 @@ async def plivo_outbound_status(ws_id: str, request: Request):
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/{lead_id}/qualification/result", methods=["GET", "POST"])
 async def plivo_qualification_result(ws_id: str, lead_id: str, request: Request):
-    from plivo_calls import mark_plivo_event, require_agent_callback_token, save_qualification_result, store_plivo_event
+    from plivo_calls import require_qualification_callback_auth, save_qualification_result
 
-    require_agent_callback_token(request)
+    await require_qualification_callback_auth(request, await _plivo_body_params(request))
     payload = await _plivo_result_payload(request)
     return await save_qualification_result(db, ws_id, lead_id, payload)
 

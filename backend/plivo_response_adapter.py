@@ -19,6 +19,30 @@ def truth(value):
     return value is True or str(value).strip().lower() in {"true", "yes", "1"}
 
 
+def budget_fact(value):
+    """Parse explicit amounts only; no inferred currency or exchange conversion."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return {"value": value}
+    if not isinstance(value, str):
+        return {}
+    text = value.lower().replace(",", "")
+    matches = re.findall(r"(\d+(?:\.\d+)?)\s*(crores?|cr\b|lakhs?|lacs?|million|mn\b|thousand|k\b)?", text)
+    if not 1 <= len(matches) <= 2:
+        return {}
+    units = {"crore": 10000000, "crores": 10000000, "cr": 10000000, "lakh": 100000, "lakhs": 100000, "lac": 100000, "lacs": 100000, "million": 1000000, "mn": 1000000, "thousand": 1000, "k": 1000}
+    trailing_unit = matches[-1][1]
+    amounts = [float(number) * units.get(unit or trailing_unit, 1) for number, unit in matches]
+    currency = next((code for code, pattern in [("INR", r"₹|\binr\b|\brupees?\b"), ("USD", r"\busd\b"), ("EUR", r"€|\beur\b"), ("GBP", r"£|\bgbp\b")] if re.search(pattern, text)), None)
+    if len(amounts) == 2:
+        if not re.search(r"[-–—]|\bto\b", text) or amounts[0] > amounts[1]:
+            return {}
+        return {"min": amounts[0], "max": amounts[1], "currency": currency}
+    key = "max" if re.search(r"up to|at most|under|below", text) else "min" if re.search(r"at least|above|over|minimum", text) else "value"
+    return {key: amounts[0], "currency": currency}
+
+
 class PlivoResponseAdapter:
     STATUS_MAP = {
         "invalid_number": Outcome.INVALID_NUMBER, "invalid_destination": Outcome.INVALID_NUMBER,
@@ -68,8 +92,12 @@ class PlivoResponseAdapter:
         for key in allowed:
             if key not in extracted and key in payload:
                 extracted[key] = payload[key]
-        if "budget" in extracted and not isinstance(extracted["budget"], dict):
-            extracted.pop("budget")  # Natural-language amounts are extracted with evidence by the LLM.
+        if "budget" in extracted:
+            extracted["budget"] = budget_fact(extracted["budget"])
+        if not extracted.get("location") and source.get("preferred_location"):
+            extracted["location"] = source["preferred_location"]
+        if not extracted.get("purchase_timeline") and source.get("timeline") in ("immediate", "soon", "later"):
+            extracted["purchase_timeline"] = source["timeline"]
         for key in ("product_fit", "eligibility", "not_interested", "dnd_requested"):
             if key in extracted and extracted[key] is not None:
                 raw_bool = str(extracted[key]).strip().lower()

@@ -2185,12 +2185,24 @@ def communication_summary_from_result(lead, payload, status, summary, recording_
 def require_agent_callback_token(request: Request):
     expected = os.environ.get("PLIVO_AGENT_CALLBACK_TOKEN", "").strip()
     if not expected:
-        return
+        raise HTTPException(503, "Plivo AI callback token is not configured")
     auth = request.headers.get("authorization", "")
     bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     supplied = bearer or request.headers.get("x-arevei-webhook-token", "").strip() or request.query_params.get("token", "").strip()
     if not hmac.compare_digest(expected, supplied):
         raise HTTPException(status_code=403, detail="Invalid Plivo AI qualification callback token")
+
+
+async def require_qualification_callback_auth(request: Request, params):
+    if os.environ.get("PLIVO_AGENT_CALLBACK_TOKEN", "").strip():
+        require_agent_callback_token(request)
+        return
+    # Signed Plivo callbacks work without a separate shared callback token.
+    auth_token = os.environ.get("PLIVO_AUTH_TOKEN", "").strip()
+    signature = request.headers.get("X-Plivo-Signature-V3") or request.headers.get("X-Plivo-Signature-Ma-V3")
+    nonce = request.headers.get("X-Plivo-Signature-V3-Nonce")
+    if not auth_token or not validate_signature(request.method, public_request_url(request), nonce, signature, auth_token, params):
+        raise HTTPException(403, "A valid Plivo signature or configured callback token is required")
 
 
 async def save_qualification_result(db, ws_id, lead_id, payload):
@@ -2277,6 +2289,7 @@ async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=F
     session_id = str(session["_id"])
     await update_call_session(db, ws_id, session_id, {"profile_snapshot": profile.model_dump(mode="json"), "profile_id": profile_id})
     base_payload = qualification_payload(public_base_url(request), ws_id, lead_id, lead, lead_phone, agent_config, session_id)
+    base_payload["qualification_profile"] = profile.model_dump(mode="json")
     payload = build_agent_trigger_payload(base_payload, agent_config, session_id)
     headers, auth = trigger_auth_for_agent(agent_config)
     await update_call_session(db, ws_id, session_id, {

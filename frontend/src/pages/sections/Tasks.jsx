@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useOutletContext, useNavigate } from "react-router-dom";
+import { Link, useOutletContext, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
   Play, Check, Clock, Loader2, Trash2, CheckCircle2, XCircle, FileText, Eye,
@@ -23,6 +23,7 @@ const priorityColors = {
 };
 
 const statusMeta = {
+  cancelled: { icon: XCircle, label: "Cancelled", cls: "text-muted-foreground" },
   pending: { icon: Clock, label: "Scheduled", cls: "text-muted-foreground" },
   running: { icon: Loader2, label: "Running", cls: "text-primary animate-spin" },
   awaiting_approval: { icon: Clock, label: "Awaiting approval", cls: "text-amber-500" },
@@ -238,14 +239,14 @@ export default function Tasks() {
     catch { toast.error("Execution failed"); }
     finally { setBusy(null); }
   };
-  const approve = async (id) => {
+  const approve = async (id, followUp = false) => {
     setBusy(id);
-    try { await api.post(`/tasks/${id}/approve`); toast.success("Approved & published"); load(); loadNotes(); }
+    try { await api.post(`/tasks/${id}/approve`); toast.success(followUp ? "Follow-up marked done" : "Approved & published"); load(); loadNotes(); }
     finally { setBusy(null); }
   };
   const del = async (id) => { await api.delete(`/tasks/${id}`); load(); };
 
-  if ((ws.roadmap || []).length === 0) {
+  if ((ws.roadmap || []).length === 0 && tasks.length === 0) {
     return <div className="p-10 max-w-4xl mx-auto text-center text-muted-foreground border border-dashed border-border rounded-md py-16 m-6 sm:m-10">Generate a roadmap first (Overview -> Generate roadmap) to schedule tasks.</div>;
   }
 
@@ -282,7 +283,8 @@ export default function Tasks() {
                 {(t.status === "done" || t.status === "awaiting_approval") && (
                   <button onClick={() => setDetail(t)} data-testid={`task-view-${t.id}`} className="grid place-items-center w-9 h-9 rounded-full border border-border hover:bg-accent" title="View output"><Eye className="w-4 h-4" /></button>
                 )}
-                {t.status === "pending" && (
+                {t.source === "qualification_engine" && t.status === "pending" && <><Link className="text-sm text-primary px-2" to={`/app/w/${ws.id}/crm`}>Open CRM</Link><button onClick={() => approve(t.id, true)} disabled={busy === t.id} className="px-3 h-9 rounded-full border text-sm disabled:opacity-60">Mark done</button></>}
+                {t.status === "pending" && t.source !== "qualification_engine" && (
                   <button onClick={() => run(t.id)} disabled={busy === t.id} data-testid={`task-run-${t.id}`} className="inline-flex items-center gap-1.5 px-3 h-9 rounded-full bg-primary text-primary-foreground text-sm font-medium disabled:opacity-60">
                     {busy === t.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />} Run
                   </button>

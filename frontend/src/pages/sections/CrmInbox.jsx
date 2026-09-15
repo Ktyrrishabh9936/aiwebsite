@@ -16,7 +16,6 @@ const PAYMENT_METHODS = ["Cash", "Bank Transfer", "UPI", "Cheque", "Card", "Othe
 const PAYMENT_STATUSES = ["Paid", "Pending"];
 const ORG_FIELDS = ["company_name", "logo_url", "address", "phone", "email", "website", "tax_number", "bank_details", "authorized_signatory", "receipt_prefix", "invoice_prefix"];
 const DETAIL_TABS = ["Details", "Payments", "Receipts", "Invoice", "Notes"];
-const LIVE_CALL_STATUSES = new Set(["scheduled", "queued", "started", "answered", "reconcile_required"]);
 const DEFAULT_AGENT_MAPPINGS_TEXT = JSON.stringify({
   workspace_id: "workspace_id",
   lead_id: "lead_id",
@@ -45,30 +44,6 @@ const EMPTY_AGENT_DRAFT = {
   input_variable_mappings_text: DEFAULT_AGENT_MAPPINGS_TEXT,
   extra_payload_text: "{}"
 };
-const DEFAULT_AI_QUALIFICATION_CONFIG = {
-  is_enabled: true,
-  passing_score: 70,
-  criteria: [
-    { field: "budget", condition: "contains", value: "90 lakh", weight: 30 },
-    { field: "location", condition: "contains", value: "gurgaon", weight: 25 },
-    { field: "timeline", condition: "contains", value: "this week", weight: 20 },
-  ],
-};
-
-function normalizeAiQualificationConfig(value) {
-  const source = value && typeof value === "object" ? value : DEFAULT_AI_QUALIFICATION_CONFIG;
-  return {
-    is_enabled: Boolean(source.is_enabled ?? true),
-    passing_score: Number(source.passing_score ?? 70),
-    criteria: Array.isArray(source.criteria) ? source.criteria.filter((criterion) => criterion && (criterion.field || criterion.value)).map((criterion) => ({
-      field: String(criterion.field || "").trim(),
-      condition: String(criterion.condition || "contains").trim() || "contains",
-      value: String(criterion.value || "").trim(),
-      weight: Number(criterion.weight ?? 0),
-    })) : [],
-  };
-}
-
 function selectableAgentIds(agentState) {
   return [
     ...(agentState?.agents || []),
@@ -203,10 +178,6 @@ function finalInvoiceDownloadUrl(wsId, leadId) {
   return `${API}/workspaces/${wsId}/crm/leads/${leadId}/final-invoice/pdf`;
 }
 
-function needsLiveCallRefresh(lead) {
-  return LIVE_CALL_STATUSES.has(lead?.qualification_call?.status);
-}
-
 export default function CrmInbox() {
   const { wsId } = useParams();
   const [activeTab, setActiveTab] = useState("records");
@@ -215,8 +186,6 @@ export default function CrmInbox() {
   const [settings, setSettings] = useState({ fields: [], states: [], templates: [], organization: {} });
   const [plivoAgentState, setPlivoAgentState] = useState({ agents: [], selected_agent_config_id: "", legacy_environment_agent: null });
   const [selectedAgentId, setSelectedAgentId] = useState("");
-  const [aiQualificationConfig, setAiQualificationConfig] = useState(DEFAULT_AI_QUALIFICATION_CONFIG);
-  const [aiQualificationPrompt, setAiQualificationPrompt] = useState("Passing score 70. Budget contains 90 lakh. Location contains Gurgaon. Timeline contains this week.");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [callingLeadId, setCallingLeadId] = useState("");
@@ -279,19 +248,12 @@ export default function CrmInbox() {
       if (statusFilter !== "all") params.set("status", statusFilter);
       if (searchQuery.trim()) params.set("search", searchQuery.trim());
       if (recordView === "trash") params.set("trashed", "true");
-      const [workspaceRes, settingsRes, leadsRes, plivoAgentsRes] = await Promise.all([
-        api.get(`/workspaces/${wsId}`),
+      const [settingsRes, leadsRes, plivoAgentsRes] = await Promise.all([
         api.get(`/workspaces/${wsId}/crm/settings`),
         api.get(`/workspaces/${wsId}/crm/leads?${params.toString()}`),
         api.get(`/workspaces/${wsId}/crm/plivo/agents`)
       ]);
       setSettings(settingsRes.data);
-      const nextConfig = normalizeAiQualificationConfig(workspaceRes.data?.ai_qualification_config);
-      setAiQualificationConfig(nextConfig);
-      const criteriaText = nextConfig.criteria.length
-        ? nextConfig.criteria.map((criterion) => `${criterion.field || "field"} ${criterion.condition || "contains"} ${criterion.value || "value"} (${criterion.weight || 0} pts)`).join(". ")
-        : "No rules configured yet.";
-      setAiQualificationPrompt(`Passing score ${nextConfig.passing_score}. ${criteriaText}`);
       const nextPlivoAgents = plivoAgentsRes.data || { agents: [], selected_agent_config_id: "", legacy_environment_agent: null };
       setPlivoAgentState(nextPlivoAgents);
       setSelectedAgentId((current) => nextSelectedAgentId(current, nextPlivoAgents));
@@ -587,51 +549,6 @@ export default function CrmInbox() {
     return payload;
   };
 
-  const parseAiQualificationPrompt = (prompt) => {
-    const text = String(prompt || "").trim();
-    const fallback = normalizeAiQualificationConfig(aiQualificationConfig);
-    const passingMatch = text.match(/passing score\s*(?:is|=|:)?\s*(\d{1,3})/i);
-    const passing_score = passingMatch ? Number(passingMatch[1]) : fallback.passing_score;
-    const criteria = [];
-    const rulePatterns = [
-      { field: "budget", regex: /budget\s*(?:is|=|:|contains|about|around)?\s*([^,.]+(?:\s+[^,.]+){0,4})/i },
-      { field: "location", regex: /location\s*(?:is|=|:|contains|in)?\s*([^,.]+(?:\s+[^,.]+){0,4})/i },
-      { field: "timeline", regex: /timeline\s*(?:is|=|:|contains|in|by)?\s*([^,.]+(?:\s+[^,.]+){0,4})/i },
-      { field: "budget", regex: /price\s*(?:is|=|:|contains|about|around)?\s*([^,.]+(?:\s+[^,.]+){0,4})/i },
-      { field: "status", regex: /status\s*(?:is|=|:|contains)?\s*([^,.]+(?:\s+[^,.]+){0,4})/i },
-    ];
-    for (const pattern of rulePatterns) {
-      const match = text.match(pattern.regex);
-      if (!match) continue;
-      const value = String(match[1] || "").trim().replace(/[.;]+$/, "");
-      if (!value) continue;
-      if (criteria.some((criterion) => criterion.field === pattern.field && criterion.value === value)) continue;
-      criteria.push({ field: pattern.field, condition: "contains", value, weight: pattern.field === "budget" ? 30 : pattern.field === "location" ? 25 : pattern.field === "timeline" ? 20 : 10 });
-    }
-    if (criteria.length === 0 && fallback.criteria.length) {
-      return { ...fallback, passing_score, criteria: fallback.criteria.map((criterion) => ({ ...criterion, weight: Number(criterion.weight || 10) })) };
-    }
-    return { is_enabled: true, passing_score, criteria };
-  };
-
-  const saveAiQualificationConfig = async () => {
-    try {
-      setSaving(true);
-      const cleaned = parseAiQualificationPrompt(aiQualificationPrompt);
-      const { data } = await api.patch(`/workspaces/${wsId}`, { ai_qualification_config: cleaned });
-      const nextConfig = normalizeAiQualificationConfig(data.ai_qualification_config);
-      setAiQualificationConfig(nextConfig);
-      setAiQualificationPrompt(`Passing score ${nextConfig.passing_score}. ${nextConfig.criteria.map((criterion) => `${criterion.field} ${criterion.condition} ${criterion.value} (${criterion.weight} pts)`).join(". ")}`);
-      toast.success("AI qualification settings saved");
-      return true;
-    } catch (e) {
-      toast.error(formatError(e.response?.data?.detail || e.message));
-      return false;
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const savePlivoAgent = async (draft) => {
     try {
       setSaving(true);
@@ -757,11 +674,6 @@ export default function CrmInbox() {
           saveStates={saveStates}
           saveOrganization={saveOrganization}
           saveTemplate={saveTemplate}
-          aiQualificationConfig={aiQualificationConfig}
-          aiQualificationPrompt={aiQualificationPrompt}
-          setAiQualificationPrompt={setAiQualificationPrompt}
-          setAiQualificationConfig={setAiQualificationConfig}
-          saveAiQualificationConfig={saveAiQualificationConfig}
           savePlivoAgent={savePlivoAgent}
           selectPlivoAgent={selectPlivoAgent}
           togglePlivoAgent={togglePlivoAgent}
@@ -1394,56 +1306,6 @@ function agentDraftFrom(agent) {
   };
 }
 
-function AIQualificationPanel({ config, prompt, setPrompt, onSave, saving }) {
-  return (
-    <section className="rounded-xl border bg-card p-5 space-y-4 xl:col-span-2">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <h3 className="font-bold flex items-center gap-2"><Bot className="w-4 h-4 text-primary" /> AI Qualification Chat</h3>
-      </div>
-
-      <div className="rounded-lg border bg-background p-4 space-y-4">
-        <div className="rounded-xl border border-primary/20 bg-primary/5 p-3 text-sm text-foreground">
-          <div className="font-semibold text-primary">AI assistant</div>
-          <p className="mt-1 text-muted-foreground">Describe the lead profile in plain language. Example: “Passing score 70. Budget contains 90 lakh. Location contains Gurgaon. Timeline contains this week.”</p>
-        </div>
-
-        <div className="space-y-2 rounded-lg border bg-card p-3">
-          <div className="flex items-center justify-between text-[11px] font-semibold uppercase text-muted-foreground">
-            <span>Saved qualification</span>
-            <span>{config.criteria.length} rules</span>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {config.criteria.length === 0 ? (
-              <span className="text-sm text-muted-foreground">No rules saved yet.</span>
-            ) : (
-              config.criteria.map((criterion, index) => (
-                <span key={`${criterion.field}-${index}`} className="rounded-full border bg-background px-2 py-1 text-xs">
-                  {criterion.field}: {criterion.condition} {criterion.value} ({criterion.weight} pts)
-                </span>
-              ))
-            )}
-          </div>
-        </div>
-
-        <label className="block text-sm font-medium">
-          <span className="mb-1 block">Tell the AI how to qualify a lead</span>
-          <textarea
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            rows={6}
-            className="w-full resize-none rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
-            placeholder="Passing score 70. Budget contains 90 lakh. Location contains Gurgaon. Timeline contains this week."
-          />
-        </label>
-
-        <button onClick={onSave} disabled={saving} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50">
-          <Save className="w-4 h-4" /> Save AI Rules
-        </button>
-      </div>
-    </section>
-  );
-}
-
 function PlivoAgentsPanel({ agents, selectedAgentId, onSave, onSelect, onToggle, saving }) {
   const [draft, setDraft] = useState({ ...EMPTY_AGENT_DRAFT });
   const editingStored = draft.id && draft.id !== "environment";
@@ -1537,7 +1399,7 @@ function PlivoAgentsPanel({ agents, selectedAgentId, onSave, onSelect, onToggle,
   );
 }
 
-function SettingsPanel({ fields, states, organization, templates, plivoAgents, selectedAgentId, newField, setNewField, newState, setNewState, templateDraft, setTemplateDraft, addField, updateField, removeField, addState, saveStates, saveOrganization, saveTemplate, aiQualificationConfig, aiQualificationPrompt, setAiQualificationPrompt, setAiQualificationConfig, saveAiQualificationConfig, savePlivoAgent, selectPlivoAgent, togglePlivoAgent, saving }) {
+function SettingsPanel({ fields, states, organization, templates, plivoAgents, selectedAgentId, newField, setNewField, newState, setNewState, templateDraft, setTemplateDraft, addField, updateField, removeField, addState, saveStates, saveOrganization, saveTemplate, savePlivoAgent, selectPlivoAgent, togglePlivoAgent, saving }) {
   const [org, setOrg] = useState(organization);
   const [fieldDrafts, setFieldDrafts] = useState({});
   const [stateDrafts, setStateDrafts] = useState({});

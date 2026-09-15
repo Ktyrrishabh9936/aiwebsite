@@ -152,12 +152,29 @@ def test_unknown_and_malformed_facts_remain_unknown():
     assert data.product_fit is None and data.eligibility is None
     assert data.budget.value is None
     assert data.attributes == {}
+    assert LeadQualificationEngine().process(call, QualificationProfile()).qualification_score is None
     assert connected({}, QualificationProfile(required_information=["budget"])).lead_status == "PARTIALLY_QUALIFIED"
 
 
 def test_budget_can_supply_eligibility_points():
     result = connected(full_data(eligibility=None), QualificationProfile(price_range={"min": 8000000, "currency": "INR"}))
     assert result.score_breakdown["budget_eligibility"] == 20
+
+
+def test_structured_budget_range_without_transcript_preserves_known_information():
+    result = process({"CallStatus": "completed", "answers": {"budget": "₹80–90 lakh", "preferred_location": "Noida"}})
+    assert result.qualification_data.budget.min == 8000000
+    assert result.qualification_data.budget.max == 9000000
+    assert result.qualification_data.budget.currency == "INR"
+    assert result.qualification_data.location == "Noida"
+    assert result.qualification_data.purchase_timeline is None
+    assert result.lead_status == "PARTIALLY_QUALIFIED"
+
+
+def test_budget_currency_is_not_invented():
+    call = PlivoResponseAdapter().adapt({"answers": {"budget": "2000000"}}, "lead")
+    assert call.extracted_data["budget"]["value"] == 2000000
+    assert call.extracted_data["budget"]["currency"] is None
 
 
 def test_custom_facts_require_transcript_evidence(monkeypatch):
