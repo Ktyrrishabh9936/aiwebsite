@@ -85,6 +85,16 @@ MANAGER_SYSTEM = (
     "(content, seo, creative, analytics). Tasks must be specific and measurable."
 )
 
+MANAGER_CHAT_STYLE = (
+    "Answer the user's question immediately in plain, conversational language. "
+    "Default to no more than 80 words and four short sentences. Do not restate the request, "
+    "add an introduction, repeat the same point, or end with a summary. Avoid headings unless "
+    "the user asks for a plan or comparison. Use at most three short bullets when bullets improve "
+    "clarity. Give one clear recommendation or next action. If the request is too broad, ask one "
+    "focused question instead of writing an essay. Provide a longer answer only when the user "
+    "explicitly asks for detail."
+)
+
 
 async def build_roadmap(model_id, brain):
     brain_str = json.dumps(brain, ensure_ascii=False)[:6000]
@@ -129,14 +139,21 @@ At least half the tasks must be content agent blog_post tasks. Use seo_audit for
     return data.get("tasks", [])
 
 
-async def manager_chat_stream(model_id, brain, roadmap, history, user_message):
+async def manager_chat_stream(model_id, brain, roadmap, history, user_message, reply_instructions=""):
     brain_str = json.dumps(brain.get("business_profile", {}), ensure_ascii=False)[:2500]
     strat = roadmap.get("strategy_summary", "") if roadmap else ""
     convo = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in history[-6:])
     system = (
         MANAGER_SYSTEM
         + f"\n\nBusiness context: {brain_str}\nStrategy: {strat}\n"
-        + "Speak as a decisive growth manager. Be concise, actionable, and reference the business specifics."
+        + "Speak as a calm, decisive growth manager and reference the business specifics. "
+        + MANAGER_CHAT_STYLE
+        + " You have read context here, not an executable tool interface. Never claim you created, "
+          "changed, assigned, called, or deleted anything. Supported CRM writes are handled before "
+          "this response by the backend; if you receive an action request here, ask for clarification "
+          "or explain that it cannot be performed in this conversation. Task creation, task execution, "
+          "property writes and phone calls are not available through this conversation."
+        + f"\n{reply_instructions}"
     )
     prompt = f"Conversation so far:\n{convo}\n\nUSER: {user_message}\n\nManager reply:"
     async for delta in _stream(model_id, system, prompt):
@@ -145,7 +162,7 @@ async def manager_chat_stream(model_id, brain, roadmap, history, user_message):
 
 async def _stream(model_id, system, prompt):
     from llm_service import stream_text
-    async for d in stream_text(model_id, system, prompt):
+    async for d in stream_text(model_id, system, prompt, max_tokens=300):
         yield d
 
 

@@ -25,6 +25,8 @@ from auth import build_auth_router, get_current_user, seed_admin
 from coding import build_coding_router
 import agents
 import llm_service
+from manager_service import ManagerService
+from manager_voice import build_voice_router, initialize_voice_storage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("server")
@@ -608,7 +610,7 @@ def _extract_note_body(message):
     return ""
 
 
-async def try_manager_crm_action(ws_id, message, settings, leads):
+async def try_manager_crm_action(ws_id, message, settings, leads, *, source="web"):
     from crm import default_field_values, normalize_lead_note, validate_field_values
 
     text = str(message or "")
@@ -629,10 +631,14 @@ async def try_manager_crm_action(ws_id, message, settings, leads):
     if is_note:
         body = _extract_note_body(text) or text
         note_payload = {"body": body, "author": "Manager Chat"}
-        if "plivo" in lower or "call" in lower or "called" in lower:
+        if source == "voice":
+            note_payload.update({"author": "AI Manager Phone", "source": "ai_manager_voice"})
+        elif "plivo" in lower or "call" in lower or "called" in lower:
             note_payload.update({"source": "call_agent", "call_provider": "plivo", "summary": body})
         note = normalize_lead_note(note_payload)
-        await db.crm_leads.update_one({"workspace_id": ws_id, "_id": oid(lead["id"])}, {"$push": {"lead_notes": note}, "$set": updates})
+        result = await db.crm_leads.update_one({"workspace_id": ws_id, "_id": oid(lead["id"])}, {"$push": {"lead_notes": note}, "$set": updates})
+        if result.matched_count != 1:
+            raise HTTPException(409, "Lead no longer available")
         actions.append("added a lead note")
 
     states = {s["key"]: s for s in settings.get("states", [])}
@@ -670,7 +676,9 @@ async def try_manager_crm_action(ws_id, message, settings, leads):
             "assigned_salesperson": values.get("assigned_salesperson"),
         })
     if len(updates) > 1:
-        await db.crm_leads.update_one({"workspace_id": ws_id, "_id": oid(lead["id"])}, {"$set": updates})
+        result = await db.crm_leads.update_one({"workspace_id": ws_id, "_id": oid(lead["id"])}, {"$set": updates})
+        if result.matched_count != 1:
+            raise HTTPException(409, "Lead no longer available")
     if actions:
         name = (lead.get("field_values") or {}).get("full_name") or lead.get("phone") or lead.get("id")
         return f"Done. I {', '.join(actions)} for {name}."
@@ -678,6 +686,9 @@ async def try_manager_crm_action(ws_id, message, settings, leads):
 
 
 # ---------------- MANAGER CHAT (SSE) ----------------
+manager_service = ManagerService(db, crm_manager_context, try_manager_crm_action)
+
+
 @api.post("/workspaces/{ws_id}/chat")
 async def manager_chat(ws_id: str, request: Request, body: dict = Body(...)):
     user = await require_user(request)
@@ -685,25 +696,13 @@ async def manager_chat(ws_id: str, request: Request, body: dict = Body(...)):
     message = body.get("message", "")
     history = body.get("history", [])
     model_id = body.get("model_id") or ws.get("model_id")
-    roadmap = {"strategy_summary": ws.get("strategy_summary", ""), "months": ws.get("roadmap", [])}
-    crm_settings, crm_leads, crm_analytics, crm_lead_summaries = await crm_manager_context(ws_id)
-    action_result = await try_manager_crm_action(ws_id, message, crm_settings, crm_leads)
-
     async def gen():
         try:
-            if action_result:
-                yield action_result
-                return
-            crm_context = json.dumps(_compact_crm_context(crm_analytics, crm_lead_summaries), ensure_ascii=False)[:9000]
-            crm_message = (
-                f"{message}\n\nCRM workspace knowledge JSON:\n{crm_context}\n\n"
-                "Use the CRM data above for lead, customer, payment, due amount, daily, and monthly analytics questions. "
-                "If the user asks for a CRM update, explain the exact lead identifier needed unless it was already clear."
-            )
-            async for delta in agents.manager_chat_stream(model_id, ws.get("brain", {}), roadmap, history, crm_message):
+            async for delta in manager_service.stream(ws, message, history, model_id=model_id):
                 yield delta
-        except Exception as e:
-            yield f"\n[error: {str(e)[:120]}]"
+        except Exception:
+            logger.warning("manager_web_request_failed", extra={"workspace_id": ws_id})
+            yield "\n[error: AI manager request failed. Please retry.]"
 
     return StreamingResponse(gen(), media_type="text/plain",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -749,7 +748,8 @@ async def plivo_outbound_answer(ws_id: str, lead_id: str, request: Request):
 
     params = await _plivo_params(request)
     await require_plivo_signature(request, await _plivo_body_params(request))
-    cfg = plivo_config()
+    from plivo_calls import workspace_plivo_config
+    cfg = await workspace_plivo_config(request, ws_id)
     lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
     if not lead:
         raise HTTPException(404, "Lead not found")
@@ -809,20 +809,20 @@ async def plivo_agent_callback(request: Request):
     logger.info("Plivo agent callback received call_uuid=%s conversation_id=%s", call_uuid, conversation_id)
 
     if not call_uuid:
-        logger.warning("Plivo agent callback missing call_uuid payload=%s", json.dumps(payload, default=str)[:500])
+        logger.warning("Plivo agent callback missing call_uuid")
         raise HTTPException(422, "Missing CallUUID")
 
-    lead = await db.crm_leads.find_one({"plivo_call_uuid": str(call_uuid)})
+    lead = await db.crm_leads.find_one({"workspace_id": request.query_params.get("workspace_id"), "plivo_call_uuid": str(call_uuid)})
     if not lead:
-        lead = await db.crm_leads.find_one({"qualification_call.call_uuid": str(call_uuid)})
+        lead = await db.crm_leads.find_one({"workspace_id": request.query_params.get("workspace_id"), "qualification_call.call_uuid": str(call_uuid)})
     if not lead and conversation_id:
-        lead = await db.crm_leads.find_one({"qualification_call.session_id": str(conversation_id)})
+        lead = await db.crm_leads.find_one({"workspace_id": request.query_params.get("workspace_id"), "qualification_call.session_id": str(conversation_id)})
     if not lead:
-        session = await db.plivo_call_sessions.find_one({"$or": [{"provider_identifiers.call_uuid": str(call_uuid)}, {"provider_identifiers.request_uuid": str(call_uuid)}]})
+        session = await db.plivo_call_sessions.find_one({"workspace_id": request.query_params.get("workspace_id"), "$or": [{"provider_identifiers.call_uuid": str(call_uuid)}, {"provider_identifiers.request_uuid": str(call_uuid)}]})
         if session and ObjectId.is_valid(session.get("lead_id", "")):
             lead = await db.crm_leads.find_one({"_id": ObjectId(session["lead_id"]), "workspace_id": session["workspace_id"]})
     if not lead:
-        logger.warning("Plivo agent callback could not resolve CRM lead for call_uuid=%s conversation_id=%s payload=%s", call_uuid, conversation_id, json.dumps(payload, default=str)[:500])
+        logger.warning("Plivo agent callback could not resolve CRM lead")
         raise HTTPException(404, "Call could not be matched to a lead")
 
     ws_id = lead.get("workspace_id")
@@ -839,7 +839,10 @@ async def plivo_calls_debug(ws_id: str, request: Request, lead_id: str = None):
 
     user = await require_user(request)
     await owned_workspace(ws_id, user)
-    return plivo_config_debug(public_base_url(request), ws_id, lead_id)
+    from voice_api import webhooks
+    from voice_config import load_config, public_config
+    doc, _ = await load_config(db, ws_id, "plivo", enabled=False)
+    return {**public_config(doc), "webhooks": webhooks(ws_id, "plivo")}
 
 
 @api.api_route("/plivo/workspaces/{ws_id}/calls/outbound/status", methods=["GET", "POST"])
@@ -870,7 +873,8 @@ async def plivo_inbound_answer(ws_id: str, request: Request):
 
     params = await _plivo_params(request)
     await require_plivo_signature(request, await _plivo_body_params(request))
-    cfg = plivo_config()
+    from plivo_calls import workspace_plivo_config
+    cfg = await workspace_plivo_config(request, ws_id)
     caller = params.get("From") or params.get("CallerName") or ""
     lead, created = await find_or_create_inbound_lead(db, ws_id, caller)
     await log_plivo_inbound_started(ws_id, lead["id"], params, created)
@@ -1282,8 +1286,11 @@ api.include_router(google_sheets_router)
 api.include_router(workflows_router)
 api.include_router(crm_router)
 api.include_router(plivo_agents_router)
+from voice_api import router as voice_providers_router
+api.include_router(voice_providers_router)
 api.include_router(qualification_router)
 api.include_router(properties_router)
+api.include_router(build_voice_router(db, manager_service, owned_workspace, require_user))
 
 app.include_router(build_auth_router(db))
 app.include_router(build_coding_router(db))
@@ -1302,6 +1309,13 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     app.state.db = db
+    try:
+        await initialize_voice_storage(db)
+        app.state.voice_storage_ready = True
+    except Exception:
+        # The optional voice test must not prevent the existing application starting.
+        app.state.voice_storage_ready = False
+        logger.warning("voice_storage_initialization_failed")
     await db.users.create_index("email", unique=True)
     await db.password_reset_tokens.create_index("token_hash", unique=True)
     await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
@@ -1313,6 +1327,7 @@ async def startup():
     await db.crm_leads.create_index([("workspace_id", 1), ("sheet_row_key", 1)], unique=True)
     await db.crm_leads.create_index([("workspace_id", 1), ("plivo_call_uuid", 1)])
     await db.crm_settings.create_index("workspace_id", unique=True)
+    await db.workspace_voice_provider_configs.create_index([("workspace_id", 1), ("provider", 1)], unique=True)
     await db.plivo_agent_configs.create_index([("workspace_id", 1), ("enabled", 1), ("is_default", 1)])
     await db.plivo_call_sessions.create_index([("workspace_id", 1), ("lead_id", 1), ("status", 1)])
     await db.plivo_call_sessions.create_index([("workspace_id", 1), ("created_at", -1)])

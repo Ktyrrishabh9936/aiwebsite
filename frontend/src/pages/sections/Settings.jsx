@@ -1,6 +1,7 @@
+import VoiceProviders from "../../components/VoiceProviders";
 import { useEffect, useState } from "react";
 import { Link, useOutletContext } from "react-router-dom";
-import { Check, Copy, KeyRound, Loader2, RotateCw, ShieldCheck } from "lucide-react";
+import { Check, Copy, KeyRound, Loader2, Phone, PhoneOff, RotateCw, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../../context/AuthContext";
 import api from "../../lib/api";
@@ -12,9 +13,42 @@ export default function Settings() {
   const [savingOrigins, setSavingOrigins] = useState(false);
   const [rotatingKey, setRotatingKey] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [voice, setVoice] = useState({ connected: false, caller_phone: "", service_enabled: false });
+  const [voicePhone, setVoicePhone] = useState("");
+  const [savingVoice, setSavingVoice] = useState(false);
   useEffect(() => {
     setOriginsText((ws.allowed_blog_origins || []).join("\n"));
   }, [ws.allowed_blog_origins]);
+  useEffect(() => {
+    let active = true;
+    api.get(`/ai-manager/voice/workspaces/${ws.id}/connection`).then(({ data }) => {
+      if (active) { setVoice(data); setVoicePhone(data.caller_phone || ""); }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [ws.id]);
+
+  const connectVoice = async () => {
+    setSavingVoice(true);
+    try {
+      const { data } = await api.put(`/ai-manager/voice/workspaces/${ws.id}/connection`, { caller_phone: voicePhone.trim() });
+      setVoice(data);
+      setVoicePhone(data.caller_phone);
+      toast.success("Phone connected to this workspace");
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || "Could not connect this phone");
+    } finally { setSavingVoice(false); }
+  };
+
+  const disconnectVoice = async () => {
+    setSavingVoice(true);
+    try {
+      const { data } = await api.delete(`/ai-manager/voice/workspaces/${ws.id}/connection`);
+      setVoice(data);
+      setVoicePhone("");
+      toast.success("Phone disconnected from this workspace");
+    } catch { toast.error("Could not disconnect this phone"); }
+    finally { setSavingVoice(false); }
+  };
 
   const copyKey = async () => {
     await navigator.clipboard.writeText(ws.public_key || "");
@@ -59,6 +93,29 @@ export default function Settings() {
         <h1 className="font-display text-3xl font-black tracking-tight">Settings</h1>
         <p className="text-muted-foreground mt-1">Manage your account and workspace preferences.</p>
       </div>
+
+      <section className="border border-border rounded-md bg-card p-6 space-y-5">
+        <div className="flex items-start gap-3">
+          <div className="grid h-10 w-10 place-items-center rounded-md bg-primary/10 text-primary"><Phone className="h-5 w-5" /></div>
+          <div>
+            <h2 className="font-display text-xl font-bold">Call your AI Manager</h2>
+            <p className="text-sm text-muted-foreground mt-1">Connect the phone you will call from. Incoming Sarvam calls from this number will use this workspace's AI Manager and business context.</p>
+          </div>
+        </div>
+        <div className="space-y-2">
+          <label className="text-sm font-semibold" htmlFor="voice-phone">Your calling phone number</label>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input id="voice-phone" value={voicePhone} onChange={(e) => setVoicePhone(e.target.value)} placeholder="+919876543210" className="h-10 flex-1 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-1 focus:ring-ring" />
+            <button onClick={connectVoice} disabled={savingVoice || !voicePhone.trim()} className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground disabled:opacity-60">
+              {savingVoice ? <Loader2 className="h-4 w-4 animate-spin" /> : <Phone className="h-4 w-4" />} {voice.connected ? "Update connection" : "Connect phone"}
+            </button>
+            {voice.connected && <button onClick={disconnectVoice} disabled={savingVoice} className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-border px-4 text-sm font-medium hover:bg-accent disabled:opacity-60"><PhoneOff className="h-4 w-4" /> Disconnect</button>}
+          </div>
+          <p className="text-xs leading-5 text-muted-foreground">Use international E.164 format with country code. Connecting the same phone from another workspace moves your calls to that workspace.</p>
+          {voice.connected && <p className="text-sm text-primary">Connected to {ws.name}</p>}
+          {!voice.service_enabled && <p className="text-xs text-amber-600">The connection can be saved, but the Sarvam voice service is currently disabled by the server administrator.</p>}
+        </div>
+      </section>
 
       <section className="border border-border rounded-md bg-card p-6 space-y-5">
         <div>
@@ -127,6 +184,7 @@ export default function Settings() {
         <h2 className="font-display text-xl font-bold">Workspace</h2>
         <p className="text-sm text-muted-foreground mt-1">Use the account menu in the top bar to switch website workspaces or create a new one.</p>
       </section>
+      <VoiceProviders workspaceId={ws.id} />
     </div>
   );
 }

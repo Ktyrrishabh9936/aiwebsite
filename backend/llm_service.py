@@ -148,12 +148,12 @@ async def generate_json(model_id, system, prompt, temperature=0.5, max_tokens=60
     return parse_json(text)
 
 
-async def stream_text(model_id, system, prompt):
+async def stream_text(model_id, system, prompt, max_tokens=None):
     m = _resolve(model_id)
     started = time.monotonic()
     logger.info("AI request start provider=%s model=%s mode=stream", m["provider"], m["real"])
     try:
-        async for delta in _stream_text(model_id, system, prompt):
+        async for delta in _stream_text(model_id, system, prompt, max_tokens=max_tokens):
             yield delta
     except Exception as exc:
         logger.warning("AI request error provider=%s model=%s error_type=%s", m["provider"], m["real"], type(exc).__name__)
@@ -162,7 +162,7 @@ async def stream_text(model_id, system, prompt):
         logger.info("AI request finished provider=%s model=%s latency_ms=%.0f", m["provider"], m["real"], (time.monotonic() - started) * 1000)
 
 
-async def _stream_text(model_id, system, prompt):
+async def _stream_text(model_id, system, prompt, max_tokens=None):
     m = _resolve(model_id)
     if m["provider"] == "bedrock":
         stream = await asyncio.to_thread(
@@ -170,7 +170,7 @@ async def _stream_text(model_id, system, prompt):
                 modelId=m["real"],
                 system=[{"text": system}],
                 messages=[{"role": "user", "content": [{"text": prompt}]}],
-                inferenceConfig={"temperature": 0.7},
+                inferenceConfig={"temperature": 0.7, **({"maxTokens": max_tokens} if max_tokens else {})},
             )
         )
         for event in stream.get("stream", []):
@@ -197,6 +197,8 @@ async def _stream_text(model_id, system, prompt):
             "temperature": 0.7,
             "stream": True,
         }
+        if max_tokens:
+            payload["max_completion_tokens" if m["provider"] == "bedrock_mantle" else "max_tokens"] = max_tokens
         async with httpx.AsyncClient(timeout=120) as c:
             async with c.stream("POST", url, headers=headers, json=payload) as r:
                 r.raise_for_status()

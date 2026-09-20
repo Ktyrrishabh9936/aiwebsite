@@ -36,9 +36,10 @@ QUALIFICATION_CATEGORIES = {"hot", "warm", "cold", "junk"}
 JUNK_DISCONNECTION_REASONS = {"invalid_number", "wrong_contact", "wrong_number", "fake_lead", "duplicate", "spam"}
 JUNK_RESULT_VALUES = {"wrong_contact", "wrong_number", "invalid_number", "fake_lead", "duplicate", "spam", "junk"}
 TERMINAL_CALL_STATUSES = {"completed", "failed", "busy", "no_answer", "rejected", "cancelled", "canceled", "hangup"}
-ACTIVE_CALL_SESSION_STATUSES = {"queued", "started", "accepted", "answered", "reconcile_required"}
+ACTIVE_CALL_SESSION_STATUSES = {"queued", "initiated", "ringing", "started", "accepted", "answered", "in_progress", "reconcile_required"}
 PLIVO_AGENT_AUTH_TYPES = {"none", "bearer", "basic"}
 DEFAULT_AGENT_INPUT_MAPPINGS = {
+    "qualification_profile": "qualification_profile",
     "workspace_id": "workspace_id",
     "lead_id": "lead_id",
     "session_id": "session.id",
@@ -205,8 +206,7 @@ def agent_credentials_configured(agent_config):
         password = str(credentials.get("password") or "").strip()
         if username and password:
             return True
-        env_username, env_password = plivo_basic_credentials_from_env()
-        return bool(env_username and env_password)
+        return bool(agent_config.get("encrypted_credentials"))
     return False
 
 
@@ -240,6 +240,7 @@ def sanitize_agent_config(agent_config):
     out = deepcopy(agent_config)
     out.pop("_id", None)
     out.pop("credentials", None)
+    out.pop("encrypted_credentials", None)
     out["id"] = config_id
     out["credential_ref"] = agent_config.get("credential_ref") or (f"plivo_agent_config:{config_id}:trigger_auth" if config_id else "")
     out["credential_configured"] = agent_credentials_configured(agent_config)
@@ -326,7 +327,7 @@ def legacy_agent_config_from_env():
         "provider_agent_id": flow_id,
         "trigger_url": trigger_url,
         "auth_type": "bearer" if token else "basic" if auth_id and auth_token else "none",
-        "credentials": {"bearer_token": token} if token else {},
+        "credentials": {"bearer_token": token} if token else {"username": auth_id, "password": auth_token},
         "credential_ref": "environment:PLIVO_AGENT_TRIGGER_TOKEN",
         "from_number": from_number,
         "authorized_calling_number": from_number,
@@ -340,35 +341,8 @@ def legacy_agent_config_from_env():
 
 
 async def resolve_plivo_agent_config(db, ws_id, agent_config_id=None):
-    config_id = str(agent_config_id or "").strip()
-    if config_id == "environment":
-        legacy = legacy_agent_config_from_env()
-        if legacy:
-            return legacy
-        raise HTTPException(status_code=400, detail="Environment Plivo agent is not configured")
-    if config_id:
-        try:
-            oid = ObjectId(config_id)
-        except Exception:
-            raise HTTPException(status_code=404, detail="Plivo agent configuration not found")
-        agent = await db[AGENT_CONFIGS_COLLECTION].find_one({"workspace_id": ws_id, "_id": oid})
-        if not agent:
-            raise HTTPException(status_code=404, detail="Plivo agent configuration not found")
-    else:
-        agent = await db[AGENT_CONFIGS_COLLECTION].find_one({"workspace_id": ws_id, "enabled": True, "is_default": True})
-        if not agent:
-            agent = await db[AGENT_CONFIGS_COLLECTION].find_one({"workspace_id": ws_id, "enabled": True})
-    if agent:
-        if not agent.get("enabled", True):
-            raise HTTPException(status_code=400, detail="Selected Plivo agent is disabled")
-        readiness = agent_readiness(agent)
-        if not readiness["ready"]:
-            raise HTTPException(status_code=400, detail=f"Selected Plivo agent is not ready: missing {', '.join(readiness['missing'])}")
-        return agent
-    legacy = legacy_agent_config_from_env()
-    if legacy:
-        return legacy
-    raise HTTPException(status_code=400, detail="No enabled Plivo AI agent is configured for this workspace")
+    from voice_providers import PlivoVoiceProvider
+    return await PlivoVoiceProvider().configuration(db, ws_id, agent_config_id)
 
 
 def _path_value(source, data):
@@ -434,7 +408,7 @@ def trigger_auth_for_agent(agent_config):
         username = str(credentials.get("username") or "").strip()
         password = str(credentials.get("password") or "").strip()
         if not (username and password):
-            username, password = plivo_basic_credentials_from_env()
+            raise HTTPException(409, "Workspace trigger credentials are missing")
         auth = (username, password)
     return headers, auth
 
@@ -496,8 +470,12 @@ async def create_call_session(db, ws_id, lead_id, lead_phone, agent_config, auto
         "_id": ObjectId(),
         "workspace_id": ws_id,
         "lead_id": str(lead_id),
-        "provider": "plivo",
-        "provider_mode": "ai_studio_api_trigger",
+        "provider": agent_config.get("provider", "plivo"),
+        "provider_mode": "agent_api_trigger",
+        "direction": "outbound",
+        "started_at": None,
+        "answered_at": None,
+        "completed_at": None,
         "status": "queued",
         "call_status": "queued",
         "result_status": "pending",
@@ -1140,7 +1118,8 @@ def plivo_config_debug(base=None, ws_id=None, lead_id=None):
     }
     required = ("auth_id", "auth_token", "from_number", "public_base_url")
     missing = [key for key in required if not raw.get(key)]
-    urls = callback_urls(raw["public_base_url"], ws_id, lead_id) if raw["public_base_url"] and ws_id else {}
+    # Debug output must never expose the shared callback token.
+    urls = callback_urls(raw["public_base_url"], ws_id, lead_id, include_auth=False) if raw["public_base_url"] and ws_id else {}
     callbacks = {
         "status_url": urls.get("outbound_status", ""),
         "recording_url": urls.get("recording", ""),
@@ -1164,15 +1143,16 @@ def plivo_config_debug(base=None, ws_id=None, lead_id=None):
     }
 
 
-def callback_urls(base, ws_id, lead_id=None):
+def callback_urls(base, ws_id, lead_id=None, include_auth=True):
     root = f"{base}/api/plivo/workspaces/{ws_id}/calls"
     lead_query = f"?lead_id={lead_id}" if lead_id else ""
+    qualification_result = f"{root}/{lead_id}/qualification/result" if lead_id else ""
     return {
         "outbound_answer": f"{root}/{lead_id}/outbound/answer" if lead_id else "",
         "outbound_status": f"{root}/outbound/status{lead_query}",
         "inbound_answer": f"{root}/inbound/answer",
         "recording": f"{root}/recording{lead_query}",
-        "qualification_result": f"{root}/{lead_id}/qualification/result" if lead_id else "",
+        "qualification_result": qualification_result,
     }
 
 
@@ -1197,16 +1177,23 @@ def validate_signature(method, url, nonce, signature, auth_token, params=None):
     return any(hmac.compare_digest(expected, item.strip()) for item in str(signature).split(","))
 
 
+async def workspace_plivo_config(request, ws_id=None):
+    from crm import db_from
+    from voice_config import load_config
+    ws_id = ws_id or request.path_params.get("ws_id") or request.query_params.get("workspace_id")
+    if not ws_id:
+        raise HTTPException(403, "Workspace context is required; use the workspace callback URL")
+    doc, credentials = await load_config(db_from(request), ws_id, "plivo", enabled=False)
+    return {**doc["config"], **credentials, "agent_trigger_url": doc["config"].get("trigger_url", "")}
+
+
 async def require_plivo_signature(request: Request, params):
-    if os.environ.get("PLIVO_VALIDATE_SIGNATURE", "true").lower() in {"0", "false", "no"}:
-        return
-    auth_token = os.environ.get("PLIVO_AUTH_TOKEN", "").strip()
-    if not auth_token:
-        raise HTTPException(status_code=400, detail="Plivo auth token is not configured")
+    cfg = await workspace_plivo_config(request)
+    auth_token = cfg.get("auth_token", "")
     signature = request.headers.get("X-Plivo-Signature-V3") or request.headers.get("X-Plivo-Signature-Ma-V3")
     nonce = request.headers.get("X-Plivo-Signature-V3-Nonce")
-    if not validate_signature(request.method, public_request_url(request), nonce, signature, auth_token, params):
-        raise HTTPException(status_code=403, detail="Invalid Plivo signature")
+    if not auth_token or not validate_signature(request.method, public_request_url(request), nonce, signature, auth_token, params):
+        raise HTTPException(403, "Invalid Plivo signature")
 
 
 def plivo_xml(body):
@@ -1813,11 +1800,14 @@ async def schedule_first_qualification_call(db, ws_id, lead_id, delay_minutes=5)
     if qualification.get("status") in {"scheduled", "queued", "started", "answered", "completed"}:
         settings = await ensure_crm_settings(db, ws_id)
         return {"status": "skipped", "reason": "qualification call already scheduled or triggered", "lead": decorate_lead(lead, settings)}
+    from qualification_service import resolve_profile
+    workspace = await db.workspaces.find_one({"_id": ObjectId(ws_id)}) or {}
+    profile, _ = await resolve_profile(db, ws_id, lead, workspace)
     now = now_iso()
     scheduled = {
         **qualification,
         "status": "scheduled",
-        "provider": "plivo",
+        "provider": profile.voice_provider,
         "mode": "agent_direct_to_lead",
         "phone": lead_phone,
         "scheduled_for": scheduled_for_iso(delay_minutes, parse_iso_datetime(lead.get("created_at"))),
@@ -1828,7 +1818,7 @@ async def schedule_first_qualification_call(db, ws_id, lead_id, delay_minutes=5)
         "body": f"AI qualification call scheduled for {scheduled['scheduled_for']}.",
         "author": "System",
         "source": "call_agent",
-        "call_provider": "plivo",
+        "call_provider": profile.voice_provider,
         "direction": "outbound",
         "outcome": "scheduled",
         "summary": "AI qualification call scheduled",
@@ -1855,7 +1845,7 @@ async def cancel_scheduled_qualification_call(db, ws_id, lead_id, cancelled_by="
         "body": "Scheduled AI qualification call cancelled by admin.",
         "author": "System",
         "source": "call_agent",
-        "call_provider": "plivo",
+        "call_provider": qualification.get("provider", "plivo"),
         "direction": "outbound",
         "outcome": "cancelled",
         "summary": "Scheduled call cancelled",
@@ -1945,16 +1935,17 @@ def qualification_payload(base, ws_id, lead_id, lead, lead_phone, agent_config=N
 
 async def record_qualification_attempt(db, ws_id, lead_id, status, payload=None, response=None, error="", agent_config=None, session_id=""):
     now = now_iso()
-    payload = payload or {}
+    from qualification_service import audit_payload
+    payload = audit_payload(payload or {})
     response = response or {}
     identifiers = extract_provider_identifiers(response)
     call_uuid = identifiers.get("call_uuid") or identifiers.get("request_uuid") or ""
     agent_snapshot = agent_config_snapshot(agent_config) if agent_config else {}
     note = normalize_lead_note({
         "body": f"AI qualification call {status}" + (f": {error}" if error else ""),
-        "author": "Plivo",
+        "author": (agent_config or {}).get("provider", "plivo").title(),
         "source": "call_agent",
-        "call_provider": "plivo",
+        "call_provider": (agent_config or {}).get("provider", "plivo"),
         "call_id": call_uuid,
         "direction": "outbound",
         "outcome": status,
@@ -1977,7 +1968,7 @@ async def record_qualification_attempt(db, ws_id, lead_id, status, payload=None,
         note["session_id"] = str(session_id)
     qualification = {
         "status": status,
-        "provider": "plivo",
+        "provider": (agent_config or {}).get("provider", "plivo"),
         "mode": "agent_direct_to_lead",
         "session_id": str(session_id or ""),
         "agent_config_id": agent_snapshot.get("id") or "",
@@ -2194,20 +2185,20 @@ def require_agent_callback_token(request: Request):
 
 
 async def require_qualification_callback_auth(request: Request, params):
-    if os.environ.get("PLIVO_AGENT_CALLBACK_TOKEN", "").strip():
-        require_agent_callback_token(request)
+    cfg = await workspace_plivo_config(request)
+    expected = cfg.get("callback_token", "")
+    auth = request.headers.get("authorization", "")
+    supplied = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-arevei-webhook-token", "")
+    if expected and supplied and hmac.compare_digest(expected, supplied):
         return
-    # Signed Plivo callbacks work without a separate shared callback token.
-    auth_token = os.environ.get("PLIVO_AUTH_TOKEN", "").strip()
-    signature = request.headers.get("X-Plivo-Signature-V3") or request.headers.get("X-Plivo-Signature-Ma-V3")
-    nonce = request.headers.get("X-Plivo-Signature-V3-Nonce")
-    if not auth_token or not validate_signature(request.method, public_request_url(request), nonce, signature, auth_token, params):
-        raise HTTPException(403, "A valid Plivo signature or configured callback token is required")
+    await require_plivo_signature(request, params)
 
 
 async def save_qualification_result(db, ws_id, lead_id, payload):
     from qualification_service import PlivoWebhookController
-    return await PlivoWebhookController(db).process(ws_id, lead_id, payload)
+    result = await PlivoWebhookController(db).process(ws_id, lead_id, payload)
+    await db.workspace_voice_provider_configs.update_one({"workspace_id": ws_id, "provider": "plivo"}, {"$set": {"last_callback_at": now_iso()}})
+    return result
 
 
 async def start_qualification_call(db, ws_id, lead_id, request: Request, auto=False, raise_on_error=True, agent_config_id=None):
@@ -2266,8 +2257,15 @@ async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=F
         await record_qualification_attempt(db, ws_id, lead_id, "failed", error=message)
         settings = await ensure_crm_settings(db, ws_id)
         return {"status": "failed", "error": message, "lead": decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)}), settings)}
+    from qualification_service import resolve_profile
+    from voice_providers import get_provider
+    from voice_config import public_base
+    workspace = await db.workspaces.find_one({"_id": ObjectId(ws_id)}) or {}
+    profile, profile_id = await resolve_profile(db, ws_id, lead, workspace)
+    provider = get_provider(profile.voice_provider)
     try:
-        agent_config = await resolve_plivo_agent_config(db, ws_id, agent_config_id)
+        public_base()
+        agent_config = await provider.configuration(db, ws_id, agent_config_id)
     except HTTPException as exc:
         if raise_on_error:
             raise
@@ -2282,41 +2280,33 @@ async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=F
             raise
         settings = await ensure_crm_settings(db, ws_id)
         return {"status": "junk", "error": str(exc.detail), "lead": decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)}), settings)}
-    from qualification_service import resolve_profile
-    workspace = await db.workspaces.find_one({"_id": ObjectId(ws_id)}) or {}
-    profile, profile_id = await resolve_profile(db, ws_id, lead, workspace)
     session = await create_call_session(db, ws_id, lead_id, lead_phone, agent_config, auto=auto)
     session_id = str(session["_id"])
     await update_call_session(db, ws_id, session_id, {"profile_snapshot": profile.model_dump(mode="json"), "profile_id": profile_id})
-    base_payload = qualification_payload(public_base_url(request), ws_id, lead_id, lead, lead_phone, agent_config, session_id)
+    base_payload = qualification_payload(public_base(), ws_id, lead_id, lead, lead_phone, agent_config, session_id)
     base_payload["qualification_profile"] = profile.model_dump(mode="json")
-    payload = build_agent_trigger_payload(base_payload, agent_config, session_id)
-    headers, auth = trigger_auth_for_agent(agent_config)
+    payload = provider.build_payload(base_payload, agent_config, session_id)
+    proof = (payload.get("webhook_config") or {}).get("metadata", {}).get("callback_proof")
+    if proof:
+        await update_call_session(db, ws_id, session_id, {"callback_proof_hash": hashlib.sha256(proof.encode()).hexdigest()})
+    from qualification_service import audit_payload
     await update_call_session(db, ws_id, session_id, {
-        "request_payload": payload,
-        "base_payload_snapshot": base_payload,
+        "request_payload": audit_payload(payload),
+        "base_payload_snapshot": audit_payload(base_payload),
     })
-    logger.info(
-        "starting Plivo AI qualification workspace=%s lead=%s session=%s agent_config=%s flow=%s to=%s",
-        ws_id,
-        lead_id,
-        session_id,
-        agent_id(agent_config),
-        agent_config.get("flow_id") or "",
-        lead_phone,
-    )
-    await record_qualification_attempt(db, ws_id, lead_id, "queued", payload, agent_config=agent_config, session_id=session_id)
+    logger.info("voice_call_start workspace_id=%s lead_id=%s qualification_profile_id=%s provider=%s session_id=%s", ws_id, lead_id, profile_id, provider.name, session_id)
+    await record_qualification_attempt(db, ws_id, lead_id, "queued", base_payload, agent_config=agent_config, session_id=session_id)
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(agent_config["trigger_url"], json=payload, headers=headers, auth=auth)
+            response = await provider.initiate_call(client, agent_config, payload)
     except httpx.TimeoutException as exc:
-        error = f"Plivo AI qualification trigger timed out after the request may have been accepted: {exc}"
+        error = "Provider request timed out; reconcile before retrying"
         await update_call_session(db, ws_id, session_id, {"status": "reconcile_required", "call_status": "reconcile_required", "last_error": error})
-        qualification = await record_qualification_attempt(db, ws_id, lead_id, "reconcile_required", payload, error=error, agent_config=agent_config, session_id=session_id)
+        qualification = await record_qualification_attempt(db, ws_id, lead_id, "reconcile_required", base_payload, error=error, agent_config=agent_config, session_id=session_id)
         settings = await ensure_crm_settings(db, ws_id)
         return {
             "status": "reconcile_required",
-            "provider": "plivo",
+            "provider": provider.name,
             "mode": "agent_direct_to_lead",
             "session_id": session_id,
             "call_uuid": qualification.get("call_uuid", ""),
@@ -2327,9 +2317,9 @@ async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=F
             "lead": decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)}), settings),
         }
     except httpx.HTTPError as exc:
-        error = f"Plivo AI qualification trigger failed: {exc}"
+        error = "Provider unavailable"
         await update_call_session(db, ws_id, session_id, {"status": "failed", "call_status": "failed", "last_error": error})
-        await record_qualification_attempt(db, ws_id, lead_id, "failed", payload, error=error, agent_config=agent_config, session_id=session_id)
+        await record_qualification_attempt(db, ws_id, lead_id, "failed", base_payload, error=error, agent_config=agent_config, session_id=session_id)
         if raise_on_error:
             raise HTTPException(status_code=502, detail=error)
         settings = await ensure_crm_settings(db, ws_id)
@@ -2337,37 +2327,47 @@ async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=F
     response_data = {}
     try:
         response_data = response.json()
+        if not isinstance(response_data, dict):
+            response_data = {}
     except Exception:
-        response_data = {"text": response.text}
+        response_data = {}
     response_data["_http_status"] = response.status_code
     if response.status_code >= 400:
-        error = plivo_error_detail(response)
+        error = "Invalid provider credentials" if response.status_code in (401, 403) else "Provider rejected call request"
+        response_data = {"_http_status": response.status_code}
         await update_call_session(db, ws_id, session_id, {
             "status": "failed",
             "call_status": "failed",
-            "trigger_response": response_data,
+            "trigger_response": {"_http_status": response.status_code},
             "last_error": error,
         })
-        await record_qualification_attempt(db, ws_id, lead_id, "failed", payload, response_data, error, agent_config=agent_config, session_id=session_id)
+        await record_qualification_attempt(db, ws_id, lead_id, "failed", base_payload, response_data, error, agent_config=agent_config, session_id=session_id)
         if raise_on_error:
             raise HTTPException(status_code=502, detail=error)
         settings = await ensure_crm_settings(db, ws_id)
         return {"status": "failed", "error": error, "lead": decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)}), settings)}
-    identifiers = extract_provider_identifiers(response_data)
+    identifiers = provider.identifiers(response_data)
+    if not identifiers.get("call_uuid"):
+        await update_call_session(db, ws_id, session_id, {"status": "reconcile_required", "last_error": "Missing provider call identifier"})
+        await record_qualification_attempt(db, ws_id, lead_id, "reconcile_required", base_payload, error="Missing provider call identifier", agent_config=agent_config, session_id=session_id)
+        return {"status": "reconcile_required", "session_id": session_id}
+    response_data = {**identifiers, "_http_status": response.status_code}
     await update_call_session(db, ws_id, session_id, {
         "status": "started",
         "call_status": "started",
-        "trigger_response": response_data,
+        "trigger_response": {"_http_status": response.status_code},
         "provider_identifiers": identifiers,
+        "provider_call_id": identifiers.get("call_uuid"),
+        "started_at": now_iso(),
     })
-    qualification = await record_qualification_attempt(db, ws_id, lead_id, "started", payload, response_data, agent_config=agent_config, session_id=session_id)
+    qualification = await record_qualification_attempt(db, ws_id, lead_id, "started", base_payload, response_data, agent_config=agent_config, session_id=session_id)
     if auto:
         qualification["auto_triggered"] = True
         await db.crm_leads.update_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)}, {"$set": {"qualification_call": qualification}})
     settings = await ensure_crm_settings(db, ws_id)
     return {
         "status": "started",
-        "provider": "plivo",
+        "provider": provider.name,
         "mode": "agent_direct_to_lead",
         "session_id": session_id,
         "call_uuid": qualification.get("call_uuid", ""),
@@ -2400,7 +2400,11 @@ async def find_or_create_inbound_lead(db, ws_id, caller_phone):
 
 
 async def start_outbound_call(db, ws_id, lead_id, request: Request):
-    cfg = plivo_config()
+    from voice_config import load_config
+    provider_doc, credentials = await load_config(db, ws_id, "plivo")
+    cfg = {**provider_doc["config"], **credentials}
+    if not all(cfg.get(k) for k in ("auth_id", "auth_token", "from_number", "staff_number")):
+        raise HTTPException(409, "Configure workspace account, calling number and staff bridge number")
     settings = await ensure_crm_settings(db, ws_id)
     lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)})
     if not lead:
@@ -2439,7 +2443,7 @@ async def start_outbound_call(db, ws_id, lead_id, request: Request):
             auth=(cfg["auth_id"], cfg["auth_token"]),
         )
     if response.status_code >= 400:
-        detail = plivo_error_detail(response)
+        detail = "Plivo rejected the outbound call request"
         logger.warning("Plivo outbound call failed workspace=%s lead=%s detail=%s", ws_id, lead_id, detail)
         raise HTTPException(status_code=502, detail=detail)
     data = response.json()

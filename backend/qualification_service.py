@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
@@ -23,9 +24,12 @@ def stable_id(*values):
 
 def audit_payload(value):
     if isinstance(value, dict):
-        return {key: "[redacted]" if str(key).lower() in {"token", "authorization", "access_token", "api_key", "password"} else audit_payload(item) for key, item in value.items()}
+        return {key: "[redacted]" if str(key).lower() in {"token", "authorization", "access_token", "api_key", "password", "auth_token", "bearer_token", "callback_token", "callback_proof", "credentials", "webhook_config", "encrypted_credentials", "secret"} else audit_payload(item) for key, item in value.items()}
     if isinstance(value, list):
         return [audit_payload(item) for item in value]
+    if isinstance(value, str):
+        import re
+        return re.sub(r"([?&](?:token|api_key|auth_token)=)[^&\s\"]+", r"\1[redacted]", value, flags=re.I)
     return value
 
 
@@ -156,15 +160,18 @@ class CRMLeadUpdateService:
         session_query = {"workspace_id": ws_id, "lead_id": str(lead["_id"]), "$or": [{"provider_identifiers.call_uuid": call.provider_call_id}, {"provider_identifiers.request_uuid": call.provider_call_id}]}
         if q.get("session_id") and ObjectId.is_valid(q["session_id"]) and (lead.get("qualification_call") or {}).get("call_uuid") == call.provider_call_id:
             session_query = {"_id": ObjectId(q["session_id"]), "workspace_id": ws_id}
-        await self.db.plivo_call_sessions.update_one(session_query, {"$set": {"status": "completed", "result_status": "received", "crm_sync_status": "synced", "engine_result": model, "updated_at": now}})
+        await self.db.plivo_call_sessions.update_one(session_query, {"$set": {"status": call.call_status or "completed", "call_status": call.call_status, "duration": call.duration_seconds, "transcript": call.transcript, "recording_url": call.recording_url, "completed_at": now, "result_status": "received", "crm_sync_status": "synced", "engine_result": model, "updated_at": now}})
 
 
-class PlivoWebhookController:
+class QualificationWebhookController:
     """Routes authenticate first. Claims, normalization, processing and writes live here."""
     def __init__(self, db):
         self.db = db
 
-    async def process(self, ws_id, lead_id, raw):
+    async def process(self, ws_id, lead_id, raw, provider="plivo"):
+        from voice_providers import get_provider
+        adapter = get_provider(provider)
+        processing_started = time.monotonic()
         from crm import decorate_lead, ensure_crm_settings
         if not ObjectId.is_valid(lead_id) or not ObjectId.is_valid(ws_id):
             raise HTTPException(422, "Invalid lead or workspace identifier")
@@ -174,8 +181,13 @@ class PlivoWebhookController:
         if not lead:
             raise HTTPException(404, "Lead not found")
         now = datetime.now(timezone.utc)
-        event_id = stable_id("qualification_event", ws_id, lead_id, raw)
-        event = {"_id": event_id, "workspace_id": ws_id, "lead_id": lead_id, "provider": "plivo", "kind": "qualification_engine", "idempotency_key": f"engine:{event_id}", "payload": raw, "processing_status": "received", "received_at": now.isoformat(), "created_at": now.isoformat()}
+        active = lead.get("qualification_call") or {}
+        active_provider = active.get("provider", "plivo")
+        normalized = adapter.normalize(raw, lead_id, (lead.get("qualification_call") or {}).get("call_uuid", ""))
+        if active_provider != provider and normalized.provider_call_id == active.get("call_uuid"):
+            raise HTTPException(409, "Callback provider does not match the call")
+        event_id = stable_id("qualification_event", ws_id, lead_id, provider, normalized.model_dump(mode="json", exclude={"raw_provider_data"}))
+        event = {"_id": event_id, "workspace_id": ws_id, "lead_id": lead_id, "provider": provider, "kind": "qualification_engine", "idempotency_key": f"engine:{event_id}", "payload": raw, "processing_status": "received", "received_at": now.isoformat(), "created_at": now.isoformat()}
         try:
             await self.db.plivo_call_events.insert_one(event)
         except DuplicateKeyError:
@@ -194,12 +206,12 @@ class PlivoWebhookController:
             await self.db.plivo_call_events.update_one({"_id": event_id}, {"$set": {"processing_status": "processing"}})
             lead = claimed
             workspace = await self.db.workspaces.find_one({"_id": ObjectId(ws_id)}) or {}
-            call = PlivoResponseAdapter().adapt(raw, lead_id, (lead.get("qualification_call") or {}).get("call_uuid", ""))
-            session = await self.db.plivo_call_sessions.find_one({"workspace_id": ws_id, "lead_id": lead_id, "$or": [{"provider_identifiers.call_uuid": call.provider_call_id}, {"provider_identifiers.request_uuid": call.provider_call_id}, *([{"_id": ObjectId(call.provider_call_id)}] if ObjectId.is_valid(call.provider_call_id) else [])]})
+            call = adapter.normalize(raw, lead_id, (lead.get("qualification_call") or {}).get("call_uuid", ""))
+            session = await self.db.plivo_call_sessions.find_one({"workspace_id": ws_id, "lead_id": lead_id, "provider": {"$in": ["plivo", None]} if provider == "plivo" else provider, "$or": [{"provider_identifiers.call_uuid": call.provider_call_id}, {"provider_identifiers.request_uuid": call.provider_call_id}, *([{"_id": ObjectId(call.provider_call_id)}] if ObjectId.is_valid(call.provider_call_id) else [])]})
             if not session and call.provider_call_id == (lead.get("qualification_call") or {}).get("call_uuid"):
                 session_id = (lead.get("qualification_call") or {}).get("session_id")
                 if session_id and ObjectId.is_valid(session_id):
-                    session = await self.db.plivo_call_sessions.find_one({"_id": ObjectId(session_id), "workspace_id": ws_id, "lead_id": lead_id})
+                    session = await self.db.plivo_call_sessions.find_one({"_id": ObjectId(session_id), "workspace_id": ws_id, "lead_id": lead_id, "provider": {"$in": ["plivo", None]} if provider == "plivo" else provider})
             history_id = stable_id("qualification_call", ws_id, lead_id, call.provider, str(session["_id"]) if session else call.provider_call_id)
             previous = await self.db.crm_call_logs.find_one({"_id": history_id})
             snapshot = saved if saved.get("profile_snapshot") else previous if previous and previous.get("profile_snapshot") else session
@@ -209,6 +221,10 @@ class PlivoWebhookController:
                 profile, profile_id = await resolve_profile(self.db, ws_id, lead, workspace)
             if previous:
                 old = CallResult.model_validate(previous["call_result"])
+                progression = {"unknown": 0, "queued": 1, "initiated": 2, "started": 2, "accepted": 2, "ringing": 3, "answered": 4, "in_progress": 5}
+                if (old.terminal and not call.terminal) or (not call.terminal and progression.get(call.call_status, 0) < progression.get(old.call_status, 0)):
+                    await self.db.plivo_call_events.update_one({"_id": event_id}, {"$set": {"processing_status": "processed", "result": "stale"}})
+                    return {"ok": True, "status": "stale"}
                 if not call.outcome_hint and not call.transcript and not call.extracted_data and not call.callback_requested:
                     call.outcome_hint = old.outcome_hint
                     call.connection_status = old.connection_status
@@ -228,6 +244,7 @@ class PlivoWebhookController:
                 call.ended_at = call.ended_at or old.ended_at
                 if old.transcript or old.extracted_data:
                     call.connection_status = "connected"
+                    call.call_status = "completed" if old.terminal else old.call_status
                     if call.outcome_hint in RETRYABLE or not call.outcome_hint:
                         call.outcome_hint = old.outcome_hint or Outcome.CONNECTED
                 call.callback_at = call.callback_at or old.callback_at
@@ -246,6 +263,10 @@ class PlivoWebhookController:
             event_time = call.ended_at or call.started_at
             stale = bool(active_id and not same_call and (previous or event_time and prior_time and event_time < prior_time))
             if not call.terminal:
+                if session:
+                    await self.db.plivo_call_sessions.update_one({"_id": session["_id"], "workspace_id": ws_id}, {"$set": {"status": call.call_status, "call_status": call.call_status, "updated_at": now.isoformat()}})
+                if same_call:
+                    await self.db.crm_leads.update_one(query, {"$set": {"qualification_call.status": call.call_status}})
                 await self.db.plivo_call_events.update_one({"_id": event_id}, {"$set": {"processing_status": "processed", "result": "nonterminal"}})
                 return {"ok": True, "status": "in_progress"}
             if not stale:
@@ -263,6 +284,7 @@ class PlivoWebhookController:
                 call.summary = summary
                 result = LeadQualificationEngine().process(call, profile, data, attempts, confidence)
                 await self.db.plivo_call_events.update_one({"_id": event_id}, {"$set": {"decision": result.model_dump(mode="json"), "profile_snapshot": profile.model_dump(mode="json"), "profile_id": profile_id}})
+            logger.info(json.dumps({"event": "qualification_result", "workspace_id": ws_id, "lead_id": lead_id, "qualification_profile_id": profile_id, "provider": provider, "provider_call_id": call.provider_call_id, "session_id": str(session["_id"]) if session else None, "normalized_status": call.call_status, "qualification_status": result.lead_status.value, "processing_duration_ms": round((time.monotonic() - processing_started) * 1000)}))
             if not stale or result.call_outcome == Outcome.DND_REQUESTED:
                 await CRMLeadUpdateService(self.db).apply(ws_id, lead, call, result, profile, profile_id, event, history_id, attempts)
             await self.db.crm_call_logs.update_one({"_id": history_id}, {"$set": {"result": result.model_dump(mode="json"), "profile_id": profile_id, "profile_snapshot": profile.model_dump(mode="json"), "status": "processed", "call_result": call.model_dump(mode="json")}})
@@ -270,11 +292,15 @@ class PlivoWebhookController:
             await self.db.crm_leads.update_one({**query, "qualification_processing.event_id": str(event_id)}, {"$set": {"qualification_processing.status": "completed"}})
             return {"ok": True, "status": "completed", "event_id": str(event_id), "qualification_result": result.model_dump(mode="json"), "lead": decorate_lead(await self.db.crm_leads.find_one(query), await ensure_crm_settings(self.db, ws_id))}
         except Exception as exc:
+            logger.warning("qualification_callback_failed workspace_id=%s lead_id=%s provider=%s error_code=%s", ws_id, lead_id, provider, type(exc).__name__)
             await self.db.plivo_call_events.update_one({"_id": event_id}, {"$set": {"processing_status": "failed", "error_type": type(exc).__name__}})
             await self.db.crm_leads.update_one({**query, "qualification_processing.event_id": str(event_id)}, {"$set": {"qualification_processing.status": "failed"}})
             raise
         finally:
             await self.db.crm_leads.update_one({**query, "qualification_lock.event": str(event_id)}, {"$unset": {"qualification_lock": ""}})
+
+
+PlivoWebhookController = QualificationWebhookController  # Existing imports remain valid.
 
 
 class PlivoCallTriggerService:

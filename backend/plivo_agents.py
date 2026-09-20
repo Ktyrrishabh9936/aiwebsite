@@ -3,6 +3,7 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request
 
 from crm import db_from, require_workspace_access
 from models import now_iso
+from voice_config import encrypt, decrypt
 from plivo_calls import (
     AGENT_CONFIGS_COLLECTION,
     CALL_SESSIONS_COLLECTION,
@@ -43,7 +44,7 @@ async def _selected_agent_id(db, ws_id):
     first = await db[AGENT_CONFIGS_COLLECTION].find_one({"workspace_id": ws_id, "enabled": True})
     if first:
         return str(first["_id"])
-    legacy = legacy_agent_config_from_env()
+    legacy = None
     return "environment" if legacy else ""
 
 
@@ -52,7 +53,7 @@ async def list_plivo_agents(ws_id: str, request: Request):
     await require_workspace_access(request, ws_id)
     db = db_from(request)
     agents = await _workspace_agents(db, ws_id)
-    legacy = legacy_agent_config_from_env()
+    legacy = None
     return {
         "agents": agents,
         "selected_agent_config_id": await _selected_agent_id(db, ws_id),
@@ -70,6 +71,7 @@ async def create_plivo_agent(ws_id: str, request: Request, body: dict = Body(...
     existing_default = await db[AGENT_CONFIGS_COLLECTION].find_one({"workspace_id": ws_id, "enabled": True, "is_default": True})
     if not existing_default and config.get("enabled", True):
         config["is_default"] = True
+    config["encrypted_credentials"] = encrypt(ws_id, "plivo", config.pop("credentials", {}))
     result = await db[AGENT_CONFIGS_COLLECTION].insert_one(config)
     config["_id"] = result.inserted_id
     credential_ref = f"plivo_agent_config:{result.inserted_id}:trigger_auth"
@@ -93,14 +95,17 @@ async def update_plivo_agent(ws_id: str, agent_id: str, request: Request, body: 
     existing = await db[AGENT_CONFIGS_COLLECTION].find_one({"workspace_id": ws_id, "_id": oid(agent_id)})
     if not existing:
         raise HTTPException(status_code=404, detail="Plivo agent configuration not found")
+    if existing.get("encrypted_credentials"):
+        existing["credentials"] = decrypt(ws_id, "plivo", existing["encrypted_credentials"])
     config = normalize_agent_config(body, existing)
+    config["encrypted_credentials"] = encrypt(ws_id, "plivo", config.pop("credentials", {}))
     config.pop("_id", None)
     config["workspace_id"] = ws_id
     if not config.get("credential_ref"):
         config["credential_ref"] = f"plivo_agent_config:{agent_id}:trigger_auth"
     if not config.get("enabled", True):
         config["is_default"] = False
-    await db[AGENT_CONFIGS_COLLECTION].update_one({"workspace_id": ws_id, "_id": oid(agent_id)}, {"$set": config})
+    await db[AGENT_CONFIGS_COLLECTION].update_one({"workspace_id": ws_id, "_id": oid(agent_id)}, {"$set": config, "$unset": {"credentials": ""}})
     if config.get("is_default"):
         await db[AGENT_CONFIGS_COLLECTION].update_many(
             {"workspace_id": ws_id, "_id": {"$ne": oid(agent_id)}},
@@ -146,4 +151,6 @@ async def list_plivo_call_sessions(
         query["lead_id"] = str(lead_id)
     safe_limit = max(1, min(int(limit or 25), 100))
     docs = await db[CALL_SESSIONS_COLLECTION].find(query).sort("created_at", -1).to_list(safe_limit)
-    return [doc_out(doc) for doc in docs]
+    # Historic payload snapshots may contain legacy callback query tokens.
+    fields = {"_id", "workspace_id", "lead_id", "provider", "status", "call_status", "created_at", "updated_at", "provider_identifiers", "profile_id", "result_status", "crm_sync_status", "duration", "completed_at", "engine_result", "provider_session_id", "recording_reference", "transcript_status"}
+    return [doc_out({k: v for k, v in doc.items() if k in fields}) for doc in docs]

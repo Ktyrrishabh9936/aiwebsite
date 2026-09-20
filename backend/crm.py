@@ -277,6 +277,10 @@ def decorate_lead(doc, settings):
         out["payment_plan"] = recalculate_payment_plan(out.get("payment_plan") or {}, receipts)
     elif out.get("conversion_type") == "single_payment":
         out["payment_summary"] = single_payment_summary(out, receipts)
+    from qualification_service import audit_payload
+    for field in ("qualification_call", "communication_summary", "lead_notes"):
+        if field in out:
+            out[field] = audit_payload(out[field])
     return out
 
 

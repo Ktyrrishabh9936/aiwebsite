@@ -124,7 +124,7 @@ class PlivoResponseAdapter:
             duration = max(0, float(pick("duration", "CallDuration", "Duration", "RecordingDuration", "recording_duration") or 0))
         except (ValueError, TypeError):
             duration = 0
-        terminal = status not in {"ringing", "queued", "started", "accepted", "answered", "in_progress"} or bool(transcript or source)
+        terminal = status not in {"ringing", "queued", "initiated", "started", "accepted", "answered", "in_progress", "unknown"} or bool(transcript or source)
         connected = bool(transcript or source or status in {"completed", "answered", "connected", "hangup"})
         call_id = str(pick("call_uuid", "CallUUID", "CallUuid", "RecordingCallUUID", "request_uuid", "conversation_id", "session_id") or fallback_call_id or "")
         if not call_id:

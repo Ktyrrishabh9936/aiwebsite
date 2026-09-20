@@ -30,7 +30,7 @@ async def profiles(ws_id: str, request: Request):
     from plivo_calls import ensure_calling_workflow_config
     workflow = await ensure_calling_workflow_config(db, ws_id)
     template = QualificationProfile(retry={"max_attempts": workflow.get("max_attempts", 4), "retry_rules": [{"outcome": o.value, "delay_minutes": workflow.get("retry_delay_minutes", 30)} for o in sorted(RETRYABLE)]})
-    return {"profiles": [public(doc) for doc in docs], "default_profile_id": ws.get("qualification_profile_id"), "legacy_config": ws.get("ai_qualification_config"), "template": template.model_dump(mode="json"), "callback_authentication": "Shared callback token" if os.environ.get("PLIVO_AGENT_CALLBACK_TOKEN", "").strip() else "Plivo signature required"}
+    return {"profiles": [public(doc) for doc in docs], "default_profile_id": ws.get("qualification_profile_id"), "legacy_config": ws.get("ai_qualification_config"), "template": template.model_dump(mode="json"), "callback_authentication": "Workspace provider authentication; see Settings > Voice Providers"}
 
 
 @router.post("/profiles")

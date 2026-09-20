@@ -216,7 +216,7 @@ export default function CrmInbox() {
     return plivoAgentState.legacy_environment_agent ? [...stored, plivoAgentState.legacy_environment_agent] : stored;
   }, [plivoAgentState]);
   const enabledPlivoAgents = useMemo(() => plivoAgents.filter((agent) => agent.enabled !== false && agent.readiness?.ready !== false), [plivoAgents]);
-  const hasCallableAgent = enabledPlivoAgents.some((agent) => agent.id === selectedAgentId);
+  const hasCallableAgent = true; // Backend resolves the lead profile and validates its workspace provider.
   const totalPages = Math.max(1, Math.ceil((pagination.total || 0) / pagination.limit));
 
   const selectLead = (lead) => {
@@ -607,7 +607,7 @@ export default function CrmInbox() {
     if (!lead?.id) return;
     try {
       setCallingLeadId(lead.id);
-      const payload = selectedAgentId ? { agent_config_id: selectedAgentId } : {};
+      const payload = {}; // Qualification profile selects the provider.
       const r = await api.post(`/workspaces/${wsId}/crm/leads/${lead.id}/calls/outbound`, payload);
       if (r.data?.status === "already_active") {
         toast.info(r.data.reason || "AI qualification call is already in progress");
@@ -688,7 +688,7 @@ export default function CrmInbox() {
               <FilterButton active={recordView === "trash"} onClick={() => { setRecordView("trash"); setStatusFilter("all"); setPage(1); }}><Trash2 className="w-3.5 h-3.5" /> Trash</FilterButton>
             </div>
             <div className="flex gap-2 w-full sm:w-auto">
-              <AgentCallSelector agents={enabledPlivoAgents} selectedAgentId={selectedAgentId} setSelectedAgentId={setSelectedAgentId} />
+              <Link className="text-xs text-primary whitespace-nowrap" to={`/app/w/${wsId}/qualification`}>Voice provider: qualification profile</Link>
               <button onClick={openCreateLead} className="inline-flex items-center gap-2 px-3 h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold whitespace-nowrap"><Plus className="w-4 h-4" /> New Lead</button>
               <div className="relative flex-1 sm:w-72">
                 <Search className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
@@ -1168,11 +1168,6 @@ function QualificationSummary({ communication, qualification, saving, onCancel }
         </div>
       )}
       {(communication.latest_summary || qualification.summary) && <p className="text-sm leading-relaxed">{communication.latest_summary || qualification.summary}</p>}
-      <div className="grid sm:grid-cols-3 gap-3">
-        <MiniList title="Collected" items={communication.collected_information || qualification.collected_information} empty="Nothing captured yet" />
-        <MiniList title="To Discuss" items={communication.pending_discussion || qualification.pending_discussion} empty="No pending topics" />
-        <MiniList title="Next Steps" items={communication.recommended_next_steps || qualification.recommended_next_steps} empty="No next step set" />
-      </div>
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         {communication.total_call_count ? <span>{communication.total_call_count} call{communication.total_call_count === 1 ? "" : "s"} tracked</span> : null}
         {(communication.disconnection_reason || qualification.disconnection_reason) && <span>Reason: {communication.disconnection_reason || qualification.disconnection_reason}</span>}
@@ -1181,20 +1176,6 @@ function QualificationSummary({ communication, qualification, saving, onCancel }
         {recording && <a href={recording} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border bg-card hover:bg-accent text-foreground font-semibold"><ExternalLink className="w-3.5 h-3.5" /> Open recording</a>}
       </div>
     </section>
-  );
-}
-
-function MiniList({ title, items, empty }) {
-  const rows = listItems(items).slice(0, 4);
-  return (
-    <div className="rounded-lg border bg-card p-3 min-h-[112px]">
-      <div className="text-[11px] font-semibold uppercase text-muted-foreground mb-2">{title}</div>
-      {rows.length ? (
-        <ul className="space-y-1.5 text-xs leading-relaxed">
-          {rows.map((item, idx) => <li key={`${title}-${idx}`} className="flex gap-1.5"><CheckCircle2 className="w-3.5 h-3.5 mt-0.5 text-primary shrink-0" /><span>{item}</span></li>)}
-        </ul>
-      ) : <div className="text-xs text-muted-foreground">{empty}</div>}
-    </div>
   );
 }
 
@@ -1391,7 +1372,7 @@ function PlivoAgentsPanel({ agents, selectedAgentId, onSave, onSelect, onToggle,
             <span className="text-[11px] font-semibold text-muted-foreground uppercase">Extra Payload</span>
             <textarea value={draft.extra_payload_text} onChange={(e) => setField("extra_payload_text", e.target.value)} rows={3} className="w-full px-3 py-2 rounded-lg border bg-background text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary" />
           </label>
-          <div className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"><KeyRound className="w-3.5 h-3.5" /> Blank Basic Auth fields use the server credentials.</div>
+          <div className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"><KeyRound className="w-3.5 h-3.5" /> Legacy agent credentials must be migrated to workspace Voice Provider settings.</div>
           <button onClick={submit} disabled={saving || !draft.display_name.trim() || !draft.trigger_url.trim() || !draft.from_number.trim()} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><Save className="w-4 h-4" /> {editingStored ? "Save Agent" : "Connect Agent"}</button>
         </div>
       </div>
@@ -1493,14 +1474,7 @@ function SettingsPanel({ fields, states, organization, templates, plivoAgents, s
   return (
     <div className="grid gap-6 xl:grid-cols-2 items-start">
       <QualificationSettingsLink />
-      <PlivoAgentsPanel
-        agents={plivoAgents}
-        selectedAgentId={selectedAgentId}
-        onSave={savePlivoAgent}
-        onSelect={selectPlivoAgent}
-        onToggle={togglePlivoAgent}
-        saving={saving}
-      />
+
       <section className="rounded-xl border bg-card p-5 space-y-4">
         <h3 className="font-bold flex items-center gap-2"><Columns3 className="w-4 h-4 text-primary" /> Field Columns</h3>
         <div className="space-y-2">{fields.map((field) => {
@@ -1552,5 +1526,5 @@ function SettingsPanel({ fields, states, organization, templates, plivoAgents, s
 
 function QualificationSettingsLink() {
   const { wsId } = useParams();
-  return <section className="rounded-xl border bg-card p-5 space-y-3"><h3 className="font-bold">Lead qualification</h3><p className="text-sm text-muted-foreground">Configure product rules, scoring, next actions and retries. Results appear inside each lead.</p><Link className="inline-block text-sm text-primary" to={`/app/w/${wsId}/qualification`}>Open qualification profiles</Link></section>;
+  return <section className="rounded-xl border bg-card p-5 space-y-3"><h3 className="font-bold">Lead qualification</h3><p className="text-sm text-muted-foreground">Configure product rules, scoring, next actions and retries. Results appear inside each lead.</p><Link className="inline-block text-sm text-primary" to={`/app/w/${wsId}/qualification`}>Open qualification profiles</Link><Link className="block text-sm text-primary" to={`/app/w/${wsId}/settings`}>Configure voice providers</Link></section>;
 }

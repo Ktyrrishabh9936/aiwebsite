@@ -149,6 +149,7 @@ class RetryConfig(BaseModel):
 
 
 class QualificationProfile(BaseModel):
+    voice_provider: Literal["plivo", "sarvam"] = "plivo"
     model_config = ConfigDict(extra="forbid")
     product_name: str = "General qualification"
     product_description: str = ""

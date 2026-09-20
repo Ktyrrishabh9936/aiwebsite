@@ -176,6 +176,7 @@ class FakeDb:
         self.crm_call_logs = FakeCollection([])
         self.workspaces = FakeCollection([])
         self.plivo_agent_configs = FakeCollection(agents or [])
+        self.workspace_voice_provider_configs = FakeCollection([])
         self.plivo_call_sessions = FakeCollection([])
         self.plivo_call_events = FakeCollection([])
         self.qualification_profiles = FakeCollection([])
@@ -260,26 +261,16 @@ def test_legacy_agent_uses_plivo_basic_auth_from_env(monkeypatch):
     assert auth == ("auth-id", "auth-token")
 
 
-def test_basic_agent_without_saved_credentials_falls_back_to_env(monkeypatch):
-    monkeypatch.setenv("PLIVO_AUTH_ID", "auth-id")
-    monkeypatch.setenv("PLIVO_AUTH_TOKEN", "auth-token")
-
-    config = normalize_agent_config({
-        "display_name": "Env Auth Agent",
-        "trigger_url": "https://agentflow.plivo.com/v1/account/auth/flow/flow-123",
-        "auth_type": "basic",
-        "from_number": "+918031703100",
-    })
-    headers, auth = trigger_auth_for_agent(config)
-
-    assert config["credentials"] == {}
-    assert sanitize_agent_config(config)["credential_configured"] is True
-    assert "Authorization" not in headers
-    assert auth == ("auth-id", "auth-token")
+def test_basic_agent_without_saved_credentials_cannot_use_global_account(monkeypatch):
+    monkeypatch.setenv("PLIVO_AUTH_ID", "another-tenants-account")
+    monkeypatch.setenv("PLIVO_AUTH_TOKEN", "another-tenants-secret")
+    with pytest.raises(HTTPException):
+        normalize_agent_config({"display_name": "Missing credentials", "trigger_url": "https://agentflow.plivo.com/v1/account/auth/flow/flow-123", "auth_type": "basic", "from_number": "+918031703100"})
 
 
 def test_build_agent_trigger_payload_uses_configured_input_mappings(monkeypatch):
     monkeypatch.setenv("PLIVO_FROM_NUMBER", "+918031703100")
+    monkeypatch.delenv("PLIVO_AGENT_CALLBACK_TOKEN", raising=False)
     agent = normalize_agent_config({
         "display_name": "Inventory Agent",
         "trigger_url": "https://agentflow.plivo.com/v1/account/auth/flow/flow-abc",
@@ -364,6 +355,12 @@ def test_start_qualification_call_creates_session_and_uses_selected_agent(monkey
             "lead_notes": [],
         }
         db = FakeDb(lead, [agent])
+        from voice_config import encrypt
+        from cryptography.fernet import Fernet
+        monkeypatch.setenv("VOICE_CREDENTIAL_KEYS", Fernet.generate_key().decode())
+        db.workspace_voice_provider_configs = FakeCollection([{"_id": ObjectId(), "workspace_id": lead["workspace_id"], "provider": "plivo", "enabled": True,
+            "config": {"auth_id": "trigger-user", "from_number": agent["from_number"], "trigger_url": agent["trigger_url"]},
+            "encrypted_credentials": encrypt(lead["workspace_id"], "plivo", {"auth_token": "trigger-password"})}])
         request = type("RequestContext", (), {
             "headers": {},
             "url": type("UrlContext", (), {"scheme": "https", "netloc": "public.example", "path": "", "query": ""})(),
@@ -513,7 +510,8 @@ def test_normalize_lead_phone_defaults_indian_mobile_to_e164():
     assert normalize_lead_phone("+91 82997 52170") == "+918299752170"
 
 
-def test_callback_urls_include_lead_id_for_status_and_recording():
+def test_callback_urls_include_lead_id_for_status_and_recording(monkeypatch):
+    monkeypatch.delenv("PLIVO_AGENT_CALLBACK_TOKEN", raising=False)
     urls = callback_urls("https://example.com", "workspace-1", "lead-1")
 
     assert urls["outbound_answer"] == "https://example.com/api/plivo/workspaces/workspace-1/calls/lead-1/outbound/answer"
@@ -521,6 +519,25 @@ def test_callback_urls_include_lead_id_for_status_and_recording():
     assert urls["inbound_answer"] == "https://example.com/api/plivo/workspaces/workspace-1/calls/inbound/answer"
     assert urls["recording"].endswith("/calls/recording?lead_id=lead-1")
     assert urls["qualification_result"] == "https://example.com/api/plivo/workspaces/workspace-1/calls/lead-1/qualification/result"
+
+
+def test_callback_urls_authenticate_qualification_result(monkeypatch):
+    monkeypatch.setenv("PLIVO_AGENT_CALLBACK_TOKEN", "secret with / reserved?")
+
+    urls = callback_urls("https://example.com", "workspace-1", "lead-1")
+
+    assert urls["qualification_result"].endswith(
+        "/calls/lead-1/qualification/result"
+    )
+
+
+def test_plivo_config_debug_does_not_expose_callback_token(monkeypatch):
+    monkeypatch.setenv("PLIVO_AGENT_CALLBACK_TOKEN", "private-callback-token")
+
+    debug = plivo_config_debug("https://public.example", "111111111111111111111111", "lead-1")
+
+    assert "private-callback-token" not in str(debug)
+    assert "?token=" not in debug["urls"]["qualification_result"]
 
 
 def test_plivo_config_debug_masks_secrets_and_generates_urls(monkeypatch):
@@ -543,6 +560,7 @@ def test_plivo_config_debug_masks_secrets_and_generates_urls(monkeypatch):
 
 def test_qualification_payload_targets_lead_phone(monkeypatch):
     monkeypatch.setenv("PLIVO_FROM_NUMBER", "+91 80 3170 3100")
+    monkeypatch.delenv("PLIVO_AGENT_CALLBACK_TOKEN", raising=False)
     payload = qualification_payload(
         "https://public.example",
         "111111111111111111111111",

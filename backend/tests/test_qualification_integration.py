@@ -175,27 +175,31 @@ def test_webhook_requires_auth_and_redacts_token(monkeypatch, facts_only):
     import hmac
     import server
     from plivo_calls import _signature_payload
-    monkeypatch.setenv("PLIVO_AGENT_CALLBACK_TOKEN", "synthetic-callback-token")
+    from voice_config import save_config
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("VOICE_CREDENTIAL_KEYS", Fernet.generate_key().decode())
     monkeypatch.setenv("PLIVO_AUTH_TOKEN", "synthetic-plivo-secret")
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://test")
     async def run(db):
         ws, lead_id, _ = await seed(db)
         monkeypatch.setattr(server, "db", db)
+        await save_config(db, ws, "plivo", True, {}, {"callback_token": "synthetic-callback-token-32-characters", "auth_token": "synthetic-plivo-secret"})
         app = FastAPI()
+        app.state.db = db
         app.add_api_route("/workspaces/{ws_id}/leads/{lead_id}/result", server.plivo_qualification_result, methods=["POST"])
         url = f"/workspaces/{ws}/leads/{lead_id}/result"
         payload = {"CallUUID": "auth-call", "CallStatus": "busy"}
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             assert (await client.post(url, json=payload)).status_code == 403
             assert await db.plivo_call_events.count_documents({}) == 0
-            assert (await client.post(url + "?token=synthetic-callback-token", json=payload)).status_code == 200
+            assert (await client.post(url, json={**payload, "token": "synthetic-callback-token"}, headers={"X-Arevei-Webhook-Token": "synthetic-callback-token-32-characters"})).status_code == 200
             event = await db.plivo_call_events.find_one({})
             assert event["payload"]["token"] == "[redacted]"
-            monkeypatch.delenv("PLIVO_AGENT_CALLBACK_TOKEN")
             assert (await client.post(url, json=payload)).status_code == 403
             nonce = "synthetic-nonce"
             signature = base64.b64encode(hmac.new(b"synthetic-plivo-secret", _signature_payload("POST", "http://test" + url, nonce, payload).encode(), hashlib.sha256).digest()).decode()
             response = await client.post(url, data=payload, headers={"X-Plivo-Signature-V3": signature, "X-Plivo-Signature-V3-Nonce": nonce})
             assert response.status_code == 200
-            assert response.json()["qualification_result"]["lead_status"] == "PENDING"
+            assert response.json()["duplicate"] is True
+            assert (await db.crm_leads.find_one({"_id": ObjectId(lead_id)}))["lead_status"] == "PENDING"
     asyncio.run(isolated(run))

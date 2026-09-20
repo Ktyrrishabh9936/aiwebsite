@@ -12,6 +12,7 @@ import { Logo } from "../components/Logo";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { ModelPicker } from "../components/ModelPicker";
 import { ManagerChatWidget } from "../components/ManagerChatWidget";
+import { AgentWorkspace } from "../components/AgentWorkspace";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
@@ -52,6 +53,9 @@ export default function WorkspaceLayout() {
   const [workspaceModelId, setWorkspaceModelId] = useState("openai.gpt-oss-120b");
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [notFound, setNotFound] = useState(false);
+  const [agentMode, setAgentMode] = useState(false);
+  const [agentVisited, setAgentVisited] = useState(false);
+  useEffect(() => { setAgentMode(false); }, [location.pathname]);
 
   const refresh = useCallback(async () => {
     try {
@@ -121,8 +125,8 @@ export default function WorkspaceLayout() {
   if (!ws) return <div className="min-h-screen grid place-items-center text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin" /></div>;
 
   return (
-    <div className="h-screen overflow-hidden md:pl-60">
-      <aside className="hidden md:flex fixed inset-y-0 left-0 z-30 flex-col w-60 border-r border-border bg-card">
+    <div className={`h-screen overflow-hidden ${agentMode ? "" : "md:pl-60"}`}>
+      <aside className={`${agentMode ? "hidden" : "hidden md:flex"} fixed inset-y-0 left-0 z-30 flex-col w-60 border-r border-border bg-card`}>
         <div className="h-16 flex items-center px-5 border-b border-border">
           <Logo className="text-base" to="/app" />
         </div>
@@ -152,11 +156,15 @@ export default function WorkspaceLayout() {
       </aside>
 
       <div className="h-screen flex flex-col min-w-0">
-        <header className={`sticky top-0 z-20 glass border-b border-border ${isBlogEditor ? "hidden" : ""}`}>
-          <div className="h-16 px-5 flex items-center justify-between gap-3">
+        <header className="sticky top-0 z-20 glass border-b border-border">
+          <div className="min-h-16 px-3 sm:px-5 py-2 flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
               <h2 className="font-display font-bold truncate">{ws.name}</h2>
               <p className="text-xs text-muted-foreground truncate">{ws.website_url}</p>
+            </div>
+            <div className="flex rounded-full border border-border p-1 gap-1" role="group" aria-label="Workspace mode">
+              <button type="button" aria-pressed={!agentMode} onClick={() => setAgentMode(false)} className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-xs font-semibold ${!agentMode ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}><Users size={14} /> Human Mode</button>
+              <button type="button" aria-pressed={agentMode} onClick={() => { setAgentVisited(true); setAgentMode(true); }} className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-xs font-semibold ${agentMode ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}><Bot size={14} /> Agent Mode</button>
             </div>
             <div className="flex items-center gap-2.5">
               <ModelPicker value={ws.model_id} onChange={changeModel} />
@@ -265,10 +273,11 @@ export default function WorkspaceLayout() {
           </div>
         </header>
 
-        <main className={`flex-1 ${isBlogEditor ? "min-h-0 overflow-hidden" : "overflow-y-auto"}`}>
+        <main hidden={agentMode} className={`${agentMode ? "hidden" : "flex-1"} ${isBlogEditor ? "min-h-0 overflow-hidden" : "overflow-y-auto"}`}>
           <Outlet context={{ ws, setWs, refresh, loadNotes }} />
         </main>
-        {!isBlogEditor && <ManagerChatWidget ws={ws} />}
+        {agentVisited && <div hidden={!agentMode} className={agentMode ? "flex-1 min-h-0 overflow-y-auto" : "hidden"}><AgentWorkspace key={ws.id} ws={ws} active={agentMode} /></div>}
+        {!isBlogEditor && !agentMode && <ManagerChatWidget ws={ws} />}
       </div>
     </div>
   );

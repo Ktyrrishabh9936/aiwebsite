@@ -46,6 +46,7 @@ def test_mantle_manager_stream_preserves_context(monkeypatch):
     def handler(request):
         body = json.loads(request.content)
         assert body["stream"] is True
+        assert body["max_completion_tokens"] == 300
         combined = json.dumps(body["messages"])
         for value in ("Example Company", "Grow organically", "Prior question", "CRM total: 17"):
             assert value in combined

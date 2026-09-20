@@ -62,7 +62,7 @@ export default function Qualification() {
     catch (e) { setError(qualificationError(e)); } finally { setBusy(false); }
   };
   return <div className="p-5 sm:p-8 max-w-6xl mx-auto space-y-6">
-    <div><Link to={`/app/w/${ws.id}/agents`} className="text-sm text-primary">AI Agents</Link><h1 className="text-3xl font-bold mt-2">Lead qualification</h1><p className="text-muted-foreground text-sm mt-2">Plivo runs the call. Arevei evaluates the facts, applies your rules, and updates the CRM.</p></div>
+    <div><Link to={`/app/w/${ws.id}/agents`} className="text-sm text-primary">AI Agents</Link><h1 className="text-3xl font-bold mt-2">Lead qualification</h1><p className="text-muted-foreground text-sm mt-2">Your selected voice provider runs the call. Arevei evaluates the facts, applies your rules, and updates the CRM.</p></div>
     {error && <p role="alert" className="rounded-lg border border-destructive p-3 text-sm text-destructive">{error}</p>}
     {!catalog && <button className={buttonClass} onClick={() => load().then((data) => { if (data) setDraft(data.template); })}>Load qualification profiles</button>}
     {catalog && draft && <>
@@ -71,6 +71,8 @@ export default function Qualification() {
       <div className="grid lg:grid-cols-[1fr_320px] gap-6 items-start">
         <fieldset disabled={busy} className="border rounded-xl bg-card p-5 space-y-5 min-w-0">
           <h2 className="font-semibold">Product and rules</h2>
+          <Field label="Voice provider"><select className={inputClass} value={draft.voice_provider || "plivo"} onChange={(e) => set("voice_provider", e.target.value)}><option value="plivo">Plivo</option><option value="sarvam">Sarvam</option></select></Field>
+          <p className="text-xs text-muted-foreground">Voice provider is independent of the AI model. <Link className="text-primary" to={`/app/w/${ws.id}/settings`}>Configure workspace credentials</Link></p>
           <div className="grid sm:grid-cols-2 gap-3">{[["product_name", "Product / service name"], ["campaign_id", "Campaign ID (optional)"], ["product_description", "Description"], ["target_customer", "Target customer"]].map(([key, label]) => <Field key={key} label={label}><input className={inputClass} value={draft[key] || ""} onChange={(e) => set(key, e.target.value || (key === "campaign_id" ? null : ""))} /></Field>)}</div>
           <div className="grid sm:grid-cols-3 gap-3">{["min", "max", "currency"].map((key) => <Field key={key} label={`Price ${key}`}><input className={inputClass} type={key === "currency" ? "text" : "number"} value={draft.price_range[key] ?? ""} onChange={(e) => set("price_range", { ...draft.price_range, [key]: e.target.value === "" ? null : key === "currency" ? e.target.value : Number(e.target.value) })} /></Field>)}</div>
           <Field label="Service locations (comma separated; exact matches)"><input className={inputClass} value={draft.service_locations.join(",")} onChange={(e) => set("service_locations", e.target.value ? e.target.value.split(",") : [])} /></Field>
