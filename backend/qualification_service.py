@@ -251,8 +251,9 @@ class QualificationWebhookController:
                 call.callback_requested = call.callback_requested or old.callback_requested
             history = {"workspace_id": ws_id, "lead_id": lead_id, "kind": "qualification_engine", "provider": call.provider, "provider_call_id": call.provider_call_id, "call_result": call.model_dump(mode="json"), "profile_snapshot": profile.model_dump(mode="json"), "profile_id": profile_id, "updated_at": now.isoformat()}
             await self.db.crm_call_logs.update_one({"_id": history_id}, {"$set": history, "$setOnInsert": {"created_at": event["received_at"]}, "$addToSet": {"event_ids": str(event_id)}}, upsert=True)
+            from plivo_calls import count_lead_call_attempts
             attempts = await self.db.crm_call_logs.count_documents({"workspace_id": ws_id, "lead_id": lead_id, "kind": "qualification_engine"})
-            attempts = max(attempts, await self.db.plivo_call_sessions.count_documents({"workspace_id": ws_id, "lead_id": lead_id}))
+            attempts = max(attempts, await count_lead_call_attempts(self.db, ws_id, lead_id))
             active_id = (lead.get("qualification_call") or {}).get("call_uuid")
             session_aliases = {str(session["_id"])} if session else set()
             if session:

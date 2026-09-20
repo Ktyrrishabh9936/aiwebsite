@@ -33,6 +33,7 @@ from plivo_calls import (
     plivo_agent_config,
     sanitize_agent_config,
     communication_summary_from_result,
+    session_counts_as_call_attempt,
     normalized_answers,
     normalized_text_list,
     qualification_payload,
@@ -52,9 +53,29 @@ from plivo_calls import (
 )
 
 
+@pytest.mark.parametrize("session, expected", [
+    ({"status": "failed", "last_error": "Provider unavailable"}, False),
+    ({"status": "reconcile_required"}, True),
+    ({"started_at": "2026-09-20T08:37:30+00:00"}, True),
+    ({"provider_call_id": "attempt-1"}, True),
+    ({"provider_identifiers": {"attempt_id": "attempt-1"}}, True),
+    ({"provider_identifiers": {"call_uuid": "call-1"}}, True),
+])
+def test_session_counts_as_call_attempt_only_after_provider_acceptance(session, expected):
+    assert session_counts_as_call_attempt(session) is expected
+
+
 class FakeUpdateResult:
     def __init__(self, matched_count=1):
         self.matched_count = matched_count
+
+
+class FakeCursor:
+    def __init__(self, docs):
+        self.docs = docs
+
+    async def to_list(self, length):
+        return self.docs[:length]
 
 
 class FakeCollection:
@@ -67,6 +88,9 @@ class FakeCollection:
             if self._matches(doc, query):
                 return doc
         return None
+
+    def find(self, query):
+        return FakeCursor([doc for doc in self.docs if self._matches(doc, query)])
 
     async def update_one(self, query, update, upsert=False):
         doc = await self.find_one(query)

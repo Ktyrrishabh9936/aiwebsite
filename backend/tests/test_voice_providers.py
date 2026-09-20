@@ -235,6 +235,12 @@ def test_sarvam_end_to_end_workspace_isolation_and_replay(monkeypatch):
         initiate = AsyncMock(return_value=httpx.Response(200, json={"attempt_id": "attempt-1"}))
         monkeypatch.setattr(adapter, "initiate_call", initiate)
         monkeypatch.setattr(adapter, "recording", AsyncMock(return_value="https://media.example/call.wav"))
+        # Local transport failures create audit sessions, but Sarvam never accepted a call.
+        # They must not consume qualification attempts.
+        for index in range(2):
+            await db.plivo_call_sessions.insert_one({"workspace_id": ws, "lead_id": lead_id,
+                "provider": "sarvam", "status": "failed", "last_error": "Provider unavailable",
+                "created_at": f"2026-09-20T08:2{index}:00+00:00"})
         result = await start_qualification_call(db, ws, lead_id, None)
         assert result["provider"] == "sarvam"
         _, sent_config, sent_payload = initiate.await_args.args
@@ -274,6 +280,7 @@ def test_sarvam_end_to_end_workspace_isolation_and_replay(monkeypatch):
         lead = await db.crm_leads.find_one({"_id": ObjectId(lead_id)})
         assert lead["qualification_call"]["provider"] == "sarvam"
         assert lead["qualification_call"]["recording_url"] == "https://media.example/call.wav"
+        assert lead["call_attempt_count"] == 1
         assert len([n for n in lead["lead_notes"] if n["author"] == "Qualification Engine"]) == 1
         assert await db.crm_call_logs.count_documents({"kind": "qualification_engine"}) == 1
         events = await db.plivo_call_events.find({}).to_list(10)

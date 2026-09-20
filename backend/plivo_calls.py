@@ -942,9 +942,24 @@ async def count_active_workspace_sessions(db, ws_id):
     return len(sessions)
 
 
+def session_counts_as_call_attempt(session):
+    """Count only requests that reached, or may have reached, the voice provider."""
+    identifiers = session.get("provider_identifiers") or {}
+    return bool(
+        session.get("started_at")
+        or session.get("provider_call_id")
+        or session.get("call_uuid")
+        or identifiers.get("attempt_id")
+        or identifiers.get("call_uuid")
+        or identifiers.get("request_uuid")
+        or session.get("status") == "reconcile_required"
+        or session.get("call_status") == "reconcile_required"
+    )
+
+
 async def count_lead_call_attempts(db, ws_id, lead_id):
     sessions = await db[CALL_SESSIONS_COLLECTION].find({"workspace_id": ws_id, "lead_id": str(lead_id)}).to_list(1000)
-    return len(sessions)
+    return sum(1 for session in sessions if session_counts_as_call_attempt(session))
 
 
 async def schedule_retry_if_allowed(db, ws_id, lead_id, status):
@@ -2220,7 +2235,7 @@ async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=F
         workspace = await db.workspaces.find_one({"_id": ObjectId(ws_id)}) or {}
         profile, _ = await resolve_profile(db, ws_id, lead, workspace)
         workflow = await ensure_calling_workflow_config(db, ws_id)
-        attempts = max(int(lead.get("call_attempt_count") or 0), await db.plivo_call_sessions.count_documents({"workspace_id": ws_id, "lead_id": str(lead_id)}))
+        attempts = max(int(lead.get("call_attempt_count") or 0), await count_lead_call_attempts(db, ws_id, lead_id))
         if not workflow.get("enabled", True) or attempts >= profile.retry.max_attempts:
             await db.crm_leads.update_one({"_id": lead["_id"]}, {"$set": {"qualification_call.status": "retry_exhausted", "retry_eligible": False}})
             return {"status": "skipped", "reason": "Calling disabled or attempt limit reached"}
