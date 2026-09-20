@@ -1336,8 +1336,11 @@ async def startup():
     await db.qualification_profiles.create_index([("workspace_id", 1), ("campaign_id", 1)], unique=True, partialFilterExpression={"campaign_id": {"$type": "string"}})
     await db.crm_call_logs.create_index([("workspace_id", 1), ("lead_id", 1), ("kind", 1)])
     await seed_admin(db)
-    asyncio.create_task(scheduler_loop())
-    asyncio.create_task(google_sheets_poller_loop())
+    if os.environ.get("DISABLE_BACKGROUND_JOBS", "").strip().lower() not in {"1", "true", "yes"}:
+        asyncio.create_task(scheduler_loop())
+        asyncio.create_task(google_sheets_poller_loop())
+    else:
+        logger.info("Background scheduler and Google Sheets poller disabled")
     logger.info("Arevei backend ready")
 
 
