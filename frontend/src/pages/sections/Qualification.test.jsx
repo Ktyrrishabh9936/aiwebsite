@@ -8,6 +8,7 @@ jest.mock("../../lib/api", () => ({ __esModule: true, default: { get: jest.fn(),
 jest.mock("sonner", () => ({ toast: { success: jest.fn() } }));
 
 const template = {
+  voice_provider: "plivo",
   product_name: "Software", product_description: "", target_customer: "", campaign_id: null,
   price_range: { min: null, max: null, currency: null },
   mandatory_qualification_criteria: [], disqualification_criteria: [], qualification_criteria: [], special_rules: [],
@@ -38,4 +39,26 @@ test("retrying a failed default assignment updates the saved profile instead of 
   await act(async () => save().click());
   expect(api.post.mock.calls.filter(([url]) => url.endsWith("/profiles"))).toHaveLength(1);
   expect(api.put).toHaveBeenCalledWith("/workspaces/workspace/crm/qualification/profiles/saved-profile", template);
+});
+
+test("reopens the workspace default profile with its saved Sarvam provider", async () => {
+  const saved = { ...template, id: "default-profile", voice_provider: "sarvam", product_name: "Sarvam qualification" };
+  api.get.mockResolvedValue({ data: { template, profiles: [saved], default_profile_id: saved.id, default_voice_provider: "sarvam" } });
+  await act(async () => root.render(<Qualification />));
+  const selects = [...container.querySelectorAll("select")];
+  expect(selects[0].value).toBe(saved.id);
+  expect(selects.find((select) => [...select.options].some((option) => option.value === "sarvam")).value).toBe("sarvam");
+});
+
+test("saves automatic new-lead timing for the workspace", async () => {
+  api.get.mockResolvedValue({ data: { template, profiles: [], default_profile_id: null, calling_settings: { call_mode: "manual", initial_delay_seconds: 300, timezone: "Asia/Kolkata", calling_window: { start: "09:30", end: "19:00" } } } });
+  api.put.mockResolvedValue({ data: { call_mode: "automatic", initial_delay_seconds: 30, timezone: "Asia/Kolkata", calling_window: { start: "09:30", end: "19:00" } } });
+  await act(async () => root.render(<Qualification />));
+  const automatic = container.querySelector('input[value="automatic"]');
+  await act(async () => automatic.click());
+  const delay = container.querySelector('[aria-label="Automatic call delay"]');
+  await act(async () => { delay.value = "30"; delay.dispatchEvent(new Event("change", { bubbles: true })); });
+  const save = [...container.querySelectorAll("button")].find((button) => button.textContent === "Save call mode");
+  await act(async () => save.click());
+  expect(api.put).toHaveBeenCalledWith("/workspaces/workspace/crm/qualification/calling-settings", expect.objectContaining({ call_mode: "automatic", initial_delay_seconds: 30 }));
 });

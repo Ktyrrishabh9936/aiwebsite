@@ -20,6 +20,7 @@ from plivo_calls import (
     is_junk_lead,
     log_call_note,
     normalize_phone,
+    normalize_workflow_config,
     normalize_lead_phone,
     normalize_qualification_category,
     normalize_qualification_score,
@@ -830,6 +831,31 @@ def test_schedule_first_qualification_call_sets_five_minute_state():
         assert lead["qualification_call"]["status"] == "scheduled"
         assert lead["qualification_call"]["phone"] == "+918299752170"
         assert lead["lead_notes"][-1]["status"] == "scheduled"
+
+    anyio.run(run)
+
+
+def test_calling_modes_normalize_automatic_delay_and_manual_trigger():
+    automatic = normalize_workflow_config({"call_mode": "automatic", "initial_delay_seconds": 30})
+    assert automatic["call_mode"] == "automatic"
+    assert automatic["initial_delay_seconds"] == 30
+    assert automatic["lead_created_trigger_enabled"] is True
+    manual = normalize_workflow_config({"call_mode": "manual"}, automatic)
+    assert manual["call_mode"] == "manual"
+    assert manual["lead_created_trigger_enabled"] is False
+
+
+def test_manual_calling_mode_does_not_schedule_new_lead():
+    from bson import ObjectId
+
+    async def run():
+        lead_id = ObjectId()
+        lead = {"_id": lead_id, "workspace_id": "111111111111111111111111", "field_values": {"phone": "8299752170"}, "qualification_call": {}, "lead_notes": []}
+        db = FakeDb(lead)
+        db.plivo_workflow_configs.docs.append({"workspace_id": lead["workspace_id"], **normalize_workflow_config({"call_mode": "manual"})})
+        result = await schedule_first_qualification_call(db, lead["workspace_id"], str(lead_id))
+        assert result["status"] == "manual"
+        assert lead["qualification_call"] == {}
 
     anyio.run(run)
 

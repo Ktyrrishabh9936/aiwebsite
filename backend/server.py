@@ -1132,18 +1132,23 @@ async def scheduler_loop():
     while True:
         try:
             now = datetime.now(timezone.utc).isoformat()
-            task = await db.tasks.find_one({"status": "pending", "requires_approval": False,
-                                             "scheduled_time": {"$lte": now}})
+            workspace_scope = [value.strip() for value in os.environ.get("BACKGROUND_WORKSPACE_IDS", "").split(",") if value.strip()]
+            task_query = {"status": "pending", "requires_approval": False, "scheduled_time": {"$lte": now}}
+            lead_query = {
+                "qualification_call.status": "scheduled",
+                "qualification_call.scheduled_for": {"$lte": now},
+                "$or": [{"deleted_at": {"$exists": False}}, {"deleted_at": None}],
+            }
+            if workspace_scope:
+                task_query["workspace_id"] = {"$in": workspace_scope}
+                lead_query["workspace_id"] = {"$in": workspace_scope}
+            task = await db.tasks.find_one(task_query)
             if task:
                 logger.info("Scheduler executing task %s", task.get("title"))
                 await execute_task(task)
             from plivo_calls import start_qualification_call
 
-            due_lead = await db.crm_leads.find_one({
-                "qualification_call.status": "scheduled",
-                "qualification_call.scheduled_for": {"$lte": now},
-                "$or": [{"deleted_at": {"$exists": False}}, {"deleted_at": None}],
-            })
+            due_lead = await db.crm_leads.find_one(lead_query)
             if due_lead:
                 ws_id = due_lead["workspace_id"]
                 lead_id = str(due_lead["_id"])
@@ -1155,7 +1160,7 @@ async def scheduler_loop():
                 await start_qualification_call(db, ws_id, lead_id, fake_request, auto=True, raise_on_error=False)
         except Exception:
             logger.exception("scheduler tick failed")
-        await asyncio.sleep(30)
+        await asyncio.sleep(5)
 
 
 async def google_sheets_poller_loop():
@@ -1167,7 +1172,11 @@ async def google_sheets_poller_loop():
     await asyncio.sleep(15)
     while True:
         try:
-            cursor = db.workflows.find({"kind": "ads_to_crm", "status": "published"})
+            workflow_query = {"kind": "ads_to_crm", "status": "published"}
+            workspace_scope = [value.strip() for value in os.environ.get("BACKGROUND_WORKSPACE_IDS", "").split(",") if value.strip()]
+            if workspace_scope:
+                workflow_query["workspace_id"] = {"$in": workspace_scope}
+            cursor = db.workflows.find(workflow_query)
             async for wf in cursor:
                 ws_id = wf["workspace_id"]
                 conn = await db.google_sheet_connections.find_one({"workspace_id": ws_id})

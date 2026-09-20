@@ -73,11 +73,13 @@ DEFAULT_SCORING_CONFIG = {
 DEFAULT_CALLING_WORKFLOW_CONFIG = {
     "enabled": True,
     "lead_created_trigger_enabled": True,
+    "call_mode": "automatic",
     "selected_agent_config_id": "",
     "qualification_config_id": "indian_real_estate_v1",
     "timezone": "Asia/Kolkata",
     "calling_window": {"start": "09:30", "end": "19:00"},
     "initial_delay_minutes": 5,
+    "initial_delay_seconds": 300,
     "retry_delay_minutes": 30,
     "max_attempts": 3,
     "concurrency_limit": 1,
@@ -848,9 +850,18 @@ def normalize_workflow_config(body, existing=None):
     body = body or {}
     existing = {**deepcopy(DEFAULT_CALLING_WORKFLOW_CONFIG), **(existing or {})}
     window = {**(existing.get("calling_window") or {}), **(body.get("calling_window") or {})}
+    legacy_mode = "automatic" if existing.get("lead_created_trigger_enabled", True) else "manual"
+    call_mode = str(body.get("call_mode", existing.get("call_mode") or legacy_mode)).strip().lower()
+    if call_mode not in {"automatic", "scheduled", "manual"}:
+        call_mode = legacy_mode
+    initial_delay_seconds = body.get("initial_delay_seconds", existing.get("initial_delay_seconds"))
+    if initial_delay_seconds is None:
+        initial_delay_seconds = _int_between(existing.get("initial_delay_minutes"), 5, 0, 1440) * 60
+    initial_delay_seconds = _int_between(initial_delay_seconds, 300, 0, 86400)
     return {
         "enabled": bool(body.get("enabled", existing.get("enabled", True))),
-        "lead_created_trigger_enabled": bool(body.get("lead_created_trigger_enabled", existing.get("lead_created_trigger_enabled", True))),
+        "lead_created_trigger_enabled": call_mode != "manual",
+        "call_mode": call_mode,
         "selected_agent_config_id": str(body.get("selected_agent_config_id", existing.get("selected_agent_config_id") or "") or "").strip(),
         "qualification_config_id": str(body.get("qualification_config_id", existing.get("qualification_config_id") or "indian_real_estate_v1") or "").strip(),
         "timezone": str(body.get("timezone", existing.get("timezone") or "Asia/Kolkata") or "Asia/Kolkata").strip(),
@@ -858,7 +869,8 @@ def normalize_workflow_config(body, existing=None):
             "start": normalize_time_text(window.get("start"), "09:30"),
             "end": normalize_time_text(window.get("end"), "19:00"),
         },
-        "initial_delay_minutes": _int_between(body.get("initial_delay_minutes", existing.get("initial_delay_minutes")), 5, 0, 1440),
+        "initial_delay_minutes": initial_delay_seconds // 60,
+        "initial_delay_seconds": initial_delay_seconds,
         "retry_delay_minutes": _int_between(body.get("retry_delay_minutes", existing.get("retry_delay_minutes")), 30, 1, 1440),
         "max_attempts": _int_between(body.get("max_attempts", existing.get("max_attempts")), 3, 1, 10),
         "concurrency_limit": _int_between(body.get("concurrency_limit", existing.get("concurrency_limit")), 1, 1, 20),
@@ -966,7 +978,7 @@ async def schedule_retry_if_allowed(db, ws_id, lead_id, status):
     if status not in {"busy", "no_answer", "failed"}:
         return False
     workflow = await ensure_calling_workflow_config(db, ws_id)
-    if not workflow.get("enabled", True) or not workflow.get("lead_created_trigger_enabled", True):
+    if not workflow.get("enabled", True) or workflow.get("call_mode") == "manual":
         return False
     attempts = await count_lead_call_attempts(db, ws_id, lead_id)
     if attempts >= int(workflow.get("max_attempts") or 3):
@@ -978,6 +990,7 @@ async def schedule_retry_if_allowed(db, ws_id, lead_id, status):
         "status": "scheduled",
         "scheduled_for": scheduled_for,
         "retry_after_status": status,
+        "trigger_mode": "retry",
         "auto_retry_count": int(qualification.get("auto_retry_count") or 0) + 1,
         "updated_at": now_iso(),
     })
@@ -1795,7 +1808,7 @@ async def mark_lead_junk(db, ws_id, lead_id, reason, payload=None):
     return qualification
 
 
-async def schedule_first_qualification_call(db, ws_id, lead_id, delay_minutes=5):
+async def schedule_first_qualification_call(db, ws_id, lead_id, delay_minutes=None):
     lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)})
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
@@ -1818,6 +1831,21 @@ async def schedule_first_qualification_call(db, ws_id, lead_id, delay_minutes=5)
     from qualification_service import resolve_profile
     workspace = await db.workspaces.find_one({"_id": ObjectId(ws_id)}) or {}
     profile, _ = await resolve_profile(db, ws_id, lead, workspace)
+    workflow = await ensure_calling_workflow_config(db, ws_id)
+    call_mode = workflow.get("call_mode") or "automatic"
+    if not workflow.get("enabled", True) or call_mode == "manual":
+        return {"status": "manual", "reason": "Workspace qualification calls are manual"}
+    created_at = parse_iso_datetime(lead.get("created_at")) or datetime.now(timezone.utc)
+    if call_mode == "scheduled":
+        local = created_at.astimezone(_workflow_zone(workflow))
+        start_hour, start_minute = divmod(_time_minutes((workflow.get("calling_window") or {}).get("start") or "09:30"), 60)
+        scheduled_at = local.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+        if scheduled_at <= local:
+            scheduled_at += timedelta(days=1)
+        scheduled_at = scheduled_at.astimezone(timezone.utc)
+    else:
+        delay_seconds = int(delay_minutes * 60) if delay_minutes is not None else int(workflow.get("initial_delay_seconds") or 0)
+        scheduled_at = next_calling_window_start(workflow, created_at + timedelta(seconds=delay_seconds))
     now = now_iso()
     scheduled = {
         **qualification,
@@ -1825,7 +1853,8 @@ async def schedule_first_qualification_call(db, ws_id, lead_id, delay_minutes=5)
         "provider": profile.voice_provider,
         "mode": "agent_direct_to_lead",
         "phone": lead_phone,
-        "scheduled_for": scheduled_for_iso(delay_minutes, parse_iso_datetime(lead.get("created_at"))),
+        "scheduled_for": scheduled_at.isoformat(),
+        "trigger_mode": call_mode,
         "auto_triggered": False,
         "updated_at": now,
     }

@@ -1,7 +1,8 @@
 import os
+from typing import Literal
 from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 from crm import db_from, require_workspace_access
@@ -27,10 +28,38 @@ async def profiles(ws_id: str, request: Request):
     db = db_from(request)
     ws = await db.workspaces.find_one({"_id": oid(ws_id)})
     docs = await db.qualification_profiles.find({"workspace_id": ws_id}).sort("created_at", -1).to_list(200)
+    default_profile = next((doc for doc in docs if str(doc["_id"]) == ws.get("qualification_profile_id")), None)
+    default_voice_provider = ws.get("qualification_voice_provider") or (default_profile or {}).get("voice_provider") or "plivo"
     from plivo_calls import ensure_calling_workflow_config
     workflow = await ensure_calling_workflow_config(db, ws_id)
-    template = QualificationProfile(retry={"max_attempts": workflow.get("max_attempts", 4), "retry_rules": [{"outcome": o.value, "delay_minutes": workflow.get("retry_delay_minutes", 30)} for o in sorted(RETRYABLE)]})
-    return {"profiles": [public(doc) for doc in docs], "default_profile_id": ws.get("qualification_profile_id"), "legacy_config": ws.get("ai_qualification_config"), "template": template.model_dump(mode="json"), "callback_authentication": "Workspace provider authentication; see Settings > Voice Providers"}
+    template = QualificationProfile(voice_provider=default_voice_provider, retry={"max_attempts": workflow.get("max_attempts", 4), "retry_rules": [{"outcome": o.value, "delay_minutes": workflow.get("retry_delay_minutes", 30)} for o in sorted(RETRYABLE)]})
+    return {"profiles": [public(doc) for doc in docs], "default_profile_id": ws.get("qualification_profile_id"),
+        "default_voice_provider": default_voice_provider, "legacy_config": ws.get("ai_qualification_config"),
+        "calling_settings": {key: workflow.get(key) for key in ("call_mode", "initial_delay_seconds", "timezone", "calling_window", "retry_delay_minutes")},
+        "template": template.model_dump(mode="json"), "callback_authentication": "Workspace provider authentication; see Settings > Voice Providers"}
+
+
+class CallingSettings(BaseModel):
+    call_mode: Literal["automatic", "scheduled", "manual"]
+    initial_delay_seconds: int = Field(default=300, ge=0, le=86400)
+    timezone: str = "Asia/Kolkata"
+    calling_window: dict = Field(default_factory=lambda: {"start": "09:30", "end": "19:00"})
+
+
+@router.put("/calling-settings")
+async def update_calling_settings(ws_id: str, request: Request, body: CallingSettings):
+    await require_workspace_access(request, ws_id)
+    db = db_from(request)
+    from plivo_calls import ensure_calling_workflow_config, normalize_workflow_config, public_workflow_config
+    old = await ensure_calling_workflow_config(db, ws_id)
+    normalized = normalize_workflow_config(body.model_dump(), old)
+    await db.plivo_workflow_configs.update_one({"workspace_id": ws_id}, {"$set": {**normalized, "updated_at": now_iso()}})
+    if normalized["call_mode"] == "manual":
+        await db.crm_leads.update_many({"workspace_id": ws_id, "qualification_call.status": "scheduled"}, {"$set": {
+            "qualification_call.status": "manual", "qualification_call.scheduled_for": None,
+            "qualification_call.auto_triggered": False, "updated_at": now_iso(),
+        }})
+    return public_workflow_config(await db.plivo_workflow_configs.find_one({"workspace_id": ws_id}))
 
 
 @router.post("/profiles")
@@ -55,6 +84,10 @@ async def update_profile(ws_id: str, profile_id: str, request: Request, body: Qu
         raise HTTPException(409, "A profile already exists for this campaign")
     if not result.matched_count:
         raise HTTPException(404, "Profile not found")
+    await db.workspaces.update_one(
+        {"_id": oid(ws_id), "qualification_profile_id": profile_id},
+        {"$set": {"qualification_voice_provider": body.voice_provider}},
+    )
     return public(await db.qualification_profiles.find_one(query))
 
 
@@ -62,10 +95,15 @@ async def update_profile(ws_id: str, profile_id: str, request: Request, body: Qu
 async def set_default(ws_id: str, profile_id: str, request: Request):
     await require_workspace_access(request, ws_id)
     db = db_from(request)
-    if not await db.qualification_profiles.find_one({"_id": oid(profile_id), "workspace_id": ws_id}):
+    profile = await db.qualification_profiles.find_one({"_id": oid(profile_id), "workspace_id": ws_id})
+    if not profile:
         raise HTTPException(404, "Profile not found")
-    await db.workspaces.update_one({"_id": oid(ws_id)}, {"$set": {"qualification_profile_id": profile_id}})
-    return {"default_profile_id": profile_id}
+    voice_provider = profile.get("voice_provider") or "plivo"
+    await db.workspaces.update_one({"_id": oid(ws_id)}, {"$set": {
+        "qualification_profile_id": profile_id,
+        "qualification_voice_provider": voice_provider,
+    }})
+    return {"default_profile_id": profile_id, "default_voice_provider": voice_provider}
 
 
 class Assignment(BaseModel):

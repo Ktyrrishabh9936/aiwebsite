@@ -141,13 +141,30 @@ def test_profiles_api_auth_isolation_assignment_and_preview(monkeypatch):
             client.headers["Authorization"] = "Bearer " + create_access_token(str(user_id), "qualification@example.test")
             assert (await client.get(f"/workspaces/{foreign_ws}/crm/qualification/profiles")).status_code == 403
             template = (await client.get(base + "/profiles")).json()["template"]
-            profile = {**template, "product_name": "Test software", "campaign_id": "software-launch"}
+            # The first profile read lazily imports legacy modules that load the local
+            # environment; restore this test's isolated signing key afterward.
+            monkeypatch.setenv("JWT_SECRET", "synthetic-qualification-test-secret-only")
+            client.headers["Authorization"] = "Bearer " + create_access_token(str(user_id), "qualification@example.test")
+            calling = await client.put(base + "/calling-settings", json={"call_mode": "automatic", "initial_delay_seconds": 30,
+                "timezone": "Asia/Kolkata", "calling_window": {"start": "09:30", "end": "19:00"}})
+            assert calling.status_code == 200, calling.text
+            assert calling.json()["call_mode"] == "automatic"
+            assert calling.json()["initial_delay_seconds"] == 30
+            profile = {**template, "product_name": "Test software", "campaign_id": "software-launch", "voice_provider": "sarvam"}
             created = await client.post(base + "/profiles", json=profile)
-            assert created.status_code == 200
+            assert created.status_code == 200, created.text
             profile_id = created.json()["id"]
             assert (await client.post(base + "/profiles", json=profile)).status_code == 409
             assert (await client.put(base + f"/profiles/{profile_id}", json={**profile, "product_name": "Updated software"})).status_code == 200
-            assert (await client.post(base + f"/profiles/{profile_id}/default")).status_code == 200
+            default = await client.post(base + f"/profiles/{profile_id}/default")
+            assert default.status_code == 200
+            assert default.json()["default_voice_provider"] == "sarvam"
+            catalog = (await client.get(base + "/profiles")).json()
+            assert catalog["default_profile_id"] == profile_id
+            assert catalog["default_voice_provider"] == "sarvam"
+            assert catalog["template"]["voice_provider"] == "sarvam"
+            workspace = await db.workspaces.find_one({"_id": ObjectId(ws)})
+            assert workspace["qualification_voice_provider"] == "sarvam"
             assert (await client.put(base + f"/leads/{lead_id}/profile", json={"profile_id": profile_id})).status_code == 200
             foreign_profile = ObjectId()
             await db.qualification_profiles.insert_one({"_id": foreign_profile, "workspace_id": str(foreign_ws)})
@@ -162,7 +179,9 @@ def test_profiles_api_auth_isolation_assignment_and_preview(monkeypatch):
             selected, selected_id = await service.resolve_profile(db, ws, {"campaign_id": "software-launch"}, {})
             assert selected_id == profile_id and selected.product_name == "Updated software"
             await db.workspaces.update_one({"_id": ObjectId(ws)}, {"$unset": {"qualification_profile_id": ""}})
-            fallback, _ = await service.resolve_profile(db, ws, {}, {})
+            fallback_workspace = await db.workspaces.find_one({"_id": ObjectId(ws)})
+            fallback, _ = await service.resolve_profile(db, ws, {}, fallback_workspace)
+            assert fallback.voice_provider == "sarvam"
             from qualification_engine import CallResult, LeadQualificationEngine
             decision = LeadQualificationEngine().process(CallResult(provider="test", provider_call_id="unconfigured", lead_id=lead_id, extracted_data=full_data()), fallback)
             assert decision.lead_status == "PARTIALLY_QUALIFIED"

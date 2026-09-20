@@ -7,6 +7,7 @@ const inputClass = "w-full rounded-md border bg-background px-3 py-2 text-sm";
 const buttonClass = "rounded-md border px-3 py-2 text-sm hover:bg-accent disabled:opacity-50";
 const ruleGroups = { mandatory_qualification_criteria: "Mandatory rules (all must pass)", disqualification_criteria: "Disqualifying rules (any match stops qualification)", qualification_criteria: "Product fit criteria", special_rules: "Additional mandatory rules" };
 const sample = { product_fit: true, eligibility: true, buying_intent: "high", purchase_timeline: "immediate", decision_maker_status: "decision_maker" };
+const profileDraft = (catalog, profile) => Object.fromEntries(Object.keys(catalog.template).map((key) => [key, profile?.[key] ?? catalog.template[key]]));
 export function qualificationError(error) {
   const detail = error.response?.data?.detail;
   return Array.isArray(detail) ? detail.map((e) => `${e.loc?.slice(1).join(".")}: ${e.msg}`).join("; ") : typeof detail === "string" ? detail : error.message || "Request failed";
@@ -28,6 +29,7 @@ export default function Qualification() {
   const [catalog, setCatalog] = useState(null);
   const [draft, setDraft] = useState(null);
   const [selected, setSelected] = useState("");
+  const [callingSettings, setCallingSettings] = useState({ call_mode: "manual", initial_delay_seconds: 300, timezone: "Asia/Kolkata", calling_window: { start: "09:30", end: "19:00" } });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [facts, setFacts] = useState(JSON.stringify(sample, null, 2));
@@ -37,11 +39,29 @@ export default function Qualification() {
     try { const { data } = await api.get(`${base}/profiles`); setCatalog(data); return data; }
     catch (e) { setError(qualificationError(e)); return null; }
   }, [base]);
-  useEffect(() => { setCatalog(null); setDraft(null); setSelected(""); setError(""); load().then((data) => { if (data) setDraft(data.template); }); }, [load]);
+  useEffect(() => {
+    setCatalog(null); setDraft(null); setSelected(""); setError("");
+    load().then((data) => {
+      if (!data) return;
+      const savedDefault = data.profiles.find((profile) => profile.id === data.default_profile_id);
+      if (data.calling_settings) setCallingSettings(data.calling_settings);
+      setSelected(savedDefault?.id || "");
+      setDraft(profileDraft(data, savedDefault));
+    });
+  }, [load]);
+  const saveCallingSettings = async () => {
+    setBusy(true); setError("");
+    try {
+      const { data } = await api.put(`${base}/calling-settings`, callingSettings);
+      setCallingSettings(data);
+      toast.success("Qualification call mode saved");
+    } catch (e) { setError(qualificationError(e)); }
+    finally { setBusy(false); }
+  };
   const set = (key, value) => { setDraft((d) => ({ ...d, [key]: value })); setPreview(null); };
   const choose = (id) => {
     const source = catalog.profiles.find((p) => p.id === id) || catalog.template;
-    setSelected(id); setDraft(Object.fromEntries(Object.keys(catalog.template).map((key) => [key, source[key] ?? catalog.template[key]]))); setPreview(null); setError("");
+    setSelected(id); setDraft(profileDraft(catalog, source)); setPreview(null); setError("");
   };
   const save = async (makeDefault = false) => {
     setBusy(true); setError("");
@@ -50,7 +70,7 @@ export default function Qualification() {
       // Remember a successful save even if setting the default fails afterward.
       setSelected(data.id);
       setCatalog((current) => ({ ...current, profiles: [data, ...current.profiles.filter((p) => p.id !== data.id)] }));
-      setDraft(Object.fromEntries(Object.keys(catalog.template).map((key) => [key, data[key] ?? catalog.template[key]])));
+      setDraft(profileDraft(catalog, data));
       if (makeDefault) await api.post(`${base}/profiles/${data.id}/default`);
       await load(); await refresh(); toast.success(makeDefault ? "Profile saved as workspace default" : "Qualification profile saved");
     } catch (e) { setError(qualificationError(e)); }
@@ -64,8 +84,17 @@ export default function Qualification() {
   return <div className="p-5 sm:p-8 max-w-6xl mx-auto space-y-6">
     <div><Link to={`/app/w/${ws.id}/agents`} className="text-sm text-primary">AI Agents</Link><h1 className="text-3xl font-bold mt-2">Lead qualification</h1><p className="text-muted-foreground text-sm mt-2">Your selected voice provider runs the call. Arevei evaluates the facts, applies your rules, and updates the CRM.</p></div>
     {error && <p role="alert" className="rounded-lg border border-destructive p-3 text-sm text-destructive">{error}</p>}
-    {!catalog && <button className={buttonClass} onClick={() => load().then((data) => { if (data) setDraft(data.template); })}>Load qualification profiles</button>}
+    {!catalog && <button className={buttonClass} onClick={() => load().then((data) => { if (data) setDraft(profileDraft(data)); })}>Load qualification profiles</button>}
     {catalog && draft && <>
+      <section className="border rounded-xl p-5 bg-card space-y-4">
+        <div><h2 className="font-semibold">New lead calling</h2><p className="text-xs text-muted-foreground mt-1">Choose what happens after a lead is created. This setting is saved for the workspace.</p></div>
+        <div className="grid sm:grid-cols-3 gap-3">
+          {["automatic", "scheduled", "manual"].map((mode) => <label key={mode} className={`rounded-lg border p-3 cursor-pointer ${callingSettings.call_mode === mode ? "border-primary bg-primary/5" : ""}`}><input type="radio" className="mr-2" name="call-mode" value={mode} checked={callingSettings.call_mode === mode} onChange={() => setCallingSettings({ ...callingSettings, call_mode: mode })} /><span className="font-medium capitalize">{mode}</span><p className="text-xs text-muted-foreground mt-1">{mode === "automatic" ? "Call every new lead after the selected delay." : mode === "scheduled" ? "Queue new leads for the next daily calling time." : "Only call when a user clicks the call button."}</p></label>)}
+        </div>
+        {callingSettings.call_mode === "automatic" && <Field label="Call after lead creation"><select aria-label="Automatic call delay" className={inputClass} value={callingSettings.initial_delay_seconds} onChange={(e) => setCallingSettings({ ...callingSettings, initial_delay_seconds: Number(e.target.value) })}><option value={0}>Instant</option><option value={30}>30 seconds</option><option value={60}>1 minute</option><option value={300}>5 minutes</option></select></Field>}
+        {callingSettings.call_mode === "scheduled" && <div className="grid sm:grid-cols-2 gap-3"><Field label="Daily calling time"><input aria-label="Daily calling time" type="time" className={inputClass} value={callingSettings.calling_window?.start || "09:30"} onChange={(e) => setCallingSettings({ ...callingSettings, calling_window: { ...(callingSettings.calling_window || {}), start: e.target.value } })} /></Field><Field label="Timezone"><input className={inputClass} value={callingSettings.timezone || "Asia/Kolkata"} onChange={(e) => setCallingSettings({ ...callingSettings, timezone: e.target.value })} /></Field></div>}
+        <button type="button" disabled={busy} className={buttonClass} onClick={saveCallingSettings}>Save call mode</button>
+      </section>
       <section className="border rounded-xl p-5 bg-card space-y-3"><Field label="Product / campaign profile"><select className={inputClass} disabled={busy} value={selected} onChange={(e) => choose(e.target.value)}><option value="">New profile</option>{catalog.profiles.map((p) => <option key={p.id} value={p.id}>{p.product_name}{catalog.default_profile_id === p.id ? " (workspace default)" : ""}</option>)}</select></Field><p className="text-xs text-muted-foreground">Selection order: lead override, campaign profile, workspace default. Calls keep a snapshot of the profile used.</p><p className="text-xs text-muted-foreground">Webhook authentication: {catalog.callback_authentication}. This indicates configuration, not a successful live call.</p>{!catalog.default_profile_id && <p className="text-sm text-amber-600">Set a default profile to enable automatic qualification for leads without an assigned campaign profile. Until then, connected calls require review.</p>}
       {catalog.legacy_config?.criteria?.length > 0 && <details className="text-sm"><summary className="cursor-pointer">Previous rules to review</summary><p className="my-2 text-muted-foreground">Your previous text rules are preserved here. Recreate them as explicit comparisons below, then save a default profile. They are not applied by the new engine.</p><pre className="text-xs overflow-auto p-3 bg-secondary rounded">{JSON.stringify(catalog.legacy_config, null, 2)}</pre></details>}</section>
       <div className="grid lg:grid-cols-[1fr_320px] gap-6 items-start">

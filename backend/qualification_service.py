@@ -57,7 +57,9 @@ async def resolve_profile(db, ws_id, lead, workspace):
     # No industry assumptions. Existing workflow intervals remain integration configuration.
     from plivo_calls import ensure_calling_workflow_config
     workflow = await ensure_calling_workflow_config(db, ws_id)
-    return QualificationProfile(required_information=["product_fit", "buying_intent", "qualification_profile_configuration"], retry={"max_attempts": workflow.get("max_attempts", 4), "retry_rules": [{"outcome": outcome.value, "delay_minutes": workflow.get("retry_delay_minutes", 30)} for outcome in RETRYABLE]}), "default"
+    return QualificationProfile(voice_provider=workspace.get("qualification_voice_provider") or "plivo",
+        required_information=["product_fit", "buying_intent", "qualification_profile_configuration"],
+        retry={"max_attempts": workflow.get("max_attempts", 4), "retry_rules": [{"outcome": outcome.value, "delay_minutes": workflow.get("retry_delay_minutes", 30)} for outcome in RETRYABLE]}), "default"
 
 
 async def extract_facts(call, profile, model_id):
@@ -129,9 +131,9 @@ class CRMLeadUpdateService:
             delay = RetryPolicyEngine.delay(result.call_outcome, profile.retry)
             at = call.callback_at if result.next_action == "CALLBACK" else parse_time(now) + timedelta(minutes=delay) if delay is not None else None
             workflow = await ensure_calling_workflow_config(self.db, ws_id)
-            if at and workflow.get("enabled", True) and attempts < profile.retry.max_attempts:
+            if at and workflow.get("enabled", True) and workflow.get("call_mode") != "manual" and attempts < profile.retry.max_attempts:
                 at = next_calling_window_start(workflow, max(at, parse_time(now)))
-                q.update({"status": "scheduled", "scheduled_for": at.isoformat(), "auto_triggered": False})
+                q.update({"status": "scheduled", "scheduled_for": at.isoformat(), "trigger_mode": "retry", "auto_triggered": False})
         updates = {"last_call_outcome": result.call_outcome.value, "call_outcome": result.call_outcome.value,
             "last_call_at": (call.ended_at or call.started_at or parse_time(now)).isoformat(), "lead_status": result.lead_status.value,
             **{key: model[key] for key in ("qualification_score", "lead_temperature", "confidence_score", "qualification_reason", "disqualification_reason", "qualification_data", "next_action", "callback_at", "retry_eligible", "conversation_summary")},
