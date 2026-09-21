@@ -1,5 +1,8 @@
 import MetaAttribution from "../../components/MetaAttribution";
+import CrmPipeline from "../../components/CrmPipeline";
+import CrmReminders from "../../components/CrmReminders";
 import LeadQualificationPanel from "../../components/LeadQualificationPanel";
+import CrmPerformance from "./CrmPerformance";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
@@ -16,7 +19,7 @@ const DEFAULT_STAGES = [];
 const PAYMENT_METHODS = ["Cash", "Bank Transfer", "UPI", "Cheque", "Card", "Other"];
 const PAYMENT_STATUSES = ["Paid", "Pending"];
 const ORG_FIELDS = ["company_name", "logo_url", "address", "phone", "email", "website", "tax_number", "bank_details", "authorized_signatory", "receipt_prefix", "invoice_prefix"];
-const DETAIL_TABS = ["Details", "Payments", "Receipts", "Invoice", "Notes"];
+const DETAIL_TABS = ["Details", "Qualification", "Reminders", "Payments", "Receipts", "Invoice", "Notes"];
 const DEFAULT_AGENT_MAPPINGS_TEXT = JSON.stringify({
   workspace_id: "workspace_id",
   lead_id: "lead_id",
@@ -182,6 +185,12 @@ function finalInvoiceDownloadUrl(wsId, leadId) {
 export default function CrmInbox() {
   const { wsId } = useParams();
   const [activeTab, setActiveTab] = useState("records");
+  const [recordsLayout, setRecordsLayout] = useState("list");
+  const [pipelineRevision, setPipelineRevision] = useState(0);
+  const openLead = async (id) => {
+    try { const { data } = await api.get(`/workspaces/${wsId}/crm/leads/${id}`); selectLead(data); }
+    catch (e) { toast.error(formatError(e.response?.data?.detail)); }
+  };
   const [recordView, setRecordView] = useState("active");
   const [leads, setLeads] = useState([]);
   const [settings, setSettings] = useState({ fields: [], states: [], templates: [], organization: {} });
@@ -649,13 +658,15 @@ export default function CrmInbox() {
           <p className="text-sm text-muted-foreground mt-1">Manage records, states, organization details, receipts, and invoices.</p>
           <Link to={`/app/w/${wsId}/workflows/ads-to-crm`} className="inline-block mt-2 text-sm text-primary underline">Meta / Sheet mapping</Link>
         </div>
-        <div className="flex rounded-lg border bg-card p-1 w-fit">
+        <div className="flex rounded-lg border bg-card p-1 w-fit max-w-full overflow-x-auto" role="group" aria-label="CRM sections">
           <TabButton active={activeTab === "records"} onClick={() => setActiveTab("records")} icon={Users} label="Records" />
+          <TabButton active={activeTab === "reminders"} onClick={() => { setActiveTab("reminders"); setSelectedLead(null); }} icon={Calendar} label="Reminders" />
           <TabButton active={activeTab === "settings"} onClick={() => setActiveTab("settings")} icon={Settings} label="Settings" />
+          <TabButton active={activeTab === "performance"} onClick={() => setActiveTab("performance")} icon={CheckCircle2} label="Performance" />
         </div>
       </div>
 
-      {activeTab === "settings" ? (
+      {activeTab === "reminders" ? <CrmReminders wsId={wsId} onOpenLead={async (id) => { await openLead(id); setActiveTab("records"); }} /> : activeTab === "performance" ? <CrmPerformance wsId={wsId} states={states} /> : activeTab === "settings" ? (
         <SettingsPanel
           fields={settings.fields || []}
           states={states}
@@ -699,13 +710,17 @@ export default function CrmInbox() {
             </div>
           </div>
 
+          <div className="flex items-center gap-2" role="group" aria-label="Record views">{["list", "kanban"].map((view) => <button key={view} aria-pressed={recordsLayout === view} onClick={() => { setRecordsLayout(view); if (view === "kanban") setRecordView("active"); }} className={`px-4 py-2 rounded-lg border text-sm font-medium ${recordsLayout === view ? "bg-primary/10 text-primary border-primary/30" : "hover:bg-accent"}`}>{view === "list" ? "List" : "Kanban / pipeline"}</button>)}</div>
           <div className={`grid gap-6 items-start ${selectedLead ? "xl:grid-cols-[minmax(0,1fr)_560px]" : "grid-cols-1"}`}>
-            <div className="space-y-3">
+            <div className="space-y-3 min-w-0">
+              {recordsLayout === "kanban" && recordView !== "trash" ? <CrmPipeline wsId={wsId} states={states} search={searchQuery} statusFilter={statusFilter} onSelect={openLead} revision={pipelineRevision} onChanged={(lead) => { setPipelineRevision((v) => v + 1); setSelectedLead((old) => old?.id === lead.id ? lead : old); loadAll(); }} /> : <>
               <LeadTable leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} canCallWithAI={hasCallableAgent} onSelect={selectLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
               <Pagination page={page} totalPages={totalPages} total={pagination.total} onPage={setPage} />
+              </>}
             </div>
             {selectedLead && (
               <LeadDetail
+                key={selectedLead.id}
                 lead={selectedLead}
                 fields={activeFields}
                 states={states}
@@ -947,9 +962,9 @@ function LeadDetail(props) {
   };
 
   return (
-    <aside className="fixed inset-0 z-50 overflow-y-auto bg-background p-4 xl:static xl:z-auto xl:bg-transparent xl:p-0">
+    <aside aria-label="Lead details" className="fixed inset-0 z-50 overflow-y-auto overscroll-contain bg-background p-4 xl:sticky xl:top-4 xl:z-auto xl:max-h-[calc(100dvh-130px)] xl:bg-transparent xl:p-0">
       <div className="p-5 rounded-xl border bg-card space-y-5 max-w-3xl mx-auto xl:max-w-none">
-        <div className="flex items-start justify-between border-b pb-4">
+        <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b pb-4 pt-2 bg-card">
           <div className="min-w-0"><h3 className="font-bold text-lg truncate">{values.full_name || values.phone || values.email || "Unnamed Lead"}</h3><span className="text-xs text-muted-foreground flex items-center gap-1 mt-1"><Calendar className="w-3.5 h-3.5" /> Captured on {new Date(lead.created_at).toLocaleString()}</span></div>
           <div className="flex items-center gap-2">
             {isTrashed ? (
@@ -966,11 +981,12 @@ function LeadDetail(props) {
           </div>
         </div>
         {isTrashed && <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs text-destructive">This lead is in trash and can be restored until {new Date(lead.delete_after).toLocaleDateString()}.</div>}
-        <LeadQualificationPanel key={lead.id} lead={lead} />
-        <QualificationSummary communication={communication} qualification={qualification} saving={saving || cancellingCallId === lead.id} onCancel={() => cancelScheduledCall(lead)} />
-        <div className="flex rounded-lg border bg-background p-1 overflow-x-auto">
-          {DETAIL_TABS.map((tab) => <button key={tab} onClick={() => setDetailTab(tab)} className={`px-3 h-9 rounded-md text-sm font-semibold whitespace-nowrap ${detailTab === tab ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{tab}</button>)}
+        <div className="sticky top-[76px] z-10 flex flex-wrap gap-1 rounded-lg border bg-card p-1" role="group" aria-label="Lead sections">
+          {DETAIL_TABS.map((tab) => <button key={tab} aria-pressed={detailTab === tab} onClick={() => setDetailTab(tab)} className={`px-3 h-9 rounded-md text-xs font-semibold whitespace-nowrap ${detailTab === tab ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{tab}</button>)}
         </div>
+        {detailTab === "Qualification" && <><LeadQualificationPanel key={lead.id} lead={lead} /><QualificationSummary communication={communication} qualification={qualification} saving={saving || cancellingCallId === lead.id} onCancel={() => cancelScheduledCall(lead)} /></>}
+        {detailTab === "Reminders" && (isTrashed ? <p className="text-sm text-muted-foreground">Restore this lead to set reminders.</p> : <CrmReminders wsId={wsId} leadId={lead.id} />)}
+        {detailTab === "Payments" && !isCustomer && <p className="text-sm text-muted-foreground">Convert this lead to a customer in Details to manage payments.</p>}
 
         {detailTab === "Details" && (
           <section className="space-y-4">

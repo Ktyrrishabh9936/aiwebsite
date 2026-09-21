@@ -6,6 +6,7 @@ import api from "../lib/api";
 jest.mock("react-router-dom", () => ({ useParams: () => ({ wsId: "workspace" }), Link: ({ children, to, ...props }) => <a href={to} {...props}>{children}</a> }), { virtual: true });
 jest.mock("../lib/api", () => ({ __esModule: true, default: { get: jest.fn(), put: jest.fn() } }));
 jest.mock("../pages/sections/Qualification", () => ({ qualificationError: (e) => e.message }));
+jest.mock("./QualificationReview", () => () => null);
 
 let container, root;
 beforeEach(() => {

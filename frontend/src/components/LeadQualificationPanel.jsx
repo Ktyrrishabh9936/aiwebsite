@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import api from "../lib/api";
+import QualificationReview from "./QualificationReview";
 import { qualificationError } from "../pages/sections/Qualification";
 
 export default function LeadQualificationPanel({ lead }) {
@@ -40,5 +41,6 @@ export default function LeadQualificationPanel({ lead }) {
     {result ? <><p className="text-sm">{result.disqualification_reason || result.qualification_reason}</p><p className="text-sm">Next action: <strong>{result.next_action.replaceAll("_", " ")}</strong>{result.retry_eligible ? " · Retry eligible" : ""}</p>{lead.qualification_call?.scheduled_for && <p className="text-xs">Scheduled: {new Date(lead.qualification_call.scheduled_for).toLocaleString()}</p>}{result.missing_information?.length > 0 && <p className="text-sm text-amber-600">Missing: {result.missing_information.join(", ")}</p>}<details className="text-sm"><summary className="cursor-pointer">Collected facts and score breakdown</summary><pre className="overflow-auto text-xs bg-secondary p-3 mt-2 rounded">{JSON.stringify({ facts: result.qualification_data, score_breakdown: result.score_breakdown }, null, 2)}</pre></details></> : <p className="text-xs text-muted-foreground">No engine result yet. The next completed call will appear here.</p>}
     {lead.do_not_call && <p className="text-sm text-destructive font-semibold">Do not call: future calls are blocked.</p>}
     <details className="text-sm"><summary className="cursor-pointer">Call decision history ({history.length})</summary><div className="mt-2 space-y-2">{history.map((call) => <div key={call.id} className="border rounded-md p-3 text-xs space-y-1"><p>{new Date(call.created_at).toLocaleString()} · {call.result?.call_outcome || "Processing"}</p><p>{call.result?.lead_status} · Score: {call.result?.qualification_score ?? "Not scored"}</p><p>{call.result?.disqualification_reason || call.result?.qualification_reason}</p><p className="text-muted-foreground">Profile: {call.profile_snapshot?.product_name || "Pending"}</p></div>)}</div></details>
+    <QualificationReview lead={lead} wsId={wsId} />
   </section>;
 }

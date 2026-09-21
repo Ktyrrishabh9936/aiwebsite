@@ -328,7 +328,7 @@ async def list_tasks(ws_id: str, request: Request):
 
 async def execute_task(task_doc):
     """Run a task through its specialist agent."""
-    if task_doc.get("source") == "qualification_engine":
+    if task_doc.get("source") in {"qualification_engine", "crm_reminder"}:
         raise HTTPException(409, "This is a human follow-up task. Complete the action in CRM and mark it done.")
     ws = await db.workspaces.find_one({"_id": oid(task_doc["workspace_id"])})
     if not ws:
@@ -1270,6 +1270,8 @@ from workflows import router as workflows_router
 from crm import router as crm_router
 from plivo_agents import router as plivo_agents_router
 from qualification_api import router as qualification_router
+from crm_performance import router as crm_performance_router
+from crm_workspace import router as crm_workspace_router
 from properties import router as properties_router
 
 api.include_router(google_sheets_router)
@@ -1279,6 +1281,8 @@ api.include_router(plivo_agents_router)
 from voice_api import router as voice_providers_router
 api.include_router(voice_providers_router)
 api.include_router(qualification_router)
+api.include_router(crm_performance_router)
+api.include_router(crm_workspace_router)
 api.include_router(properties_router)
 api.include_router(build_voice_router(db, manager_service, owned_workspace, require_user))
 

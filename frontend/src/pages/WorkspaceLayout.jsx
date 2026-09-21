@@ -1,10 +1,11 @@
 import { useEffect, useState, useCallback } from "react";
-import { NavLink, Outlet, useParams, useNavigate, Link, useLocation } from "react-router-dom";
+import { Outlet, useParams, useNavigate, Link, useLocation } from "react-router-dom";
 import {
-  LayoutDashboard, Brain as BrainIcon, MessageSquare, ListChecks, FileText, Code2,
-  AlertCircle, Bell, CheckCircle2, Globe, Loader2, LogOut, Plus, Boxes, Settings as SettingsIcon, Building2,
-  UserCircle, Workflow, Users, Bot,
+  AlertCircle, Bell, CheckCircle2, Globe, Loader2, LogOut, Plus, Settings as SettingsIcon,
+  UserCircle, Users, Bot, Menu, PanelLeftClose, PanelLeftOpen,
 } from "lucide-react";
+import WorkspaceNavigation, { navigationGroups } from "../components/WorkspaceNavigation";
+import { Sheet, SheetContent, SheetTitle, SheetDescription } from "../components/ui/sheet";
 import { toast } from "sonner";
 import api from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -17,20 +18,6 @@ import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popove
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
-
-const nav = [
-  { to: "", label: "Overview", icon: LayoutDashboard, end: true },
-  { to: "projects", label: "Projects", icon: Boxes },
-  { to: "properties", label: "Properties", icon: Building2 },
-  { to: "brain", label: "Brain", icon: BrainIcon },
-  { to: "manager", label: "Manager", icon: MessageSquare },
-  { to: "agents", label: "AI Agents", icon: Bot },
-  { to: "tasks", label: "Tasks", icon: ListChecks },
-  { to: "blogs", label: "Blogs", icon: FileText },
-  { to: "embed", label: "Add Blog System", icon: Code2 },
-  { to: "workflows", label: "Workflows", icon: Workflow },
-  { to: "crm", label: "CRM", icon: Users },
-];
 
 const kindDot = { success: "bg-primary", approval: "bg-amber-500", error: "bg-destructive", info: "bg-muted-foreground" };
 const workspaceStatus = {
@@ -55,6 +42,12 @@ export default function WorkspaceLayout() {
   const [notFound, setNotFound] = useState(false);
   const [agentMode, setAgentMode] = useState(false);
   const [agentVisited, setAgentVisited] = useState(false);
+  const [mobileNavigation, setMobileNavigation] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem("arevei_sidebar_collapsed") === "true"; } catch { return false; } });
+  const toggleSidebar = () => setCollapsed((previous) => { const next = !previous; try { localStorage.setItem("arevei_sidebar_collapsed", String(next)); } catch {} return next; });
+  useEffect(() => { setMobileNavigation(false); }, [location.pathname]);
+  const currentSection = location.pathname.split("/")[4] || "";
+  const pageTitle = navigationGroups.flatMap((group) => group.items).find((item) => item.to === currentSection)?.label || "Workspace";
   useEffect(() => { setAgentMode(false); }, [location.pathname]);
 
   const refresh = useCallback(async () => {
@@ -125,42 +118,31 @@ export default function WorkspaceLayout() {
   if (!ws) return <div className="min-h-screen grid place-items-center text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin" /></div>;
 
   return (
-    <div className={`h-screen overflow-hidden ${agentMode ? "" : "md:pl-60"}`}>
-      <aside className={`${agentMode ? "hidden" : "hidden md:flex"} fixed inset-y-0 left-0 z-30 flex-col w-60 border-r border-border bg-card`}>
-        <div className="h-16 flex items-center px-5 border-b border-border">
-          <Logo className="text-base" to="/app" />
+    <div className={`h-[100dvh] overflow-hidden ${agentMode ? "" : collapsed ? "md:pl-[76px]" : "md:pl-64"}`}>
+      <a href="#workspace-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:bg-background focus:p-3 focus:rounded-lg">Skip to content</a>
+      <aside aria-label="Sidebar" className={`${agentMode ? "hidden" : "hidden md:flex"} fixed inset-y-0 left-0 z-30 flex-col ${collapsed ? "w-[76px]" : "w-64"} border-r border-border bg-card`}>
+        <div className={`h-16 shrink-0 flex items-center ${collapsed ? "justify-center" : "justify-between px-5"} border-b border-border`}>
+          {!collapsed && <Logo className="text-base" to="/app" />}
+          <button type="button" onClick={toggleSidebar} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} title={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed} className="p-2 rounded-lg text-muted-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring">{collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}</button>
         </div>
-        <div className="px-3 py-4">
-          <nav className="space-y-1">
-            {nav.map((n) => (
-              <NavLink
-                key={n.to}
-                to={n.to}
-                end={n.end}
-                data-testid={`nav-${n.label.toLowerCase().replace(/\s/g, "-")}`}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
-                    isActive ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground"
-                  }`
-                }
-              >
-                <n.icon className="w-4 h-4" /> {n.label}
-              </NavLink>
-            ))}
-          </nav>
-        </div>
-        <div className="mt-auto p-4 border-t border-border">
-          <div className="text-xs text-muted-foreground truncate mb-1">{ws.name}</div>
-          <div className="text-xs text-muted-foreground truncate">{ws.website_url}</div>
+        <WorkspaceNavigation wsId={wsId} collapsed={collapsed} />
+        <div className="shrink-0 p-3 border-t border-border">
+          {collapsed ? <Globe size={18} className="mx-auto text-muted-foreground" aria-label={ws.name} /> : <><label htmlFor="workspace-switcher" className="text-[10px] uppercase tracking-widest text-muted-foreground">Current workspace</label><select id="workspace-switcher" value={ws.id} onChange={(e) => navigate(`/app/w/${e.target.value}`)} className="mt-2 w-full rounded-lg border bg-background p-2 text-sm"><option value={ws.id}>{ws.name}</option>{workspaces.filter((item) => item.id !== ws.id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></>}
         </div>
       </aside>
+      <Sheet open={mobileNavigation} onOpenChange={setMobileNavigation}>
+        <SheetContent side="left" className="w-[min(320px,90vw)] p-0 flex flex-col gap-0">
+          <div className="p-5 border-b"><SheetTitle>Workspace navigation</SheetTitle><SheetDescription className="truncate">{ws.name}</SheetDescription></div>
+          <WorkspaceNavigation wsId={wsId} onNavigate={() => { setMobileNavigation(false); setAgentMode(false); }} />
+        </SheetContent>
+      </Sheet>
 
-      <div className="h-screen flex flex-col min-w-0">
+      <div className="h-[100dvh] flex flex-col min-w-0">
         <header className="sticky top-0 z-20 glass border-b border-border">
           <div className="min-h-16 px-3 sm:px-5 py-2 flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0">
-              <h2 className="font-display font-bold truncate">{ws.name}</h2>
-              <p className="text-xs text-muted-foreground truncate">{ws.website_url}</p>
+            <div className="min-w-0 flex items-center gap-3">
+              <button type="button" onClick={() => setMobileNavigation(true)} aria-label="Open navigation" className={`${agentMode ? "" : "md:hidden"} p-2 rounded-lg border hover:bg-accent`}><Menu size={18} /></button>
+              <div className="min-w-0"><p className="text-[11px] text-muted-foreground truncate max-w-48">{ws.name}</p><h2 className="font-semibold truncate">{agentMode ? "Agent workspace" : pageTitle}</h2></div>
             </div>
             <div className="flex rounded-full border border-border p-1 gap-1" role="group" aria-label="Workspace mode">
               <button type="button" aria-pressed={!agentMode} onClick={() => setAgentMode(false)} className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-xs font-semibold ${!agentMode ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}><Users size={14} /> Human Mode</button>
@@ -170,12 +152,12 @@ export default function WorkspaceLayout() {
               <ModelPicker value={ws.model_id} onChange={changeModel} />
               <Popover onOpenChange={(o) => o && loadNotes()}>
                 <PopoverTrigger asChild>
-                  <button data-testid="notifications-btn" className="relative grid place-items-center w-9 h-9 rounded-full border border-border hover:bg-accent transition-colors">
+                  <button aria-label="Notifications" data-testid="notifications-btn" className="relative grid place-items-center w-9 h-9 rounded-full border border-border hover:bg-accent transition-colors">
                     <Bell className="w-4 h-4" />
                     {notes.length > 0 && <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-primary" />}
                   </button>
                 </PopoverTrigger>
-                <PopoverContent align="end" className="w-80 p-0">
+                <PopoverContent align="end" className="w-80 max-w-[calc(100vw-24px)] p-0">
                   <div className="px-4 py-3 border-b border-border font-medium text-sm">Activity</div>
                   <div className="max-h-96 overflow-y-auto">
                     {notes.length === 0 ? (
@@ -200,7 +182,7 @@ export default function WorkspaceLayout() {
                     <UserCircle className="w-4 h-4" />
                   </button>
                 </PopoverTrigger>
-                <PopoverContent align="end" className="w-96 p-0">
+                <PopoverContent align="end" className="w-96 max-w-[calc(100vw-24px)] p-0">
                   <div className="px-4 py-3 border-b border-border">
                     <div className="font-medium text-sm truncate">{user?.name || "Account"}</div>
                     <div className="text-xs text-muted-foreground truncate">{user?.email}</div>
@@ -273,7 +255,7 @@ export default function WorkspaceLayout() {
           </div>
         </header>
 
-        <main hidden={agentMode} className={`${agentMode ? "hidden" : "flex-1"} ${isBlogEditor ? "min-h-0 overflow-hidden" : "overflow-y-auto"}`}>
+        <main id="workspace-content" tabIndex={-1} hidden={agentMode} className={`${agentMode ? "hidden" : "flex-1"} ${isBlogEditor ? "min-h-0 overflow-hidden" : "min-h-0 overflow-y-auto overscroll-contain"}`}>
           <Outlet context={{ ws, setWs, refresh, loadNotes }} />
         </main>
         {agentVisited && <div hidden={!agentMode} className={agentMode ? "flex-1 min-h-0 overflow-y-auto" : "hidden"}><AgentWorkspace key={ws.id} ws={ws} active={agentMode} /></div>}

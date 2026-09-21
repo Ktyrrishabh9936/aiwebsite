@@ -1,0 +1,21 @@
+import React, { act } from "react";
+import { createRoot } from "react-dom/client";
+import CrmPipeline from "./CrmPipeline";
+import api from "../lib/api";
+jest.mock("../lib/api", () => ({ __esModule: true, formatError: (v) => v, default: { get: jest.fn(), patch: jest.fn() } }));
+let container, root;
+beforeEach(() => { global.IS_REACT_ACT_ENVIRONMENT = true; container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container); });
+afterEach(() => { act(() => root.unmount()); container.remove(); jest.clearAllMocks(); });
+test("loads stages independently and saves a stage change", async () => {
+  const lead = { id: "lead", full_name: "Diya", status: "new" };
+  api.get.mockImplementation(async (_, { params }) => ({ data: { items: params.status === "new" ? [lead] : [], total: params.status === "new" ? 1 : 0 } }));
+  api.patch.mockResolvedValue({ data: { ...lead, status: "won" } });
+  const open = jest.fn(), changed = jest.fn();
+  await act(async () => root.render(<CrmPipeline wsId="ws" states={[{ key: "new", label: "New" }, { key: "won", label: "Won" }]} search="" statusFilter="all" onSelect={open} onChanged={changed} revision={0} />));
+  expect(api.get).toHaveBeenCalledTimes(2);
+  await act(async () => container.querySelector("article button").click());
+  expect(open).toHaveBeenCalledWith("lead");
+  await act(async () => { const select = container.querySelector("select"); select.value = "won"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+  expect(api.patch).toHaveBeenCalledWith("/workspaces/ws/crm/pipeline/leads/lead", { status: "won" });
+  expect(changed).toHaveBeenCalledWith(expect.objectContaining({ status: "won" }));
+});
