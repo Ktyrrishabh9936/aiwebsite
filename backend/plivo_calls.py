@@ -1760,6 +1760,8 @@ def is_mandatory_junk_result(payload):
 
 
 async def mark_lead_junk(db, ws_id, lead_id, reason, payload=None):
+    from meta_fields import pending_sheet_sync
+    lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)}) or {}
     now = now_iso()
     payload = payload or {}
     note = normalize_lead_note({
@@ -1792,7 +1794,7 @@ async def mark_lead_junk(db, ws_id, lead_id, reason, payload=None):
     }
     await db.crm_leads.update_one(
         {"workspace_id": ws_id, "_id": ObjectId(lead_id)},
-        {"$set": {"status": "lost", "lead_status": "JUNK", "last_call_outcome": "INVALID_NUMBER", "call_outcome": "INVALID_NUMBER", "qualification_score": None, "lead_temperature": None, "retry_eligible": False, "next_action": "NO_ACTION", "qualification_call": qualification, "updated_at": now}, "$push": {"lead_notes": note}},
+        {"$set": {**pending_sheet_sync(lead, "lost"), "status": "lost", "lead_status": "JUNK", "last_call_outcome": "INVALID_NUMBER", "call_outcome": "INVALID_NUMBER", "qualification_score": None, "lead_temperature": None, "retry_eligible": False, "next_action": "NO_ACTION", "qualification_call": qualification, "updated_at": now}, "$push": {"lead_notes": note}},
     )
     await db[COLLECTION].insert_one({
         "workspace_id": ws_id,

@@ -127,6 +127,24 @@ class CRMLead(BaseDocument):
     workflow_kind: str = "ads_to_crm"
     source: str = "google_sheet"
     sheet_row_key: str  # spreadsheet_id + tab + row_number or lead_id
+    meta_lead_id: Optional[str] = None
+    meta_created_time: Optional[str] = None
+    meta_ad_id: Optional[str] = None
+    meta_ad_name: Optional[str] = None
+    meta_adset_id: Optional[str] = None
+    meta_adset_name: Optional[str] = None
+    meta_campaign_id: Optional[str] = None
+    meta_campaign_name: Optional[str] = None
+    meta_form_id: Optional[str] = None
+    meta_form_name: Optional[str] = None
+    meta_is_organic: Optional[bool] = None
+    meta_platform: Optional[str] = None
+    google_sheet_spreadsheet_id: Optional[str] = None
+    google_sheet_name: Optional[str] = None
+    google_sheet_row_number: Optional[int] = None
+    last_google_sheet_sync_at: Optional[str] = None
+    google_sheet_sync_status: Optional[str] = None
+    google_sheet_sync_error: Optional[str] = None
     email: Optional[str] = None
     full_name: Optional[str] = None
     phone: Optional[str] = None

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
 
 from models import now_iso
+from meta_fields import META_FIELDS, pending_sheet_sync
 
 router = APIRouter(prefix="/workspaces/{ws_id}/crm")
 
@@ -133,6 +134,8 @@ def normalize_field(field, existing=None):
     key = keyify(field.get("key") or field.get("label") or existing.get("key"))
     if not key:
         raise HTTPException(status_code=400, detail="Field key or label required")
+    if key in META_FIELDS or key.startswith("google_sheet_") or key == "last_google_sheet_sync_at":
+        raise HTTPException(400, "Source attribution and sync fields are read-only")
     field_type = field.get("type") or existing.get("type") or "text"
     if field_type not in VALID_FIELD_TYPES:
         raise HTTPException(status_code=400, detail="Invalid field type")
@@ -1490,12 +1493,16 @@ async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = B
         "assigned_salesperson": values.get("assigned_salesperson"),
         "updated_at": now_iso(),
     }
+    updates.update(pending_sheet_sync(doc, status))
     qualification = doc.get("qualification_call") or {}
     if doc.get("status") == "lost" and status != "lost" and qualification.get("qualification_category") == "junk":
         updates["qualification_call.qualification_category"] = ""
         updates["qualification_call.last_error"] = ""
         updates["qualification_call.disconnection_reason"] = ""
     await db.crm_leads.update_one({"workspace_id": ws_id, "_id": oid(lead_id)}, {"$set": updates})
+    if pending_sheet_sync(doc, status):
+        from google_sheets import sync_lead_status
+        await sync_lead_status(db, ws_id, lead_id)
     return decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)}), settings)
 
 
@@ -1514,6 +1521,7 @@ async def convert_lead(ws_id: str, lead_id: str, request: Request, body: dict = 
     await db.crm_leads.update_one(
         {"workspace_id": ws_id, "_id": oid(lead_id)},
         {"$set": {
+            **pending_sheet_sync(lead, "won"),
             "status": "won",
             "customer_status": "customer",
             "conversion_type": conversion_type,
@@ -1522,6 +1530,9 @@ async def convert_lead(ws_id: str, lead_id: str, request: Request, body: dict = 
             "updated_at": now_iso(),
         }},
     )
+    if pending_sheet_sync(lead, "won"):
+        from google_sheets import sync_lead_status
+        await sync_lead_status(db, ws_id, lead_id)
     return decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)}), settings)
 
 

@@ -1,0 +1,30 @@
+import React, { act } from "react";
+import { createRoot } from "react-dom/client";
+import MetaAttribution from "./MetaAttribution";
+import api from "../lib/api";
+jest.mock("../lib/api", () => ({ __esModule: true, formatError: () => "Retry failed", default: { post: jest.fn() } }));
+let container, root;
+beforeEach(() => { global.IS_REACT_ACT_ENVIRONMENT = true; container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container); });
+afterEach(() => { act(() => root.unmount()); container.remove(); jest.clearAllMocks(); });
+test("leads without Meta data show fields and a mapping link", () => {
+  act(() => root.render(<MetaAttribution lead={{ id: "old" }} wsId="ws" />));
+  expect(container.textContent).toContain("Meta Attribution");
+  expect(container.textContent).toContain("Meta Form ID");
+  expect(container.textContent).toContain("No Meta data has been imported");
+  expect(container.querySelector("a").getAttribute("href")).toBe("/app/w/ws/workflows/ads-to-crm");
+  expect(container.querySelector("details").open).toBe(true);
+});
+test("attribution is read-only, preserves false, and failed sync can be retried", async () => {
+  const lead = { id: "lead", meta_lead_id: "9876543210987654321", meta_is_organic: false, meta_campaign_name: "Test Campaign", google_sheet_sync_status: "failed", google_sheet_sync_error: "Reconnect Google" };
+  const onUpdate = jest.fn();
+  api.post.mockResolvedValue({ data: { ...lead, google_sheet_sync_status: "success" } });
+  act(() => root.render(<MetaAttribution lead={lead} wsId="ws" onUpdate={onUpdate} />));
+  expect(container.textContent).toContain("9876543210987654321");
+  expect(container.textContent).toContain("Test Campaign");
+  expect(container.textContent).toContain("No");
+  expect(container.querySelector("input")).toBeNull();
+  expect(container.querySelector('[role="alert"]').textContent).toBe("Reconnect Google");
+  await act(async () => container.querySelector("button").click());
+  expect(api.post).toHaveBeenCalledWith("/google/workspaces/ws/leads/lead/retry");
+  expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ google_sheet_sync_status: "success" }));
+});

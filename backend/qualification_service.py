@@ -151,6 +151,8 @@ class CRMLeadUpdateService:
             updates["do_not_call"] = True
         note = normalize_lead_note({"body": f"{result.call_outcome.value} · {result.lead_status.value}: {result.qualification_reason}", "source": "call_agent", "author": "Qualification Engine", "call_provider": call.provider, "call_id": call.provider_call_id, "summary": result.conversation_summary, "transcript": call.transcript})
         note.update({"id": str(event["_id"]), "created_at": now, "call_key": str(event["_id"]), "status": q["status"], "qualification_score": result.qualification_score, "recording_url": call.recording_url})
+        from meta_fields import pending_sheet_sync
+        updates.update(pending_sheet_sync(lead, updates.get("status", lead.get("status", "new"))))
         await self.db.crm_leads.update_one({"_id": lead["_id"], "workspace_id": ws_id}, {"$set": updates, "$addToSet": {"lead_notes": note}})
         if result.next_action in {"FOLLOW_UP", "SALES_CALL", "SITE_VISIT", "BOOK_DEMO", "SEND_QUOTATION"} or result.next_action == "CALLBACK" and q["status"] != "scheduled":
             task_id = stable_id("qualification_action", ws_id, history_id, result.next_action)

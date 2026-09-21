@@ -649,6 +649,8 @@ async def try_manager_crm_action(ws_id, message, settings, leads, *, source="web
         if not target_status:
             return f"Which status should I set? Valid statuses are: {', '.join(states.keys())}."
         updates["status"] = target_status
+        from meta_fields import pending_sheet_sync
+        updates.update(pending_sheet_sync(lead, target_status))
         actions.append(f"set status to {target_status}")
 
     values = default_field_values(lead, settings)
@@ -1165,9 +1167,8 @@ async def scheduler_loop():
 
 async def google_sheets_poller_loop():
     import httpx
-    from models import CRMLead
     from crm import active_fields, ensure_crm_settings
-    from google_sheets import refresh_access_token
+    from google_sheets import refresh_access_token, values_url, retry_sheet_statuses, import_sheet_row, column_letter, sheet_request
     from plivo_calls import schedule_first_qualification_call
     await asyncio.sleep(15)
     while True:
@@ -1176,6 +1177,7 @@ async def google_sheets_poller_loop():
             workspace_scope = [value.strip() for value in os.environ.get("BACKGROUND_WORKSPACE_IDS", "").split(",") if value.strip()]
             if workspace_scope:
                 workflow_query["workspace_id"] = {"$in": workspace_scope}
+            await retry_sheet_statuses(db, workspace_scope)
             cursor = db.workflows.find(workflow_query)
             async for wf in cursor:
                 ws_id = wf["workspace_id"]
@@ -1185,15 +1187,19 @@ async def google_sheets_poller_loop():
                 
                 spreadsheet_id = conn["spreadsheet_id"]
                 sheet_name = conn["sheet_name"]
-                headers = conn.get("header_row", [])
-                col_map = conn.get("column_map", {})
+                try:
+                    header_rows = (await sheet_request(db, conn, "GET", "1:1")).get("values") or [[]]
+                    headers = header_rows[0]
+                except Exception:
+                    logger.warning("Unable to read Sheet headers for workspace %s; check mapping/access", ws_id)
+                    continue
                 current_cursor = conn.get("cursor", 1)
                 crm_settings = await ensure_crm_settings(db, ws_id)
                 crm_field_keys = {f["key"] for f in active_fields(crm_settings)}
                 
                 start_row = current_cursor + 1
                 end_row = start_row + 200
-                range_str = f"{sheet_name}!A{start_row}:Z{end_row}"
+                range_str = f"A{start_row}:{column_letter(max(len(headers) - 1, 0))}{end_row}"
                 
                 access_token = conn.get("tokens", {}).get("access_token")
                 if not access_token:
@@ -1201,7 +1207,7 @@ async def google_sheets_poller_loop():
                 
                 async def fetch_values(token):
                     async with httpx.AsyncClient() as client:
-                        url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{range_str}"
+                        url = values_url(spreadsheet_id, sheet_name, range_str)
                         return await client.get(url, headers={"Authorization": f"Bearer {token}"})
                 
                 res = await fetch_values(access_token)
@@ -1230,46 +1236,21 @@ async def google_sheets_poller_loop():
                     continue
                 
                 new_leads_count = 0
+                import_failed = False
                 for idx, row in enumerate(rows):
                     row_num = start_row + idx
-                    padded_row = list(row) + [""] * max(0, len(headers) - len(row))
-                    row_dict = {}
-                    for h_idx, h_name in enumerate(headers):
-                        if h_idx < len(padded_row):
-                            row_dict[h_name] = padded_row[h_idx]
-                    
-                    lead_id_header = col_map.get("meta_lead_id")
-                    lead_id_val = row_dict.get(lead_id_header) if lead_id_header else None
-                    field_values = {}
-                    for field_key in crm_field_keys:
-                        header_name = col_map.get(field_key)
-                        if header_name and header_name in row_dict:
-                            field_values[field_key] = row_dict.get(header_name)
-                    
-                    row_key = lead_id_val if lead_id_val else f"{spreadsheet_id}_{sheet_name}_{row_num}"
-                    
-                    existing_lead = await db.crm_leads.find_one({"workspace_id": ws_id, "sheet_row_key": row_key})
-                    if not existing_lead:
-                        lead_doc = CRMLead(
-                            workspace_id=ws_id,
-                            workflow_kind="ads_to_crm",
-                            source="google_sheet",
-                            sheet_row_key=row_key,
-                            email=field_values.get("email"),
-                            full_name=field_values.get("full_name"),
-                            phone=field_values.get("phone"),
-                            address=field_values.get("address"),
-                            assigned_salesperson=field_values.get("assigned_salesperson"),
-                            field_values=field_values,
-                            fields=row_dict,
-                            status="new"
-                        )
-                        lead_data = lead_doc.to_mongo()
-                        res = await db.crm_leads.insert_one(lead_data)
-                        lead_id = str(res.inserted_id)
+                    try:
+                        lead_id, created = await import_sheet_row(db, ws_id, conn, headers, row, row_num, crm_field_keys)
+                    except ValueError:
+                        logger.warning("Sheet import mapping or identity conflict workspace=%s row=%s", ws_id, row_num)
+                        import_failed = True
+                        break
+                    if created:
                         await schedule_first_qualification_call(db, ws_id, lead_id)
                         new_leads_count += 1
-                
+
+                if import_failed:
+                    continue
                 new_cursor = current_cursor + len(rows)
                 await db.google_sheet_connections.update_one(
                     {"workspace_id": ws_id},

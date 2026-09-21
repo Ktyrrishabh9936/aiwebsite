@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import api, { API, formatError } from "../../lib/api";
+import { SHEET_MAPPING_FIELDS } from "../../lib/metaFields";
 
 export default function AdsToCrmWorkflow() {
   const { wsId } = useParams();
@@ -24,7 +25,10 @@ export default function AdsToCrmWorkflow() {
   const [sheetTabName, setSheetTabName] = useState("");
   const [columnMap, setColumnMap] = useState({});
 
-  const crmFields = (settings.fields || []).filter((field) => field.active !== false);
+  const mappingFields = connStatus.mapping_fields || SHEET_MAPPING_FIELDS;
+  const mappingKeys = new Set(mappingFields.map((field) => field.key));
+  const crmFields = [...(settings.fields || []).filter((field) => field.active !== false && !mappingKeys.has(field.key)), ...mappingFields];
+  const canMap = Boolean(connStatus.connected && connStatus.spreadsheet_id && connStatus.header_row?.length);
 
   const loadWorkflow = useCallback(() => {
     api.get(`/workspaces/${wsId}/workflows`)
@@ -244,6 +248,7 @@ export default function AdsToCrmWorkflow() {
                 <div className="text-sm">
                   <div className="font-semibold text-emerald-500 flex items-center gap-1.5"><Check className="w-4 h-4" /> Connected</div>
                   <div className="text-muted-foreground mt-0.5">{connStatus.google_email}</div>
+                  {!connStatus.write_access && <button onClick={handleGoogleConnect} className="mt-2 underline">Reconnect Google to allow status updates</button>}
                 </div>
                 <button onClick={handleDisconnect} className="p-2 text-muted-foreground hover:text-destructive transition rounded-lg hover:bg-destructive/5" title="Disconnect account">
                   <Trash2 className="w-4 h-4" />
@@ -295,12 +300,14 @@ export default function AdsToCrmWorkflow() {
             </div>
           )}
 
-          {connStatus.connected && connStatus.spreadsheet_id && connStatus.header_row && (
+          {(
             <div className="p-6 rounded-xl border bg-card space-y-4">
               <h3 className="text-base font-bold flex items-center gap-2">
                 <span className="flex items-center justify-center w-6 h-6 rounded-full bg-primary/10 text-primary text-xs font-semibold">3</span>
                 CRM Column Mapping
               </h3>
+              <p className="text-sm text-muted-foreground">Map Meta lead and attribution columns below. For custom form questions, create a field in <Link className="underline text-primary" to={`/app/w/${wsId}/crm`}>CRM Settings</Link>, then return here to map its Sheet column.</p>
+              {!canMap && <p className="text-sm text-muted-foreground">Connect Google and bind a Sheet to choose headers for these fields.</p>}
               <div className="space-y-3">
                 <div className="grid grid-cols-2 gap-4 items-center border-b pb-2">
                   <span className="text-xs font-bold uppercase text-muted-foreground">CRM Field</span>
@@ -312,19 +319,21 @@ export default function AdsToCrmWorkflow() {
                       {field.label} {field.required && <span className="text-destructive">*</span>}
                     </span>
                     <select
+                      aria-label={`Sheet column for ${field.label}`}
+                      disabled={!canMap}
                       value={columnMap[field.key] || ""}
                       onChange={(e) => setColumnMap((prev) => ({ ...prev, [field.key]: e.target.value }))}
                       className="h-9 px-2 rounded-lg border bg-background text-sm focus:outline-none"
                     >
                       <option value="">Ignore</option>
-                      {connStatus.header_row.map((h) => <option key={h} value={h}>{h}</option>)}
+                      {(connStatus.header_row || []).map((h) => <option key={h} value={h}>{h}</option>)}
                     </select>
                   </div>
                 ))}
               </div>
               <button
                 onClick={handleSaveMapping}
-                disabled={savingMap || !columnMap.phone}
+                disabled={!canMap || savingMap || !columnMap.phone}
                 className="w-full mt-4 inline-flex items-center justify-center gap-2 h-10 rounded-lg bg-accent text-accent-foreground font-semibold text-sm hover:bg-accent/80 transition disabled:opacity-50"
               >
                 {savingMap && <RefreshCw className="w-4 h-4 animate-spin" />}

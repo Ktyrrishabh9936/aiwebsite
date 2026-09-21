@@ -1,3 +1,4 @@
+import MetaAttribution from "../../components/MetaAttribution";
 import LeadQualificationPanel from "../../components/LeadQualificationPanel";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -646,6 +647,7 @@ export default function CrmInbox() {
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-2"><Users className="w-6 h-6 text-primary" /> CRM</h1>
           <p className="text-sm text-muted-foreground mt-1">Manage records, states, organization details, receipts, and invoices.</p>
+          <Link to={`/app/w/${wsId}/workflows/ads-to-crm`} className="inline-block mt-2 text-sm text-primary underline">Meta / Sheet mapping</Link>
         </div>
         <div className="flex rounded-lg border bg-card p-1 w-fit">
           <TabButton active={activeTab === "records"} onClick={() => setActiveTab("records")} icon={Users} label="Records" />
@@ -972,6 +974,7 @@ function LeadDetail(props) {
 
         {detailTab === "Details" && (
           <section className="space-y-4">
+            <MetaAttribution lead={lead} wsId={wsId} onUpdate={setLead} />
             <div className="grid sm:grid-cols-2 gap-3">
               {fields.map((field) => <DynamicField key={field.key} field={field} value={values[field.key] || ""} onChange={(v) => setField(field.key, v)} />)}
               <label className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground uppercase">State</span><select value={lead.status} onChange={(e) => setStatus(e.target.value)} className="w-full h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary">{states.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}</select></label>

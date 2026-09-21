@@ -1,4 +1,8 @@
 import os
+import logging
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from uuid import uuid4
 import urllib.parse
 from fastapi import APIRouter, Request, HTTPException, Query, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -6,11 +10,12 @@ from bson import ObjectId
 from models import GoogleSheetConnection, Workflow, now_iso
 import httpx
 from crm import active_fields, ensure_crm_settings
+from meta_fields import META_FIELDS, header_index, map_sheet_row
 
 router = APIRouter(prefix="/google")
 
 SCOPES = " ".join([
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.metadata.readonly",
     "https://www.googleapis.com/auth/userinfo.email"
 ])
@@ -156,7 +161,9 @@ async def get_connection_status(ws_id: str, request: Request):
         "spreadsheet_name": conn.get("spreadsheet_name"),
         "sheet_name": conn.get("sheet_name"),
         "column_map": conn.get("column_map", {}),
-        "header_row": conn.get("header_row", [])
+        "header_row": conn.get("header_row", []),
+        "mapping_fields": [{"key": key, "label": label} for key, (_, label) in META_FIELDS.items()] + [{"key": "status", "label": "CRM Status (write-back)"}],
+        "write_access": "https://www.googleapis.com/auth/spreadsheets" in conn.get("tokens", {}).get("scope", "").split(),
     }
 
 @router.delete("/workspaces/{ws_id}")
@@ -235,7 +242,7 @@ async def bind_sheet(ws_id: str, request: Request, body: dict):
     async def fetch_headers(token):
         async with httpx.AsyncClient() as client:
             headers = {"Authorization": f"Bearer {token}"}
-            url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{sheet_name}!A1:Z1"
+            url = values_url(spreadsheet_id, sheet_name, "1:1")
             return await client.get(url, headers=headers)
             
     res = await fetch_headers(access_token)
@@ -286,7 +293,19 @@ async def update_column_map(ws_id: str, request: Request, body: dict):
     db = request.app.state.db if hasattr(request.app.state, "db") else request.app.extra.get("db")
     settings = await ensure_crm_settings(db, ws_id)
     allowed = {f["key"] for f in active_fields(settings)}
-    column_map = {k: v for k, v in (body.get("column_map", {}) or {}).items() if k in allowed or k == "meta_lead_id"}
+    column_map = {k: v for k, v in (body.get("column_map", {}) or {}).items() if k in allowed | set(META_FIELDS) | {"status"} and v}
+    conn = await db.google_sheet_connections.find_one({"workspace_id": ws_id})
+    if not conn:
+        raise HTTPException(400, "Google connection not established.")
+    try:
+        for header in column_map.values():
+            header_index(conn.get("header_row", []), header)
+        if column_map.get("status") and not column_map.get("meta_lead_id"):
+            raise ValueError("Map Meta Lead ID before enabling status write-back.")
+        if column_map.get("status") and sum(str(v).strip().casefold() == str(column_map["status"]).strip().casefold() for v in column_map.values()) > 1:
+            raise ValueError("The status column must not also map to another field.")
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
     if not column_map.get("phone"):
         raise HTTPException(status_code=400, detail="Phone column mapping is required.")
     
@@ -298,3 +317,148 @@ async def update_column_map(ws_id: str, request: Request, body: dict):
         }}
     )
     return {"ok": True}
+
+
+def values_url(spreadsheet_id, sheet_name, cells):
+    quoted = "'" + sheet_name.replace("'", "''") + "'!" + cells
+    return f"https://sheets.googleapis.com/v4/spreadsheets/{urllib.parse.quote(spreadsheet_id, safe='')}/values/{urllib.parse.quote(quoted, safe='')}"
+
+
+def column_letter(index):
+    result = ""
+    while index >= 0:
+        result = chr(65 + index % 26) + result
+        index = index // 26 - 1
+    return result
+
+
+async def import_sheet_row(db, ws_id, conn, headers, row, row_number, field_keys):
+    from models import CRMLead
+    values, attribution = map_sheet_row(headers, row, conn.get("column_map", {}), field_keys)
+    meta_id = attribution.get("meta_lead_id")
+    row_key = meta_id or f"{conn['spreadsheet_id']}_{conn['sheet_name']}_{row_number}"
+    alternatives = [{"sheet_row_key": row_key}]
+    if meta_id:
+        alternatives.insert(0, {"meta_lead_id": meta_id})
+    existing = await db.crm_leads.find_one({"workspace_id": ws_id, "$or": alternatives})
+    source = {"google_sheet_spreadsheet_id": conn["spreadsheet_id"],
+              "google_sheet_name": conn["sheet_name"], "google_sheet_row_number": row_number}
+    raw = dict(zip(headers, list(row) + [""] * max(0, len(headers) - len(row))))
+    if existing:
+        if existing.get("google_sheet_spreadsheet_id") and (existing["google_sheet_spreadsheet_id"], existing.get("google_sheet_name")) != (conn["spreadsheet_id"], conn["sheet_name"]):
+            raise ValueError("Meta Lead ID already belongs to another source Sheet in this workspace.")
+        # A replay enriches source data but never resets sales status or enqueues write-back.
+        await db.crm_leads.update_one({"_id": existing["_id"], "workspace_id": ws_id}, {"$set": {**attribution, **source, "fields": raw}})
+        return str(existing["_id"]), False
+    status = "new"
+    if conn.get("column_map", {}).get("status"):
+        index = header_index(headers, conn["column_map"]["status"])
+        incoming = str(row[index] if index < len(row) else "").strip().casefold()
+        settings = await ensure_crm_settings(db, ws_id)
+        status = next((s["key"] for s in settings["states"] if incoming in {s["key"].casefold(), s["label"].casefold()}), "new")
+    lead = CRMLead(workspace_id=ws_id, source="google_sheet", sheet_row_key=row_key,
+                   **attribution, **source, field_values=values, fields=raw, status=status,
+                   **{key: values.get(key) for key in ("email", "full_name", "phone", "address", "assigned_salesperson")}).to_mongo()
+    result = await db.crm_leads.update_one({"workspace_id": ws_id, "sheet_row_key": row_key}, {"$setOnInsert": lead}, upsert=True)
+    if result.upserted_id:
+        return str(result.upserted_id), True
+    existing = await db.crm_leads.find_one({"workspace_id": ws_id, "sheet_row_key": row_key})
+    return str(existing["_id"]), False
+
+
+async def sheet_request(db, conn, method, cells, **kwargs):
+    async with httpx.AsyncClient(timeout=20) as client:
+        url = values_url(conn["spreadsheet_id"], conn["sheet_name"], cells)
+        token = conn.get("tokens", {}).get("access_token")
+        response = await client.request(method, url, headers={"Authorization": f"Bearer {token}"}, **kwargs)
+        if response.status_code == 401:
+            request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db=db)))
+            token = await refresh_access_token(conn, request)
+            response = await client.request(method, url, headers={"Authorization": f"Bearer {token}"}, **kwargs)
+        if response.status_code >= 400:
+            raise ValueError(f"Google Sheets returned HTTP {response.status_code}. Check access, reconnect Google, and retry.")
+        return response.json()
+
+
+async def sync_lead_status(db, ws_id, lead_id):
+    """Write only status; lease across workers and acknowledge only the version sent."""
+    query = {"workspace_id": ws_id, "_id": ObjectId(lead_id)}
+    now = datetime.now(timezone.utc)
+    token = uuid4().hex
+    lead = await db.crm_leads.find_one_and_update(
+        {**query, "google_sheet_sync_status": {"$in": ["pending", "failed"]},
+         "$or": [{"google_sheet_sync_lock_until": {"$exists": False}}, {"google_sheet_sync_lock_until": {"$lt": now.isoformat()}}]},
+        {"$set": {"google_sheet_sync_lock": token, "google_sheet_sync_lock_until": (now + timedelta(minutes=5)).isoformat()}})
+    if not lead:
+        return
+    status = lead.get("status", "new")
+    outcome = {}
+    try:
+        conn = await db.google_sheet_connections.find_one({"workspace_id": ws_id})
+        if not conn or not conn.get("spreadsheet_id"):
+            raise ValueError("Reconnect and bind the original Google Sheet, then retry.")
+        if not lead.get("google_sheet_spreadsheet_id") or (lead["google_sheet_spreadsheet_id"], lead.get("google_sheet_name")) != (conn["spreadsheet_id"], conn.get("sheet_name")):
+            raise ValueError("Lead source does not match the bound Sheet. Run the migration or restore the original binding.")
+        meta_id = str(lead.get("meta_lead_id") or "").strip()
+        if not meta_id:
+            raise ValueError("Meta Lead ID is missing. Map it and reimport or migrate this lead.")
+        mapping = conn.get("column_map", {})
+        if not mapping.get("status") or not mapping.get("meta_lead_id"):
+            raise ValueError("Map Meta Lead ID and CRM Status in the Google Sheets workflow.")
+        headers = (await sheet_request(db, conn, "GET", "1:1")).get("values", [[]])[0]
+        id_col = column_letter(header_index(headers, mapping["meta_lead_id"]))
+        status_col = column_letter(header_index(headers, mapping["status"]))
+        if id_col == status_col:
+            raise ValueError("Status and Meta Lead ID must use different columns.")
+        ids = (await sheet_request(db, conn, "GET", f"{id_col}2:{id_col}")).get("values", [])
+        matches = [i + 2 for i, row in enumerate(ids) if row and str(row[0]).strip() == meta_id]
+        if len(matches) != 1:
+            raise ValueError("Meta Lead ID is missing or duplicated in the source Sheet; no row was updated.")
+        row_number = matches[0]
+        settings = await ensure_crm_settings(db, ws_id)
+        label = next((s["label"] for s in settings["states"] if s["key"] == status), status)
+        cell = f"{status_col}{row_number}"
+        current = (await sheet_request(db, conn, "GET", cell)).get("values", [])
+        if current != [[label]]:
+            await sheet_request(db, conn, "PUT", cell, params={"valueInputOption": "RAW"}, json={"values": [[label]]})
+        outcome = {"google_sheet_sync_status": "success", "google_sheet_sync_error": None,
+                   "last_google_sheet_sync_at": now_iso(), "google_sheet_row_number": row_number,
+                   "google_sheet_synced_status": status, "google_sheet_sync_attempts": 0,
+                   "google_sheet_sync_next_attempt_at": None}
+    except Exception as error:
+        # Do not store provider bodies, tokens, or raw transport exception URLs.
+        safe = str(error) if isinstance(error, ValueError) else "Google Sheets sync failed. Check the connection and retry."
+        attempts = int(lead.get("google_sheet_sync_attempts") or 0) + 1
+        outcome = {"google_sheet_sync_status": "failed", "google_sheet_sync_error": safe,
+                   "google_sheet_sync_attempts": attempts,
+                   "google_sheet_sync_next_attempt_at": (now + timedelta(seconds=min(3600, 30 * 2 ** min(attempts, 7)))).isoformat()}
+        logging.getLogger(__name__).warning("Sheet status sync failed workspace=%s lead=%s: %s", ws_id, lead_id, safe)
+    finally:
+        await db.crm_leads.update_one({**query, "status": status, "google_sheet_sync_lock": token}, {"$set": outcome})
+        await db.crm_leads.update_one({**query, "google_sheet_sync_lock": token}, {"$unset": {"google_sheet_sync_lock": "", "google_sheet_sync_lock_until": ""}})
+
+
+async def retry_sheet_statuses(db, workspace_ids=None):
+    query = {"google_sheet_sync_status": {"$in": ["pending", "failed"]}, "deleted_at": None,
+             "$or": [{"google_sheet_sync_next_attempt_at": None}, {"google_sheet_sync_next_attempt_at": {"$lte": now_iso()}}]}
+    if workspace_ids:
+        query["workspace_id"] = {"$in": workspace_ids}
+    async for lead in db.crm_leads.find(query).sort("google_sheet_sync_next_attempt_at", 1).limit(100):
+        await sync_lead_status(db, lead["workspace_id"], str(lead["_id"]))
+
+
+@router.post("/workspaces/{ws_id}/leads/{lead_id}/retry")
+async def retry_lead_sync(ws_id: str, lead_id: str, request: Request):
+    from crm import require_workspace_access, decorate_lead
+    await require_workspace_access(request, ws_id)
+    if not ObjectId.is_valid(lead_id):
+        raise HTTPException(422, "Invalid lead identifier")
+    db = get_db(request)
+    query = {"workspace_id": ws_id, "_id": ObjectId(lead_id), "deleted_at": None}
+    lead = await db.crm_leads.find_one(query)
+    if not lead:
+        raise HTTPException(404, "Lead not found")
+    if lead.get("google_sheet_sync_status") not in {"pending", "failed"}:
+        raise HTTPException(400, "There is no pending or failed sync to retry")
+    await sync_lead_status(db, ws_id, lead_id)
+    return decorate_lead(await db.crm_leads.find_one(query), await ensure_crm_settings(db, ws_id))
