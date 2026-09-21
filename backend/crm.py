@@ -1518,6 +1518,9 @@ async def convert_lead(ws_id: str, lead_id: str, request: Request, body: dict = 
     if conversion_type not in {"single_payment", "payment_plan"}:
         raise HTTPException(status_code=400, detail="Invalid conversion type")
     plan = {} if conversion_type == "single_payment" else recalculate_payment_plan(normalize_payment_plan(body.get("payment_plan") or lead.get("payment_plan") or {}), lead.get("receipts") or [])
+    workspace = await db.workspaces.find_one({"_id": oid(ws_id)}) or {}
+    from sales_modules import finalize_opportunity
+    opportunity = await finalize_opportunity(db, ws_id, lead, workspace)
     await db.crm_leads.update_one(
         {"workspace_id": ws_id, "_id": oid(lead_id)},
         {"$set": {
@@ -1527,6 +1530,7 @@ async def convert_lead(ws_id: str, lead_id: str, request: Request, body: dict = 
             "conversion_type": conversion_type,
             "converted_at": lead.get("converted_at") or now_iso(),
             "payment_plan": plan,
+            "opportunity": opportunity,
             "updated_at": now_iso(),
         }},
     )

@@ -30,6 +30,7 @@ import AdsToCrmWorkflow from "./pages/sections/AdsToCrmWorkflow";
 import CrmInbox from "./pages/sections/CrmInbox";
 import Projects from "./pages/sections/Projects";
 import Properties from "./pages/sections/Properties";
+import ProductsServices from "./pages/sections/ProductsServices";
 import Settings from "./pages/sections/Settings";
 
 function Protected() {
@@ -62,6 +63,7 @@ function App() {
                   <Route index element={<Overview />} />
                   <Route path="projects" element={<Projects />} />
                   <Route path="properties" element={<Properties />} />
+                  <Route path="products-services" element={<ProductsServices />} />
                   <Route path="settings" element={<Settings />} />
                   <Route path="brain" element={<Brain />} />
                   <Route path="manager" element={<Manager />} />

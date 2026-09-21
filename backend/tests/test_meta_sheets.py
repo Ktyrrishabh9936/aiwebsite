@@ -8,6 +8,7 @@ from bson import ObjectId
 from fastapi import HTTPException
 
 import google_sheets as sheets
+import llm_service
 from crm import ensure_crm_settings, update_lead, convert_lead, normalize_field
 from meta_fields import META_FIELDS, map_sheet_row, pending_sheet_sync
 from migrate_meta_sheets import migrate
@@ -60,6 +61,72 @@ def test_google_transport_refresh_and_raw_status_write(monkeypatch):
     assert requests[-1].method == "PUT"
     assert requests[-1].content == b'{"values":[["Converted"]]}'
     refresh.assert_awaited_once()
+
+
+def test_google_tab_read_retries_timeout(monkeypatch):
+    attempts = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return None
+        async def get(self, url, headers):
+            attempts.append((url, headers))
+            if len(attempts) == 1:
+                raise httpx.ReadTimeout("slow")
+            return httpx.Response(200, json={"sheets": []})
+
+    monkeypatch.setattr(sheets.httpx, "AsyncClient", lambda **kwargs: Client())
+    monkeypatch.setattr(sheets.asyncio, "sleep", AsyncMock())
+    response = asyncio.run(sheets.google_get_with_retry("https://sheets.googleapis.test/file", "token"))
+    assert response.status_code == 200
+    assert len(attempts) == 2
+    sheets.asyncio.sleep.assert_awaited_once()
+
+
+def test_google_tab_read_timeout_has_safe_actionable_error(monkeypatch):
+    async def timeout(*args, **kwargs):
+        raise httpx.ReadTimeout("provider details")
+    monkeypatch.setattr(sheets, "google_get_with_retry", timeout)
+
+    class Connections:
+        async def find_one(self, query):
+            return {"tokens": {"access_token": "token"}}
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db=SimpleNamespace(google_sheet_connections=Connections()))))
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(sheets.list_spreadsheet_tabs("ws", "sheet", request))
+    assert caught.value.status_code == 504
+    assert caught.value.detail == "Google took too long to return the Sheet tabs. Retry loading tabs."
+    assert "provider" not in caught.value.detail
+
+
+def test_ai_mapping_keeps_exact_matches_and_adds_semantic_custom_fields(monkeypatch):
+    headers = ["id", "Full Name", "phone_number", "campaign_name", "What is your budget?"]
+    settings = {"fields": [
+        {"key": "phone", "label": "Phone", "type": "phone", "active": True},
+        {"key": "full_name", "label": "Name", "type": "text", "active": True},
+        {"key": "budget", "label": "Budget", "type": "currency", "active": True},
+    ]}
+    targets = sheets.mapping_targets(settings)
+
+    async def generate(*args, **kwargs):
+        return {"column_map": {
+            "budget": "What is your budget?",
+            "meta_lead_id": "What is your budget?",  # cannot replace exact id match
+            "unknown_target": "Full Name",
+        }}
+
+    monkeypatch.setattr(llm_service, "generate_json", generate)
+    result = asyncio.run(sheets.generate_ai_column_map("model", headers, targets))
+    assert result["meta_lead_id"] == "id"
+    assert result["meta_campaign_name"] == "campaign_name"
+    assert result["full_name"] == "Full Name"
+    assert result["phone"] == "phone_number"
+    assert result["budget"] == "What is your budget?"
+    assert "unknown_target" not in result
+    assert len(result.values()) == len(set(result.values()))
 
 
 async def seed(db):

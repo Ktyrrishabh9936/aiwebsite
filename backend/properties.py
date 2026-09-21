@@ -4,6 +4,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 
 from crm import db_from, require_workspace_access
+from workspace_modules import require_module, workspace_currency
 
 router = APIRouter(prefix="/workspaces/{ws_id}/properties", tags=["properties"])
 
@@ -22,6 +23,12 @@ def output(doc):
     result = dict(doc)
     result["id"] = str(result.pop("_id"))
     return result
+
+
+async def module_context(request, ws_id):
+    _, workspace = await require_workspace_access(request, ws_id)
+    require_module(workspace, "real_estate")
+    return db_from(request), workspace
 
 
 def clean_property(body, existing=None):
@@ -68,8 +75,7 @@ def clean_property(body, existing=None):
 
 @router.get("")
 async def list_properties(ws_id: str, request: Request, search: str = Query(""), category: str = Query(""), status: str = Query("")):
-    await require_workspace_access(request, ws_id)
-    db = db_from(request)
+    db, workspace = await module_context(request, ws_id)
     query = {"workspace_id": ws_id}
     if category in CATEGORIES:
         query["category"] = category
@@ -78,13 +84,12 @@ async def list_properties(ws_id: str, request: Request, search: str = Query(""),
     if search.strip():
         query["$or"] = [{"name": {"$regex": search.strip(), "$options": "i"}}, {"location": {"$regex": search.strip(), "$options": "i"}}]
     docs = await db.properties.find(query).sort("created_at", -1).to_list(500)
-    return [output(doc) for doc in docs]
+    return {"items": [output(doc) for doc in docs], "currency": workspace_currency(workspace)}
 
 
 @router.post("")
 async def create_property(ws_id: str, request: Request, body: dict = Body(...)):
-    await require_workspace_access(request, ws_id)
-    db = db_from(request)
+    db, _ = await module_context(request, ws_id)
     now = now_iso()
     doc = {
         "_id": ObjectId(),
@@ -98,8 +103,7 @@ async def create_property(ws_id: str, request: Request, body: dict = Body(...)):
 
 @router.patch("/{property_id}")
 async def update_property(ws_id: str, property_id: str, request: Request, body: dict = Body(...)):
-    await require_workspace_access(request, ws_id)
-    db = db_from(request)
+    db, _ = await module_context(request, ws_id)
     try:
         oid = ObjectId(property_id)
     except Exception:
@@ -114,8 +118,9 @@ async def update_property(ws_id: str, property_id: str, request: Request, body: 
 
 @router.delete("/{property_id}")
 async def delete_property(ws_id: str, property_id: str, request: Request):
-    await require_workspace_access(request, ws_id)
-    db = db_from(request)
+    db, _ = await module_context(request, ws_id)
+    if await db.crm_leads.find_one({"workspace_id": ws_id, "opportunity.item_id": property_id}):
+        raise HTTPException(409, "This property is linked to a CRM lead and cannot be deleted")
     try:
         oid = ObjectId(property_id)
     except Exception:

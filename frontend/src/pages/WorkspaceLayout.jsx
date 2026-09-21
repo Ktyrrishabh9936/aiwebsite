@@ -4,7 +4,7 @@ import {
   AlertCircle, Bell, CheckCircle2, Globe, Loader2, LogOut, Plus, Settings as SettingsIcon,
   UserCircle, Users, Bot, Menu, PanelLeftClose, PanelLeftOpen,
 } from "lucide-react";
-import WorkspaceNavigation, { navigationGroups } from "../components/WorkspaceNavigation";
+import WorkspaceNavigation, { visibleNavigationGroups } from "../components/WorkspaceNavigation";
 import { Sheet, SheetContent, SheetTitle, SheetDescription } from "../components/ui/sheet";
 import { toast } from "sonner";
 import api from "../lib/api";
@@ -47,7 +47,7 @@ export default function WorkspaceLayout() {
   const toggleSidebar = () => setCollapsed((previous) => { const next = !previous; try { localStorage.setItem("arevei_sidebar_collapsed", String(next)); } catch {} return next; });
   useEffect(() => { setMobileNavigation(false); }, [location.pathname]);
   const currentSection = location.pathname.split("/")[4] || "";
-  const pageTitle = navigationGroups.flatMap((group) => group.items).find((item) => item.to === currentSection)?.label || "Workspace";
+  const pageTitle = visibleNavigationGroups(ws?.modules).flatMap((group) => group.items).find((item) => item.to === currentSection)?.label || "Workspace";
   useEffect(() => { setAgentMode(false); }, [location.pathname]);
 
   const refresh = useCallback(async () => {
@@ -125,7 +125,7 @@ export default function WorkspaceLayout() {
           {!collapsed && <Logo className="text-base" to="/app" />}
           <button type="button" onClick={toggleSidebar} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} title={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed} className="p-2 rounded-lg text-muted-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring">{collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}</button>
         </div>
-        <WorkspaceNavigation wsId={wsId} collapsed={collapsed} />
+        <WorkspaceNavigation wsId={wsId} modules={ws.modules} collapsed={collapsed} />
         <div className="shrink-0 p-3 border-t border-border">
           {collapsed ? <Globe size={18} className="mx-auto text-muted-foreground" aria-label={ws.name} /> : <><label htmlFor="workspace-switcher" className="text-[10px] uppercase tracking-widest text-muted-foreground">Current workspace</label><select id="workspace-switcher" value={ws.id} onChange={(e) => navigate(`/app/w/${e.target.value}`)} className="mt-2 w-full rounded-lg border bg-background p-2 text-sm"><option value={ws.id}>{ws.name}</option>{workspaces.filter((item) => item.id !== ws.id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></>}
         </div>
@@ -133,7 +133,7 @@ export default function WorkspaceLayout() {
       <Sheet open={mobileNavigation} onOpenChange={setMobileNavigation}>
         <SheetContent side="left" className="w-[min(320px,90vw)] p-0 flex flex-col gap-0">
           <div className="p-5 border-b"><SheetTitle>Workspace navigation</SheetTitle><SheetDescription className="truncate">{ws.name}</SheetDescription></div>
-          <WorkspaceNavigation wsId={wsId} onNavigate={() => { setMobileNavigation(false); setAgentMode(false); }} />
+          <WorkspaceNavigation wsId={wsId} modules={ws.modules} onNavigate={() => { setMobileNavigation(false); setAgentMode(false); }} />
         </SheetContent>
       </Sheet>
 

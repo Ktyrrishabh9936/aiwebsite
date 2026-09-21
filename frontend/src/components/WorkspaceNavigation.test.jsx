@@ -27,3 +27,9 @@ test("filters destinations and notifies the drawer when navigating", async () =>
   await act(async () => container.querySelector("a").dispatchEvent(new MouseEvent("click", { bubbles: true })));
   expect(onNavigate).toHaveBeenCalledTimes(1);
 });
+
+test("shows only the installed vertical modules", async () => {
+  await act(async () => root.render(<WorkspaceNavigation wsId="workspace" modules={{ real_estate: false, agency: true }} />));
+  expect(container.querySelector('[aria-label="Properties"]')).toBeNull();
+  expect(container.querySelector('[aria-label="Products & Services"]')).not.toBeNull();
+});

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Building2, Check, ChevronLeft, ChevronRight, Home, LandPlot, Loader2, Plus, Search, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
-import { useOutletContext } from "react-router-dom";
+import { Link, useOutletContext } from "react-router-dom";
 import api, { formatError } from "../../lib/api";
+import { formatMoney } from "../../lib/currency";
 
 const SUBTYPES = {
   residential: ["Apartment", "Villa", "Farmhouse", "Independent House", "Plot", "Other"],
@@ -23,11 +24,14 @@ export default function Properties() {
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [currency, setCurrency] = useState(ws.currency || "INR");
+  const enabled = ws.modules?.real_estate !== false;
   const load = useCallback(async () => {
-    try { setProperties((await api.get(`/workspaces/${ws.id}/properties`, { params: { search } })).data); }
+    if (!enabled) { setLoading(false); return; }
+    try { const { data } = await api.get(`/workspaces/${ws.id}/properties`, { params: { search } }); setProperties(data.items || []); setCurrency(data.currency || ws.currency || "INR"); }
     catch (error) { toast.error(formatError(error.response?.data?.detail)); }
     finally { setLoading(false); }
-  }, [search, ws.id]);
+  }, [enabled, search, ws.currency, ws.id]);
   useEffect(() => { load(); }, [load]);
   const set = (key, value) => setForm((current) => ({ ...current, [key]: value }));
   const setAttribute = (key, value) => setForm((current) => ({ ...current, attributes: { ...current.attributes, [key]: value } }));
@@ -43,10 +47,11 @@ export default function Properties() {
     finally { setSaving(false); }
   };
   const remove = async (id) => { try { await api.delete(`/workspaces/${ws.id}/properties/${id}`); setProperties((items) => items.filter((item) => item.id !== id)); } catch (error) { toast.error(formatError(error.response?.data?.detail)); } };
+  if (!enabled) return <div className="p-6 sm:p-10 max-w-3xl mx-auto"><div className="rounded-xl border border-dashed bg-card p-10 text-center"><Building2 className="w-10 h-10 mx-auto text-muted-foreground" /><h1 className="mt-4 font-display text-2xl font-black">Properties is not active</h1><p className="mt-2 text-sm text-muted-foreground">Install the Real Estate module in workspace settings to manage property inventory.</p><Link to={`/app/w/${ws.id}/settings`} className="mt-5 inline-flex h-10 items-center rounded-full bg-primary px-4 text-sm font-semibold text-primary-foreground">Open settings</Link></div></div>;
   return <div className="p-6 sm:p-10 max-w-7xl mx-auto space-y-8">
     <header className="flex items-end justify-between gap-4 flex-wrap"><div><div className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.2em] font-bold text-primary"><Building2 className="w-4 h-4" /> Property management</div><h1 className="mt-2 font-display text-3xl font-black tracking-tight">Properties</h1><p className="text-muted-foreground mt-1">Manage real-estate inventory, projects, and units.</p></div><button onClick={() => setOpen(true)} className="inline-flex items-center gap-2 px-4 h-10 rounded-full bg-primary text-primary-foreground text-sm font-semibold"><Plus className="w-4 h-4" /> Add property</button></header>
     <div className="flex items-center gap-2 max-w-xl"><Search className="w-4 h-4 text-muted-foreground" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search properties or locations" className="w-full h-10 px-3 rounded-lg border bg-background text-sm" /></div>
-    {loading ? <div className="text-muted-foreground">Loading properties...</div> : properties.length === 0 ? <EmptyState onAdd={() => setOpen(true)} /> : <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{properties.map((property) => <PropertyCard key={property.id} property={property} onDelete={remove} />)}</div>}
+    {loading ? <div className="text-muted-foreground">Loading properties...</div> : properties.length === 0 ? <EmptyState onAdd={() => setOpen(true)} /> : <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{properties.map((property) => <PropertyCard key={property.id} property={property} currency={currency} onDelete={remove} />)}</div>}
     {open && <Wizard form={form} step={step} setStep={setStep} set={set} setAttribute={setAttribute} setInventory={setInventory} chooseCategory={chooseCategory} chooseWhat={chooseWhat} totalUnits={totalUnits} saving={saving} onSubmit={create} onClose={close} />}
   </div>;
 }
@@ -77,4 +82,4 @@ function ReviewStep({ form, totalUnits }) { return <section className="space-y-4
 function Field({ label, value, onChange, required }) { return <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground uppercase">{label}</span><input required={required} value={value} onChange={(event) => onChange(event.target.value)} className="w-full h-10 px-3 rounded-lg border bg-background text-sm" /></label>; }
 function NumberField({ label, value, onChange }) { return <Field label={label} value={value} onChange={(next) => onChange(Math.max(1, Number(next) || 1))} />; }
 function EmptyState({ onAdd }) { return <div className="border border-dashed rounded-xl p-12 text-center bg-card"><Building2 className="w-10 h-10 mx-auto text-muted-foreground" /><h2 className="mt-4 font-display text-xl font-bold">No properties yet</h2><p className="mt-1 text-sm text-muted-foreground">Add a project, individual property, or land parcel to begin.</p><button onClick={onAdd} className="mt-5 inline-flex items-center gap-2 px-4 h-10 rounded-full bg-primary text-primary-foreground text-sm font-semibold"><Plus className="w-4 h-4" /> Add property</button></div>; }
-function PropertyCard({ property, onDelete }) { const Icon = property.category === "land" ? LandPlot : property.category === "residential" ? Home : Building2; return <article className="rounded-xl border bg-card p-5"><div className="flex items-start justify-between gap-3"><div className="w-10 h-10 rounded-lg bg-primary/10 text-primary grid place-items-center"><Icon className="w-5 h-5" /></div><button onClick={() => onDelete(property.id)} className="text-muted-foreground hover:text-destructive" title="Delete property"><Trash2 className="w-4 h-4" /></button></div><h3 className="mt-4 font-display text-lg font-bold truncate">{property.name}</h3><p className="text-sm text-muted-foreground capitalize">{property.subtype || property.category} · {property.container_kind}</p><p className="mt-3 text-sm text-muted-foreground truncate">{property.location || "Location not set"}</p><div className="mt-4 flex items-center justify-between text-xs"><span className="px-2 py-1 rounded-md border capitalize">{property.status}</span><span className="font-semibold">{property.inventory_setup?.total_units ? `${property.inventory_setup.total_units} units` : property.price || "Price on request"}</span></div></article>; }
+function PropertyCard({ property, currency, onDelete }) { const Icon = property.category === "land" ? LandPlot : property.category === "residential" ? Home : Building2; const numericPrice = Number(String(property.price || "").replaceAll(",", "")); return <article className="rounded-xl border bg-card p-5"><div className="flex items-start justify-between gap-3"><div className="w-10 h-10 rounded-lg bg-primary/10 text-primary grid place-items-center"><Icon className="w-5 h-5" /></div><button onClick={() => onDelete(property.id)} className="text-muted-foreground hover:text-destructive" title="Delete property"><Trash2 className="w-4 h-4" /></button></div><h3 className="mt-4 font-display text-lg font-bold truncate">{property.name}</h3><p className="text-sm text-muted-foreground capitalize">{property.subtype || property.category} · {property.container_kind}</p><p className="mt-3 text-sm text-muted-foreground truncate">{property.location || "Location not set"}</p><p className="mt-3 font-semibold">{Number.isFinite(numericPrice) && property.price !== "" ? formatMoney(numericPrice, currency) : property.price || "Price on request"}</p><div className="mt-4 flex items-center justify-between text-xs"><span className="px-2 py-1 rounded-md border capitalize">{property.status}</span><span className="font-semibold">{property.inventory_setup?.total_units ? `${property.inventory_setup.total_units} units` : "Single inventory"}</span></div></article>; }

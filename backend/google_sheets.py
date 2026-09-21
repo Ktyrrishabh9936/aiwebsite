@@ -1,5 +1,8 @@
 import os
+import asyncio
+import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
@@ -13,6 +16,120 @@ from crm import active_fields, ensure_crm_settings
 from meta_fields import META_FIELDS, header_index, map_sheet_row
 
 router = APIRouter(prefix="/google")
+
+GOOGLE_READ_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+
+FIELD_ALIASES = {
+    "full_name": ["name", "full name", "lead name", "customer name"],
+    "phone": ["phone", "phone number", "mobile", "mobile number", "contact number"],
+    "email": ["email", "email address", "e-mail"],
+    "address": ["address", "location", "full address"],
+    "assigned_salesperson": ["assigned salesperson", "salesperson", "owner", "assignee"],
+    "source": ["source", "lead source"],
+    "status": ["status", "lead status", "crm status"],
+}
+
+
+def normalized_mapping_name(value):
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower()).strip()
+
+
+def mapping_targets(settings):
+    targets = [{"key": key, "label": label, "type": "source"} for key, (_, label) in META_FIELDS.items()]
+    targets.append({"key": "status", "label": "CRM Status", "type": "status"})
+    seen = {target["key"] for target in targets}
+    for field in active_fields(settings):
+        if field["key"] not in seen:
+            targets.append({"key": field["key"], "label": field["label"], "type": field.get("type", "text")})
+            seen.add(field["key"])
+    return targets
+
+
+def deterministic_column_map(headers, targets):
+    """Create high-confidence exact/alias matches for the AI agent to review and extend."""
+    indexed = {}
+    for header in headers:
+        indexed.setdefault(normalized_mapping_name(header), []).append(header)
+    result, used = {}, set()
+    for target in targets:
+        key = target["key"]
+        candidates = [key, target.get("label", "")]
+        if key in META_FIELDS:
+            candidates.insert(0, META_FIELDS[key][0])
+        candidates.extend(FIELD_ALIASES.get(key, []))
+        for candidate in candidates:
+            matches = indexed.get(normalized_mapping_name(candidate), [])
+            if len(matches) == 1 and matches[0] not in used:
+                result[key] = matches[0]
+                used.add(matches[0])
+                break
+    return result
+
+
+def validate_ai_column_map(headers, targets, proposed, baseline=None):
+    allowed_keys = {target["key"] for target in targets}
+    exact_headers = {str(header): header for header in headers}
+    normalized_headers = {}
+    for header in headers:
+        normalized_headers.setdefault(normalized_mapping_name(header), []).append(header)
+    clean, used = {}, set()
+    # Exact/alias matches are higher-confidence than model guesses; AI fills gaps.
+    for candidate_map in (baseline or {}, proposed or {}):
+        if not isinstance(candidate_map, dict):
+            continue
+        for key, value in candidate_map.items():
+            if key not in allowed_keys or not value or key in clean:
+                continue
+            header = exact_headers.get(str(value))
+            if header is None:
+                matches = normalized_headers.get(normalized_mapping_name(value), [])
+                header = matches[0] if len(matches) == 1 else None
+            if header is not None and header not in used:
+                clean[key] = header
+                used.add(header)
+    return clean
+
+
+async def generate_ai_column_map(model_id, headers, targets, workspace_id=None):
+    from llm_service import generate_json
+    from ai_usage import usage_scope
+    baseline = deterministic_column_map(headers, targets)
+    system = (
+        "You are a CRM data-mapping agent. Match Google Sheet headers to CRM target fields. "
+        "Use only headers and target keys supplied by the user. Never invent a header, never map one header twice, "
+        "and omit uncertain mappings. Meta form questions belong in matching configurable CRM fields."
+    )
+    prompt = json.dumps({
+        "sheet_headers": headers,
+        "crm_targets": targets,
+        "high_confidence_matches": baseline,
+        "response_schema": {"column_map": {"target_key": "exact Sheet header"}},
+    }, ensure_ascii=False)
+    with usage_scope(workspace_id, "sheet_column_mapping"):
+        response = await asyncio.wait_for(
+            generate_json(model_id, system, prompt, temperature=0.1, max_tokens=1800), timeout=60
+        )
+    proposed = response.get("column_map", response) if isinstance(response, dict) else {}
+    return validate_ai_column_map(headers, targets, proposed, baseline)
+
+
+async def google_get_with_retry(url, token, attempts=2):
+    """Retry transient Google reads, including read timeouts and 5xx responses."""
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            async with httpx.AsyncClient(timeout=GOOGLE_READ_TIMEOUT) as client:
+                response = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+            if response.status_code != 429 and response.status_code < 500:
+                return response
+            last_error = response
+        except (httpx.TimeoutException, httpx.RequestError) as error:
+            last_error = error
+        if attempt + 1 < attempts:
+            await asyncio.sleep(0.5 * (attempt + 1))
+    if isinstance(last_error, httpx.Response):
+        return last_error
+    raise last_error or httpx.ReadTimeout("Google request timed out")
 
 SCOPES = " ".join([
     "https://www.googleapis.com/auth/spreadsheets",
@@ -209,17 +326,26 @@ async def list_spreadsheet_tabs(ws_id: str, spreadsheet_id: str, request: Reques
         raise HTTPException(status_code=400, detail="Google sheet connection not found.")
 
     async def try_fetch(token):
-        async with httpx.AsyncClient() as client:
-            url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}?fields=sheets.properties.title"
-            return await client.get(url, headers={"Authorization": f"Bearer {token}"})
+        url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}?fields=sheets.properties.title"
+        return await google_get_with_retry(url, token)
 
     access_token = conn["tokens"].get("access_token")
-    res = await try_fetch(access_token)
+    try:
+        res = await try_fetch(access_token)
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Google took too long to return the Sheet tabs. Retry loading tabs.") from None
+    except httpx.RequestError:
+        raise HTTPException(status_code=502, detail="Could not reach Google Sheets. Check your connection and retry loading tabs.") from None
     if res.status_code == 401:
         access_token = await refresh_access_token(conn, request)
-        res = await try_fetch(access_token)
+        try:
+            res = await try_fetch(access_token)
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="Google took too long to return the Sheet tabs. Retry loading tabs.") from None
+        except httpx.RequestError:
+            raise HTTPException(status_code=502, detail="Could not reach Google Sheets. Check your connection and retry loading tabs.") from None
     if res.status_code != 200:
-        raise HTTPException(status_code=res.status_code, detail=f"Failed to fetch sheet tabs: {res.text}")
+        raise HTTPException(status_code=res.status_code, detail="Google could not return the Sheet tabs. Retry, or reconnect Google if the problem continues.")
     sheets = res.json().get("sheets", [])
     return [{"name": s.get("properties", {}).get("title", "")} for s in sheets if s.get("properties", {}).get("title")]
 
@@ -287,6 +413,35 @@ async def bind_sheet(ws_id: str, request: Request, body: dict):
         )
 
     return {"ok": True, "headers": headers_list}
+
+
+@router.post("/workspaces/{ws_id}/suggest-column-map")
+async def suggest_column_map(ws_id: str, request: Request):
+    from crm import require_workspace_access
+    await require_workspace_access(request, ws_id)
+    db = get_db(request)
+    conn = await db.google_sheet_connections.find_one({"workspace_id": ws_id})
+    if not conn or not conn.get("spreadsheet_id") or not conn.get("sheet_name"):
+        raise HTTPException(400, "Bind a spreadsheet and tab before running AI matching.")
+    headers = conn.get("header_row") or []
+    if not headers:
+        raise HTTPException(400, "The bound Sheet does not contain a header row.")
+    settings = await ensure_crm_settings(db, ws_id)
+    targets = mapping_targets(settings)
+    workspace = await db.workspaces.find_one({"_id": ObjectId(ws_id)})
+    baseline = deterministic_column_map(headers, targets)
+    try:
+        column_map = await generate_ai_column_map(workspace.get("model_id") if workspace else None, headers, targets, ws_id)
+        source, warning = "ai", None
+    except Exception as error:
+        logging.getLogger(__name__).warning(
+            "AI Sheet mapping unavailable workspace=%s error_type=%s", ws_id, type(error).__name__
+        )
+        column_map = baseline
+        source = "high_confidence_fallback"
+        warning = "The AI agent was unavailable, so only high-confidence matches were applied. Review the remaining fields."
+    return {"column_map": column_map, "source": source, "warning": warning,
+            "matched": len(column_map), "total": len(targets)}
 
 @router.patch("/workspaces/{ws_id}/column_map")
 async def update_column_map(ws_id: str, request: Request, body: dict):

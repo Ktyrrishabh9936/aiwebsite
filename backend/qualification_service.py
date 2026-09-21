@@ -282,7 +282,9 @@ class QualificationWebhookController:
             elif hint in RETRYABLE or hint in {Outcome.INVALID_NUMBER, Outcome.WRONG_NUMBER, Outcome.DUPLICATE_OR_SPAM}:
                 data, confidence, summary = validated_facts(call.extracted_data), 100, call.summary
             else:
-                data, confidence, summary = await extract_facts(call, profile, workspace.get("model_id"))
+                from ai_usage import usage_scope
+                with usage_scope(ws_id, "lead_qualification", {"lead_id": lead_id}):
+                    data, confidence, summary = await extract_facts(call, profile, workspace.get("model_id"))
             if not saved.get("decision"):
                 if lead.get("do_not_call"):
                     data.dnd_requested = True

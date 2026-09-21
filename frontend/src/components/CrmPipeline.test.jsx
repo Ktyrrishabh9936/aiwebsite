@@ -8,11 +8,14 @@ beforeEach(() => { global.IS_REACT_ACT_ENVIRONMENT = true; container = document.
 afterEach(() => { act(() => root.unmount()); container.remove(); jest.clearAllMocks(); });
 test("loads stages independently and saves a stage change", async () => {
   const lead = { id: "lead", full_name: "Diya", status: "new" };
-  api.get.mockImplementation(async (_, { params }) => ({ data: { items: params.status === "new" ? [lead] : [], total: params.status === "new" ? 1 : 0 } }));
+  api.get.mockImplementation(async (url, { params }) => url.endsWith("pipeline-value")
+    ? ({ data: { value_minor: 250000, currency: "USD" } })
+    : ({ data: { items: params.status === "new" ? [lead] : [], total: params.status === "new" ? 1 : 0 } }));
   api.patch.mockResolvedValue({ data: { ...lead, status: "won" } });
   const open = jest.fn(), changed = jest.fn();
   await act(async () => root.render(<CrmPipeline wsId="ws" states={[{ key: "new", label: "New" }, { key: "won", label: "Won" }]} search="" statusFilter="all" onSelect={open} onChanged={changed} revision={0} />));
-  expect(api.get).toHaveBeenCalledTimes(2);
+  expect(api.get).toHaveBeenCalledTimes(3);
+  expect(container.textContent).toContain("$2,500");
   await act(async () => container.querySelector("article button").click());
   expect(open).toHaveBeenCalledWith("lead");
   await act(async () => { const select = container.querySelector("select"); select.value = "won"; select.dispatchEvent(new Event("change", { bubbles: true })); });

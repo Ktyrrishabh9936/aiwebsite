@@ -45,6 +45,8 @@ class Workspace(BaseDocument):
     allowed_blog_origins: List[str] = Field(default_factory=list)
     model_id: str = "openai.gpt-oss-120b"
     ai_qualification_config: dict = Field(default_factory=dict)
+    modules: dict = Field(default_factory=lambda: {"real_estate": True, "agency": False})
+    currency: str = "INR"
     qualification_profile_id: Optional[str] = None
     brain: dict = Field(default_factory=dict)
     brain_status: str = "pending"  # pending | building | ready | error
@@ -167,6 +169,7 @@ class CRMLead(BaseDocument):
     customer_status: Optional[str] = None  # lead | customer
     conversion_type: Optional[str] = None  # single_payment | payment_plan
     converted_at: Optional[str] = None
+    opportunity: dict = Field(default_factory=dict)
     payment_plan: dict = Field(default_factory=dict)
     timeline: List[dict] = Field(default_factory=list)
     receipts: List[dict] = Field(default_factory=list)

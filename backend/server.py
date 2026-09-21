@@ -25,6 +25,7 @@ from auth import build_auth_router, get_current_user, seed_admin
 from coding import build_coding_router
 import agents
 import llm_service
+from ai_usage import configure_usage, usage_scope
 from manager_service import ManagerService
 from manager_voice import build_voice_router, initialize_voice_storage
 
@@ -33,6 +34,7 @@ logger = logging.getLogger("server")
 
 client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
+configure_usage(db)
 
 app = FastAPI(title="Arevei AI Manager")
 api = APIRouter(prefix="/api")
@@ -51,6 +53,16 @@ def doc_out(doc):
     doc = dict(doc)
     doc["id"] = str(doc.pop("_id"))
     return doc
+
+
+def workspace_out(doc):
+    result = doc_out(doc)
+    if result is None:
+        return None
+    from workspace_modules import workspace_currency, workspace_modules
+    result["modules"] = workspace_modules(doc)
+    result["currency"] = workspace_currency(doc)
+    return result
 
 
 async def require_user(request: Request):
@@ -194,7 +206,8 @@ async def _build_brain_bg(ws_id, url, model_id):
         crawl = await crawl_site(url)
         if crawl.get("page_count", 0) == 0:
             raise ValueError(f"No readable pages found while crawling {url}. The site may block crawlers or return no HTML content.")
-        brain = await agents.build_brain(model_id, crawl)
+        with usage_scope(ws_id, "brain_training"):
+            brain = await agents.build_brain(model_id, crawl)
         name = brain.get("business_profile", {}).get("company_name") or url
         await db.workspaces.update_one({"_id": oid(ws_id)},
                                        {"$set": {"brain": brain, "brain_status": "ready", "name": name}})
@@ -219,21 +232,21 @@ async def create_workspace(request: Request, body: dict = Body(...)):
     ws_id = str(res.inserted_id)
     asyncio.create_task(_build_brain_bg(ws_id, url, model_id))
     doc = await db.workspaces.find_one({"_id": res.inserted_id})
-    return doc_out(doc)
+    return workspace_out(doc)
 
 
 @api.get("/workspaces")
 async def list_workspaces(request: Request):
     user = await require_user(request)
     docs = await db.workspaces.find({"user_id": str(user["_id"])}).sort("created_at", -1).to_list(100)
-    return [doc_out(d) for d in docs]
+    return [workspace_out(d) for d in docs]
 
 
 @api.get("/workspaces/{ws_id}")
 async def get_workspace(ws_id: str, request: Request):
     user = await require_user(request)
     ws = await owned_workspace(ws_id, user)
-    return doc_out(ws)
+    return workspace_out(ws)
 
 
 @api.patch("/workspaces/{ws_id}")
@@ -241,12 +254,18 @@ async def update_workspace(ws_id: str, request: Request, body: dict = Body(...))
     user = await require_user(request)
     await owned_workspace(ws_id, user)
     updates = {k: v for k, v in body.items() if k in ("model_id", "name", "ai_qualification_config")}
+    if "modules" in body:
+        from workspace_modules import clean_modules
+        updates["modules"] = clean_modules(body["modules"])
+    if "currency" in body:
+        from workspace_modules import clean_currency
+        updates["currency"] = clean_currency(body["currency"])
     if "allowed_blog_origins" in body:
         updates["allowed_blog_origins"] = _clean_origins(body.get("allowed_blog_origins"))
     if updates:
         await db.workspaces.update_one({"_id": oid(ws_id)}, {"$set": updates})
     doc = await db.workspaces.find_one({"_id": oid(ws_id)})
-    return doc_out(doc)
+    return workspace_out(doc)
 
 
 @api.post("/workspaces/{ws_id}/public-key/rotate")
@@ -257,7 +276,7 @@ async def rotate_public_key(ws_id: str, request: Request):
     await db.workspaces.update_one({"_id": oid(ws_id)}, {"$set": {"public_key": new_key}})
     doc = await db.workspaces.find_one({"_id": oid(ws_id)})
     await notify(ws_id, "info", "Publishable blog key rotated", "Update any external blog integrations with the new key.")
-    return doc_out(doc)
+    return workspace_out(doc)
 
 
 @api.post("/workspaces/{ws_id}/rebrain")
@@ -286,11 +305,13 @@ async def gen_roadmap(ws_id: str, request: Request):
         raise HTTPException(400, "Brain is not ready yet")
     model_id = ws.get("model_id")
     brain = ws.get("brain", {})
-    roadmap = await agents.build_roadmap(model_id, brain)
+    with usage_scope(ws_id, "roadmap_strategy"):
+        roadmap = await agents.build_roadmap(model_id, brain)
     await db.workspaces.update_one({"_id": oid(ws_id)}, {"$set": {"roadmap": roadmap.get("months", []),
                                                                    "strategy_summary": roadmap.get("strategy_summary", "")}})
     # generate + schedule tasks
-    raw_tasks = await agents.generate_tasks(model_id, brain, roadmap, count=8)
+    with usage_scope(ws_id, "roadmap_tasks"):
+        raw_tasks = await agents.generate_tasks(model_id, brain, roadmap, count=8)
     await db.tasks.delete_many({"workspace_id": ws_id, "status": "pending"})
     now = datetime.now(timezone.utc)
     auto_count = 0
@@ -339,8 +360,17 @@ async def execute_task(task_doc):
     tid = task_doc["_id"]
     await db.tasks.update_one({"_id": tid}, {"$set": {"status": "running"}})
     try:
+        process = {"blog_post": "blog_generation", "seo_audit": "seo_audit", "social_post_pack": "creative_content", "image_set": "creative_content"}.get(task_doc.get("deliverable_type"), "analytics_task")
+        with usage_scope(ws_id, process, {"task_id": str(tid)}):
+            if task_doc.get("agent") == "content" and task_doc.get("deliverable_type") == "blog_post":
+                data = await agents.write_blog(model_id, brain, task_doc["title"], task_doc.get("objective", ""))
+            elif task_doc.get("agent") == "seo" or task_doc.get("deliverable_type") == "seo_audit":
+                data = await agents.write_seo_audit(model_id, brain, task_doc["title"], task_doc.get("objective", ""))
+            elif task_doc.get("agent") == "creative" or task_doc.get("deliverable_type") in {"social_post_pack", "image_set"}:
+                data = await agents.write_social_post_pack(model_id, brain, task_doc["title"], task_doc.get("objective", ""))
+            else:
+                data = await llm_service.generate_text(model_id, f"You are the AREVEI {task_doc.get('agent')} agent.", f"Task: {task_doc['title']}\nObjective: {task_doc.get('objective','')}\nProduce a concise, actionable deliverable (bullet points).", max_tokens=1200)
         if task_doc.get("agent") == "content" and task_doc.get("deliverable_type") == "blog_post":
-            data = await agents.write_blog(model_id, brain, task_doc["title"], task_doc.get("objective", ""))
             title = data.get("title", task_doc["title"])
             slug = await unique_slug(agents.slugify(title))
             publish = not task_doc.get("requires_approval", False)
@@ -363,7 +393,7 @@ async def execute_task(task_doc):
                                                                   "output_summary": f"Draft ready: {title}"}})
                 await notify(ws_id, "approval", "Blog draft awaiting approval", title)
         elif task_doc.get("agent") == "seo" or task_doc.get("deliverable_type") == "seo_audit":
-            payload = await agents.write_seo_audit(model_id, brain, task_doc["title"], task_doc.get("objective", ""))
+            payload = data
             summary = payload.get("summary") or f"SEO audit ready: {task_doc['title']}"
             await db.tasks.update_one({"_id": tid}, {"$set": {
                 "status": "done",
@@ -373,7 +403,7 @@ async def execute_task(task_doc):
             }})
             await notify(ws_id, "success", "SEO audit ready", task_doc["title"])
         elif task_doc.get("agent") == "creative" or task_doc.get("deliverable_type") in {"social_post_pack", "image_set"}:
-            payload = await agents.write_social_post_pack(model_id, brain, task_doc["title"], task_doc.get("objective", ""))
+            payload = data
             summary = payload.get("summary") or f"Social drafts ready: {task_doc['title']}"
             await db.tasks.update_one({"_id": tid}, {"$set": {
                 "status": "done",
@@ -383,12 +413,7 @@ async def execute_task(task_doc):
             }})
             await notify(ws_id, "success", "Creative drafts ready", task_doc["title"])
         else:
-            summary = await llm_service.generate_text(
-                model_id,
-                f"You are the AREVEI {task_doc.get('agent')} agent.",
-                f"Task: {task_doc['title']}\nObjective: {task_doc.get('objective','')}\n"
-                f"Produce a concise, actionable deliverable (bullet points).",
-                max_tokens=1200)
+            summary = data
             await db.tasks.update_one({"_id": tid}, {"$set": {
                 "status": "done",
                 "output_summary": summary[:4000],
@@ -457,7 +482,8 @@ async def generate_blog(ws_id: str, request: Request, body: dict = Body(...)):
     if not topic:
         raise HTTPException(400, "topic required")
     model_id = body.get("model_id") or ws.get("model_id")
-    data = await agents.write_blog(model_id, ws.get("brain", {}), topic, body.get("objective", ""))
+    with usage_scope(ws_id, "blog_generation"):
+        data = await agents.write_blog(model_id, ws.get("brain", {}), topic, body.get("objective", ""))
     title = data.get("title", topic)
     slug = await unique_slug(agents.slugify(title))
     blog = Blog(workspace_id=ws_id, title=title, slug=slug, excerpt=data.get("excerpt", ""),
@@ -700,8 +726,9 @@ async def manager_chat(ws_id: str, request: Request, body: dict = Body(...)):
     model_id = body.get("model_id") or ws.get("model_id")
     async def gen():
         try:
-            async for delta in manager_service.stream(ws, message, history, model_id=model_id):
-                yield delta
+            with usage_scope(ws_id, "manager_chat"):
+                async for delta in manager_service.stream(ws, message, history, model_id=model_id):
+                    yield delta
         except Exception:
             logger.warning("manager_web_request_failed", extra={"workspace_id": ws_id})
             yield "\n[error: AI manager request failed. Please retry.]"
@@ -1273,6 +1300,9 @@ from qualification_api import router as qualification_router
 from crm_performance import router as crm_performance_router
 from crm_workspace import router as crm_workspace_router
 from properties import router as properties_router
+from catalog import router as catalog_router
+from sales_modules import router as sales_modules_router
+from ai_usage import router as ai_usage_router
 
 api.include_router(google_sheets_router)
 api.include_router(workflows_router)
@@ -1284,6 +1314,9 @@ api.include_router(qualification_router)
 api.include_router(crm_performance_router)
 api.include_router(crm_workspace_router)
 api.include_router(properties_router)
+api.include_router(catalog_router)
+api.include_router(sales_modules_router)
+api.include_router(ai_usage_router)
 api.include_router(build_voice_router(db, manager_service, owned_workspace, require_user))
 
 app.include_router(build_auth_router(db))
@@ -1329,6 +1362,10 @@ async def startup():
     await db.plivo_call_events.create_index([("workspace_id", 1), ("lead_id", 1), ("created_at", -1)])
     await db.qualification_profiles.create_index([("workspace_id", 1), ("campaign_id", 1)], unique=True, partialFilterExpression={"campaign_id": {"$type": "string"}})
     await db.crm_call_logs.create_index([("workspace_id", 1), ("lead_id", 1), ("kind", 1)])
+    await db.catalog_items.create_index([("workspace_id", 1), ("kind", 1), ("status", 1)])
+    await db.properties.create_index([("workspace_id", 1), ("status", 1)])
+    await db.crm_leads.create_index([("workspace_id", 1), ("status", 1), ("opportunity.total_minor", 1)])
+    await db.ai_usage_events.create_index([("workspace_id", 1), ("day", -1), ("process", 1)])
     await seed_admin(db)
     if os.environ.get("DISABLE_BACKGROUND_JOBS", "").strip().lower() not in {"1", "true", "yes"}:
         asyncio.create_task(scheduler_loop())
