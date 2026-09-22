@@ -138,7 +138,7 @@ export default function VoiceProviders({ workspaceId }) {
       </details>
       <div className="flex gap-3"><button type="button" className="border rounded px-3 py-2 text-sm" onClick={() => run()}>Save</button><button type="button" className="border rounded px-3 py-2 text-sm" onClick={() => run(true)}>Save & Test Connection</button></div>
     </fieldset>
-    <p className="text-sm">Status: {(selected?.status || "missing_configuration").replaceAll("_", " ")}{selected?.last_verified_at && ` · Checked ${new Date(selected.last_verified_at).toLocaleString()}`}</p>
+    <p className="text-sm">Status: {(selected?.status || "missing_configuration").replaceAll("_", " ")}{selected?.is_default && " · Workspace default"}{selected?.last_verified_at && ` · Checked ${new Date(selected.last_verified_at).toLocaleString()}`}</p>
     {message && <p role="status" className="text-sm">{message}</p>}
     <div className="space-y-2"><h3 className="font-semibold text-sm">Webhooks</h3><p className="text-xs text-muted-foreground">{selected?.last_callback_at ? `Last verified callback: ${new Date(selected.last_callback_at).toLocaleString()}` : "No verified callback received yet"}</p>
       {selected?.webhooks?.message && <p className="text-sm">{selected.webhooks.message}</p>}
