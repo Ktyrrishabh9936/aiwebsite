@@ -1109,10 +1109,17 @@ function LeadDetail(props) {
                         {note.duration && <span>{note.duration}s</span>}
                       </div>
                     )}
+                    {note.source === "lead_context_agent" && (
+                      <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[10px] font-semibold uppercase opacity-80">
+                        <Bot className="w-3 h-3" /><span>Lead Context Agent</span>
+                        {note.context_source && <span>{note.context_source.replaceAll("_", " ")}</span>}
+                      </div>
+                    )}
                     <div className="text-sm whitespace-pre-wrap leading-relaxed">{note.body}</div>
                     <StructuredCallDetails note={note} />
                     {note.recording_url && <a href={note.recording_url} target="_blank" rel="noreferrer" className="mt-1 block text-[10px] underline underline-offset-2 opacity-90">Open recording</a>}
                     <div className="mt-1 flex items-center justify-end gap-2 text-[10px] opacity-80">
+                      <span>{note.author}</span>
                       <span>{new Date(note.created_at).toLocaleString()}</span>
                       <button onClick={() => deleteLeadNote(note.id)} disabled={saving} className="opacity-80 hover:opacity-100 disabled:opacity-40" title="Remove note"><Trash2 className="w-3 h-3" /></button>
                     </div>

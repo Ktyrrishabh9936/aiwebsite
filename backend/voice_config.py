@@ -59,7 +59,7 @@ def validate_provider(provider):
 
 def safe_config(provider, config):
     allowed = {"plivo": {"auth_id", "from_number", "staff_number", "trigger_url", "auth_type", "flow_id", "input_variable_mappings", "extra_payload"},
-               "sarvam": {"organization_id", "workspace_id", "app_id", "app_version", "connection_id", "agent_phone_number", *SARVAM_CONFIG_ALIASES}}[provider]
+               "sarvam": {"organization_id", "workspace_id", "app_id", "app_version", "connection_id", "agent_phone_number", "payload_mode", *SARVAM_CONFIG_ALIASES}}[provider]
     if set(config) - allowed:
         raise HTTPException(422, "Unknown provider configuration fields")
     def check_fields(value):
@@ -99,6 +99,8 @@ def safe_config(provider, config):
             raise HTTPException(422, "App version must be a positive integer") from None
     if result.get("auth_type", "basic") not in {"basic", "bearer"}:
         raise HTTPException(422, "Authentication must be basic or bearer")
+    if provider == "sarvam" and result.get("payload_mode", "legacy") not in {"legacy", "lead_context_v1"}:
+        raise HTTPException(422, "Sarvam agent input mode is invalid")
     return result
 
 

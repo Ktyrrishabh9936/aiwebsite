@@ -3,7 +3,11 @@ import { createRoot } from "react-dom/client";
 import VoiceProviders from "./VoiceProviders";
 import api from "../lib/api";
 
-jest.mock("../lib/api", () => ({ __esModule: true, default: { get: jest.fn(), put: jest.fn(), post: jest.fn() } }));
+jest.mock("../lib/api", () => ({
+  __esModule: true,
+  default: { get: jest.fn(), put: jest.fn(), post: jest.fn() },
+  formatError: (detail) => Array.isArray(detail) ? detail.map((item) => item.msg || JSON.stringify(item)).join(" ") : String(detail),
+}));
 let container, root;
 beforeEach(() => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
@@ -45,4 +49,80 @@ test("provider fields switch independently and saved secrets are never displayed
   }));
   expect(api.post).toHaveBeenCalledWith("/workspaces/A/voice-providers/sarvam/test", {});
   expect(container.querySelector('[role="status"]').textContent).toBe("invalid credentials");
+});
+
+test("opens the workspace default provider instead of resetting to Plivo", async () => {
+  api.get.mockResolvedValue({ data: [
+    { provider: "plivo", enabled: true, config: { auth_id: "account" }, configured_secrets: ["auth_token"], status: "connected", revision: 1, is_default: false },
+    { provider: "sarvam", enabled: true, config: { organization_id: "org", payload_mode: "lead_context_v1" }, configured_secrets: ["api_key"], status: "connected", revision: 2, is_default: true },
+  ] });
+
+  await act(async () => root.render(<VoiceProviders workspaceId="A" />));
+
+  expect(container.querySelector("select").value).toBe("sarvam");
+  expect(container.textContent).toContain("Sarvam organization ID");
+});
+
+test("creates a simple Sarvam setup guide with the fixed variables", async () => {
+  api.get.mockResolvedValue({ data: [
+    { provider: "plivo", enabled: false, config: {}, status: "missing_configuration" },
+    { provider: "sarvam", enabled: false, config: {}, status: "missing_configuration", callback_security_configured: false },
+  ] });
+  api.post.mockResolvedValue({ data: {
+    prompt: "Use lead_name and lead_context.",
+    variables: [{ name: "lead_name" }, { name: "lead_phone" }, { name: "lead_context" }],
+    steps: ["Commit the agent."],
+    output_prompt: "Create requirement and product_fit outputs.",
+    output_variables: [{ name: "requirement", type: "String" }, { name: "product_fit", type: "String" }],
+    fresh_agent_steps: ["Paste the output prompt."],
+  } });
+  await act(async () => root.render(<VoiceProviders workspaceId="A" />));
+  await act(async () => {
+    const select = container.querySelector("select"); select.value = "sarvam"; select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(container.querySelector('[aria-label="Agent input mode"]').value).toBe("lead_context_v1");
+  const details = [...container.querySelectorAll("details")].find((item) => item.textContent.includes("Set up a new Sarvam agent"));
+  details.open = true;
+  await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate setup guide").click());
+  expect(api.post).toHaveBeenCalledWith("/workspaces/A/voice-providers/sarvam/setup-guide", {
+    business_name: "", offer: "", objective: "", instructions: "",
+  });
+  expect(container.querySelector('[aria-label="Sarvam setup guide"]')).not.toBeNull();
+  expect(container.textContent).toContain("lead_context");
+  expect(container.textContent).toContain("existing qualification output variables will remain unchanged");
+  expect(container.textContent).toContain("Creating a fresh agent? Add qualification outputs");
+  expect(container.querySelector('[aria-label="Generated Sarvam output variable prompt"]').value).toContain("product_fit");
+  expect(details.textContent).toContain("Setup guide ready");
+});
+
+test("shows setup guide API failures beside the button", async () => {
+  api.get.mockResolvedValue({ data: [
+    { provider: "plivo", enabled: false, config: {}, status: "missing_configuration" },
+    { provider: "sarvam", enabled: false, config: {}, status: "missing_configuration" },
+  ] });
+  api.post.mockRejectedValue({ response: { status: 404 } });
+  await act(async () => root.render(<VoiceProviders workspaceId="A" />));
+  await act(async () => {
+    const select = container.querySelector("select"); select.value = "sarvam"; select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const details = [...container.querySelectorAll("details")].find((item) => item.textContent.includes("Set up a new Sarvam agent"));
+  details.open = true;
+  await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate setup guide").click());
+  expect(details.querySelector('[role="status"]').textContent).toContain("not available on the running backend");
+});
+
+test("shows setup guide validation details", async () => {
+  api.get.mockResolvedValue({ data: [
+    { provider: "plivo", enabled: false, config: {}, status: "missing_configuration" },
+    { provider: "sarvam", enabled: false, config: {}, status: "missing_configuration" },
+  ] });
+  api.post.mockRejectedValue({ response: { status: 422, data: { detail: [{ msg: "Instructions are too long" }] } } });
+  await act(async () => root.render(<VoiceProviders workspaceId="A" />));
+  await act(async () => {
+    const select = container.querySelector("select"); select.value = "sarvam"; select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const details = [...container.querySelectorAll("details")].find((item) => item.textContent.includes("Set up a new Sarvam agent"));
+  details.open = true;
+  await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate setup guide").click());
+  expect(details.querySelector('[role="status"]').textContent).toBe("Instructions are too long");
 });

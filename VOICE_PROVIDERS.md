@@ -143,11 +143,29 @@ translated when read. Qualification calls use the Instant Outbound `/outbounds` 
 one request per lead, and store its returned `attempt_id` on the existing call session. Secret
 regeneration affects new calls only because each initiated session retains its capability digest.
 
-Configure the Sarvam agent to consume the `qualification_profile`, `customer_name`,
-`previous_answers` and `pending_discussion` agent variables, and return factual fields
-in `final_agent_variables` (or a nested `qualification_data` object). AREVEI evaluates
-the facts/transcript itself; provider scores, lead status and decisions are ignored.
-The provider must have a published agent and working telephony connection.
+Sarvam supports two input modes. Existing configurations remain on the legacy
+`qualification_profile`, `customer_name`, `previous_answers`, and `pending_discussion`
+contract. New agents should use **Lead context**, which sends exactly three String variables:
+`lead_name`, `lead_phone`, and `lead_context`. AREVEI builds `lead_context` from active CRM
+fields, Meta campaign/form attribution, previous confirmed answers, pending discussion, and
+the selected qualification profile. The workspace model condenses that briefing when
+configured; a deterministic formatter is always available as a fallback.
+
+Settings > Voice Providers > Sarvam includes a setup-guide generator. Paste its prompt into
+Sarvam's AI agent builder. The builder is instructed to configure the three String inputs,
+update the runtime instructions, and preserve every existing working final/output variable.
+Review the proposed changes, test the agent, and commit a version before copying its technical
+IDs into AREVEI. The callback may return facts in `final_agent_variables` or a nested
+`qualification_data` object. AREVEI evaluates the facts and transcript itself; provider
+scores, lead status, and decisions are ignored. The provider must have a committed agent and
+working telephony connection. Switch an existing agent to Lead context only after its three
+String inputs are configured.
+
+For a fresh agent, the generated guide also includes a separate output-variable setup prompt.
+Paste it into Sarvam's AI builder after the main prompt. It creates flat String outputs for
+requirement, fit, explicit budget, eligibility, timeline, intent, decision-maker status,
+location, preferences, objections, interest, and do-not-call. The separate prompt is not
+needed when updating an agent whose qualification outputs already work.
 
 Official contracts consulted:
 - https://docs.sarvam.ai/conversations/api/introduction

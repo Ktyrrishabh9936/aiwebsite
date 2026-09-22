@@ -12,6 +12,8 @@ from fastapi import FastAPI, HTTPException
 from qualification_engine import QualificationProfile
 from voice_config import encrypt, decrypt, load_config, public_config, public_base, regenerate_sarvam_callback_secret, safe_config, save_config
 from voice_providers import get_provider, SarvamVoiceProvider, PlivoVoiceProvider, callback_proof
+from voice_api import SARVAM_QUALIFICATION_OUTPUTS, SarvamSetupGuideRequest, sarvam_output_setup_prompt, sarvam_setup_prompt
+from plivo_calls import safe_provider_rejection
 
 
 def sarvam_channel():
@@ -110,6 +112,12 @@ def test_legacy_sarvam_names_are_read_as_canonical_fields():
             "connection_id": "connection", "agent_phone_number": "+14155550123"}
 
 
+def test_sarvam_payload_mode_is_validated():
+    assert safe_config("sarvam", {"payload_mode": "lead_context_v1"}) == {"payload_mode": "lead_context_v1"}
+    with pytest.raises(HTTPException, match="input mode"):
+        safe_config("sarvam", {"payload_mode": "surprise"})
+
+
 def test_sarvam_callback_secret_is_generated_encrypted_and_regenerated():
     from tests.test_qualification_integration import isolated, seed
     async def run(db):
@@ -134,6 +142,42 @@ def test_sarvam_callback_secret_is_generated_encrypted_and_regenerated():
     asyncio.run(isolated(run))
 
 
+def test_saving_voice_provider_makes_it_workspace_and_default_profile_provider(monkeypatch):
+    from auth import create_access_token
+    from tests.test_qualification_integration import isolated, seed
+    from voice_api import router
+
+    monkeypatch.setenv("JWT_SECRET", "synthetic-voice-provider-test-secret")
+
+    async def run(db):
+        ws, _, profile_id = await seed(db)
+        user_id = ObjectId()
+        await db.users.insert_one({"_id": user_id, "email": "voice@example.test", "role": "user"})
+        await db.workspaces.update_one({"_id": ObjectId(ws)}, {"$set": {"user_id": str(user_id)}})
+        app = FastAPI()
+        app.state.db = db
+        app.include_router(router)
+        token = create_access_token(str(user_id), "voice@example.test")
+        headers = {"Authorization": f"Bearer {token}"}
+        payload = {"enabled": True, "config": {
+            "organization_id": "org", "workspace_id": "sws", "app_id": "app", "app_version": 1,
+            "connection_id": "connection", "agent_phone_number": "+14155550123", "payload_mode": "lead_context_v1",
+        }, "credentials": {"api_key": "private"}}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers) as client:
+            saved = await client.put(f"/workspaces/{ws}/voice-providers/sarvam", json=payload)
+            assert saved.status_code == 200, saved.text
+            assert saved.json()["is_default"] is True
+            listed = (await client.get(f"/workspaces/{ws}/voice-providers")).json()
+        assert next(item for item in listed if item["provider"] == "sarvam")["is_default"] is True
+        assert next(item for item in listed if item["provider"] == "plivo")["is_default"] is False
+        workspace = await db.workspaces.find_one({"_id": ObjectId(ws)})
+        profile = await db.qualification_profiles.find_one({"_id": ObjectId(profile_id)})
+        assert workspace["qualification_voice_provider"] == "sarvam"
+        assert profile["voice_provider"] == "sarvam"
+
+    asyncio.run(isolated(run))
+
+
 def test_sarvam_transport_contract():
     provider = SarvamVoiceProvider()
     cfg = {"organization_id": "org", "workspace_id": "sws", "app_id": "app", "app_version": 3,
@@ -153,6 +197,51 @@ def test_sarvam_transport_contract():
     assert "private" not in json.dumps(payload)
     assert provider.transport(cfg)[0] == "https://apps.sarvam.ai/api/outbounds/v1/orgs/org/workspaces/sws/outbounds"
     assert provider.transport(cfg)[1] == {"X-API-Key": "private"}
+
+
+def test_sarvam_lead_context_contract_has_exactly_three_string_variables():
+    provider = SarvamVoiceProvider()
+    cfg = {"organization_id": "org", "workspace_id": "sws", "app_id": "app", "app_version": 3,
+        "connection_id": "connection", "agent_phone_number": "+14155550123", "payload_mode": "lead_context_v1",
+        "credentials": {"api_key": "private", "callback_token": "callback-private"}}
+    base = {"workspace_id": "ws", "lead_id": "lead", "customer_name": "Asha", "lead_phone": "+14155550124",
+        "to_number": "+14155550124", "lead_context": "Requirement: website design"}
+    variables = provider.build_payload(base, cfg, "session")["app_config"]["agent_variables"]
+    assert variables == {"lead_name": "Asha", "lead_phone": "+14155550124", "lead_context": "Requirement: website design"}
+    assert all(isinstance(value, str) for value in variables.values())
+
+
+def test_sarvam_setup_prompt_explains_fixed_contract_and_business_rules():
+    prompt = sarvam_setup_prompt("Acme", "Website design", "Book a discovery call", "Never promise a delivery date.")
+    assert "lead_name" in prompt and "lead_phone" in prompt and "lead_context" in prompt
+    assert "Acme" in prompt and "Website design" in prompt
+    assert "Never promise a delivery date." in prompt
+    assert "Preserve every existing final/output variable exactly as it is" in prompt
+    assert "Show me the proposed configuration changes for review before committing" in prompt
+
+
+def test_sarvam_setup_guide_accepts_detailed_business_instructions():
+    body = SarvamSetupGuideRequest(offer="o" * 5000, objective="g" * 2500, instructions="i" * 12000)
+    assert len(body.offer) == 5000
+    assert len(body.instructions) == 12000
+
+
+def test_fresh_sarvam_agent_output_prompt_matches_arevei_facts():
+    prompt = sarvam_output_setup_prompt()
+    names = {item["name"] for item in SARVAM_QUALIFICATION_OUTPUTS}
+    assert {"requirement", "product_fit", "budget", "buying_intent", "purchase_timeline",
+            "decision_maker_status", "not_interested", "dnd_requested"} <= names
+    assert all(item["type"] == "String" for item in SARVAM_QUALIFICATION_OUTPUTS)
+    assert "Do not create qualification score" in prompt
+    assert "Leave nullable fields empty when unknown" in prompt
+
+
+def test_provider_rejection_keeps_validation_message_and_redacts_secrets():
+    detail = safe_provider_rejection({"detail": [{"msg": "lead_context must be a String"},
+        {"message": "api_key=private-value see https://provider.example/debug?token=private"}]})
+    assert "lead_context must be a String" in detail
+    assert "private-value" not in detail
+    assert "https://" not in detail
 
 
 def test_sarvam_instant_outbound_http_request_uses_one_lead():
@@ -226,8 +315,9 @@ def test_sarvam_end_to_end_workspace_isolation_and_replay(monkeypatch):
     async def run(db):
         ws, lead_id, profile_id = await seed(db)
         await db.qualification_profiles.update_one({"_id": ObjectId(profile_id)}, {"$set": {"voice_provider": "sarvam"}})
+        await db.crm_leads.update_one({"_id": ObjectId(lead_id)}, {"$set": {"field_values.full_name": "Asha", "field_values.requirements": "Website design"}})
         config = {"organization_id": "org", "workspace_id": "sws", "app_id": "app", "app_version": 2,
-            "connection_id": "connection", "agent_phone_number": "+14155550123"}
+            "connection_id": "connection", "agent_phone_number": "+14155550123", "payload_mode": "lead_context_v1"}
         saved = await save_config(db, ws, "sarvam", True, config, {"api_key": "private"})
         _, generated_credentials = await load_config(db, ws, "sarvam")
         from plivo_calls import start_qualification_call
@@ -249,11 +339,19 @@ def test_sarvam_end_to_end_workspace_isolation_and_replay(monkeypatch):
         assert sent_payload["app_config"]["app_id"] == "app"
         assert sent_payload["app_config"]["app_version"] == 2
         assert sent_payload["app_config"]["connection_config"] == {"connection_id": "connection", "agent_phone_number": "+14155550123"}
+        assert set(sent_payload["app_config"]["agent_variables"]) == {"lead_name", "lead_phone", "lead_context"}
+        assert sent_payload["app_config"]["agent_variables"]["lead_name"] == "Asha"
+        assert "Website design" in sent_payload["app_config"]["agent_variables"]["lead_context"]
         assert sent_payload["user_config"]["user_phone_number"] == "+14155550123"
         session_id = result["session_id"]
         session = await db.plivo_call_sessions.find_one({"_id": ObjectId(session_id)})
         assert session["provider_call_id"] == "attempt-1"
         assert session["provider_identifiers"]["attempt_id"] == "attempt-1"
+        assert session["lead_context_source"] == "deterministic"
+        context_notes = [n for n in (await db.crm_leads.find_one({"_id": ObjectId(lead_id)}))["lead_notes"] if n.get("source") == "lead_context_agent"]
+        assert len(context_notes) == 1
+        assert context_notes[0]["author"] == "Lead Context Agent"
+        assert context_notes[0]["context_source"] == "deterministic"
         assert "private" not in json.dumps(session, default=str)
         proof = callback_proof(generated_credentials["callback_token"], ws, session_id)
         # Rotation after initiation must not strand the session's frozen capability.

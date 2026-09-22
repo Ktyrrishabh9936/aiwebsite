@@ -24,6 +24,7 @@ PROCESS_LABELS = {
     "analytics_task": "Analytics task",
     "sheet_column_mapping": "Sheet column mapping",
     "lead_qualification": "Lead qualification",
+    "lead_context": "Lead context preparation",
 }
 
 

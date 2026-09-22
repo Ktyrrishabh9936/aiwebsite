@@ -141,10 +141,18 @@ class SarvamVoiceProvider(VoiceProvider):
     def build_payload(self, base, config, session_id):
         # Per-session capability is passed as metadata, never in a URL/access log.
         proof = callback_proof(config["credentials"]["callback_token"], base["workspace_id"], session_id)
+        if config.get("payload_mode") == "lead_context_v1":
+            agent_variables = {
+                "lead_name": str(base.get("lead_name") or base.get("customer_name") or ""),
+                "lead_phone": str(base.get("lead_phone") or base.get("to_number") or ""),
+                "lead_context": str(base.get("lead_context") or ""),
+            }
+        else:
+            agent_variables = {"qualification_profile": base["qualification_profile"], "customer_name": base["customer_name"],
+                               "previous_answers": base["previous_answers"], "pending_discussion": base["pending_discussion"]}
         return {"app_config": {"app_id": config["app_id"], "app_version": config["app_version"],
                 "connection_config": {"connection_id": config["connection_id"], "agent_phone_number": config["agent_phone_number"]},
-                "agent_variables": {"qualification_profile": base["qualification_profile"], "customer_name": base["customer_name"],
-                                    "previous_answers": base["previous_answers"], "pending_discussion": base["pending_discussion"]}},
+                "agent_variables": agent_variables},
                 "user_config": {"user_phone_number": base["to_number"]},
                 "webhook_config": {"url": f"{public_base()}/api/sarvam/workspaces/{base['workspace_id']}/calls/{session_id}/result",
                                    "metadata": {"callback_proof": proof, "arevei_workspace_id": base["workspace_id"],

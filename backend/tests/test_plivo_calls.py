@@ -845,6 +845,32 @@ def test_calling_modes_normalize_automatic_delay_and_manual_trigger():
     assert manual["lead_created_trigger_enabled"] is False
 
 
+def test_automatic_zero_delay_starts_new_lead_immediately(monkeypatch):
+    from bson import ObjectId
+    import plivo_calls
+
+    async def run():
+        lead_id = ObjectId()
+        lead = {"_id": lead_id, "workspace_id": "111111111111111111111111", "field_values": {"phone": "8299752170"}, "qualification_call": {}, "lead_notes": []}
+        db = FakeDb(lead)
+        db.plivo_workflow_configs.docs.append({"workspace_id": lead["workspace_id"], **normalize_workflow_config({"call_mode": "automatic", "initial_delay_seconds": 0})})
+        calls = []
+
+        async def start(db_arg, ws_id, requested_lead_id, request, **options):
+            calls.append((db_arg, ws_id, requested_lead_id, request, options))
+            return {"status": "started"}
+
+        monkeypatch.setattr(plivo_calls, "start_qualification_call", start)
+        result = await schedule_first_qualification_call(db, lead["workspace_id"], str(lead_id))
+
+        assert result["status"] == "started"
+        assert len(calls) == 1
+        assert calls[0][4] == {"auto": True, "raise_on_error": False}
+        assert lead["qualification_call"] == {}
+
+    anyio.run(run)
+
+
 def test_manual_calling_mode_does_not_schedule_new_lead():
     from bson import ObjectId
 

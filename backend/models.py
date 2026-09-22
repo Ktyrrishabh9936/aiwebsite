@@ -48,6 +48,7 @@ class Workspace(BaseDocument):
     modules: dict = Field(default_factory=lambda: {"real_estate": True, "agency": False})
     currency: str = "INR"
     qualification_profile_id: Optional[str] = None
+    qualification_voice_provider: str = "plivo"
     brain: dict = Field(default_factory=dict)
     brain_status: str = "pending"  # pending | building | ready | error
     roadmap: List[dict] = Field(default_factory=list)

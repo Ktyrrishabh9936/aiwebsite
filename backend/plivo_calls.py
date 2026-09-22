@@ -1838,6 +1838,9 @@ async def schedule_first_qualification_call(db, ws_id, lead_id, delay_minutes=No
     if not workflow.get("enabled", True) or call_mode == "manual":
         return {"status": "manual", "reason": "Workspace qualification calls are manual"}
     created_at = parse_iso_datetime(lead.get("created_at")) or datetime.now(timezone.utc)
+    delay_seconds = int(delay_minutes * 60) if delay_minutes is not None else int(workflow.get("initial_delay_seconds") or 0)
+    if call_mode == "automatic" and delay_seconds == 0:
+        return await start_qualification_call(db, ws_id, lead_id, None, auto=True, raise_on_error=False)
     if call_mode == "scheduled":
         local = created_at.astimezone(_workflow_zone(workflow))
         start_hour, start_minute = divmod(_time_minutes((workflow.get("calling_window") or {}).get("start") or "09:30"), 60)
@@ -1846,8 +1849,7 @@ async def schedule_first_qualification_call(db, ws_id, lead_id, delay_minutes=No
             scheduled_at += timedelta(days=1)
         scheduled_at = scheduled_at.astimezone(timezone.utc)
     else:
-        delay_seconds = int(delay_minutes * 60) if delay_minutes is not None else int(workflow.get("initial_delay_seconds") or 0)
-        scheduled_at = next_calling_window_start(workflow, created_at + timedelta(seconds=delay_seconds))
+        scheduled_at = created_at + timedelta(seconds=delay_seconds)
     now = now_iso()
     scheduled = {
         **qualification,
@@ -1977,6 +1979,31 @@ def qualification_payload(base, ws_id, lead_id, lead, lead_phone, agent_config=N
         "qualification_result_url": callbacks["result_url"],
         "transcript_callback_url": callbacks["result_url"],
     }
+
+
+def safe_provider_rejection(data):
+    """Extract validation guidance without retaining an arbitrary provider response body."""
+    messages = []
+
+    def collect(value):
+        if len(messages) >= 4:
+            return
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                if str(child_key).casefold() in {"detail", "message", "msg", "error", "errors", "reason"}:
+                    collect(child)
+        elif isinstance(value, list):
+            for child in value[:4]:
+                collect(child)
+        elif isinstance(value, str) and value.strip():
+            cleaned = " ".join(value.split())
+            cleaned = re.sub(r"(?i)(api[_ -]?key|token|authorization|credential|secret)\s*[:=]\s*\S+", r"\1=[redacted]", cleaned)
+            cleaned = re.sub(r"https?://\S+", "[provider URL]", cleaned)
+            if cleaned and cleaned not in messages:
+                messages.append(cleaned[:240])
+
+    collect(data)
+    return "; ".join(messages)[:500]
 
 
 async def record_qualification_attempt(db, ws_id, lead_id, status, payload=None, response=None, error="", agent_config=None, session_id=""):
@@ -2270,7 +2297,7 @@ async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=F
         if not workflow.get("enabled", True) or attempts >= profile.retry.max_attempts:
             await db.crm_leads.update_one({"_id": lead["_id"]}, {"$set": {"qualification_call.status": "retry_exhausted", "retry_eligible": False}})
             return {"status": "skipped", "reason": "Calling disabled or attempt limit reached"}
-        if not within_calling_window(workflow):
+        if workflow.get("call_mode") == "scheduled" and not within_calling_window(workflow):
             await db.crm_leads.update_one({"_id": lead["_id"]}, {"$set": {"qualification_call.scheduled_for": next_calling_window_start(workflow).isoformat()}})
             return {"status": "scheduled", "reason": "Outside calling window"}
     if is_junk_lead(lead):
@@ -2331,6 +2358,30 @@ async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=F
     await update_call_session(db, ws_id, session_id, {"profile_snapshot": profile.model_dump(mode="json"), "profile_id": profile_id})
     base_payload = qualification_payload(public_base(), ws_id, lead_id, lead, lead_phone, agent_config, session_id)
     base_payload["qualification_profile"] = profile.model_dump(mode="json")
+    if provider.name == "sarvam" and agent_config.get("payload_mode") == "lead_context_v1":
+        from lead_context import prepare_lead_context
+        settings = await ensure_crm_settings(db, ws_id)
+        context, context_source = await prepare_lead_context(
+            lead, profile, settings, ws_id, workspace.get("model_id")
+        )
+        base_payload.update({"lead_name": base_payload["customer_name"], "lead_context": context})
+        await update_call_session(db, ws_id, session_id, {
+            "lead_context": context,
+            "lead_context_source": context_source,
+            "lead_context_version": "v1",
+        })
+        context_note = normalize_lead_note({
+            "body": "Prepared the dynamic campaign and CRM briefing for this qualification call.",
+            "author": "Lead Context Agent",
+            "source": "lead_context_agent",
+            "call_provider": provider.name,
+            "summary": f"Lead context prepared using {context_source.replace('_', ' ')} mode",
+        })
+        context_note.update({"call_key": f"lead_context:{session_id}", "context_source": context_source})
+        await db.crm_leads.update_one(
+            {"workspace_id": ws_id, "_id": ObjectId(lead_id)},
+            {"$push": {"lead_notes": context_note}, "$set": {"updated_at": now_iso()}},
+        )
     payload = provider.build_payload(base_payload, agent_config, session_id)
     proof = (payload.get("webhook_config") or {}).get("metadata", {}).get("callback_proof")
     if proof:
@@ -2379,7 +2430,10 @@ async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=F
         response_data = {}
     response_data["_http_status"] = response.status_code
     if response.status_code >= 400:
+        detail = safe_provider_rejection(response_data)
         error = "Invalid provider credentials" if response.status_code in (401, 403) else "Provider rejected call request"
+        if detail and response.status_code not in (401, 403):
+            error = f"{error}: {detail}"
         response_data = {"_http_status": response.status_code}
         await update_call_session(db, ws_id, session_id, {
             "status": "failed",
