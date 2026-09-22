@@ -1193,10 +1193,7 @@ async def scheduler_loop():
 
 
 async def google_sheets_poller_loop():
-    import httpx
-    from crm import active_fields, ensure_crm_settings
-    from google_sheets import refresh_access_token, values_url, retry_sheet_statuses, import_sheet_row, column_letter, sheet_request
-    from plivo_calls import schedule_first_qualification_call
+    from google_sheets import retry_sheet_statuses, poll_sheet_connection
     await asyncio.sleep(15)
     while True:
         try:
@@ -1211,81 +1208,13 @@ async def google_sheets_poller_loop():
                 conn = await db.google_sheet_connections.find_one({"workspace_id": ws_id})
                 if not conn or not conn.get("spreadsheet_id") or not conn.get("sheet_name"):
                     continue
-                
-                spreadsheet_id = conn["spreadsheet_id"]
-                sheet_name = conn["sheet_name"]
                 try:
-                    header_rows = (await sheet_request(db, conn, "GET", "1:1")).get("values") or [[]]
-                    headers = header_rows[0]
-                except Exception:
-                    logger.warning("Unable to read Sheet headers for workspace %s; check mapping/access", ws_id)
+                    result = await poll_sheet_connection(db, ws_id, conn)
+                except Exception as error:
+                    logger.warning("Sheet poll failed workspace=%s error_type=%s", ws_id, type(error).__name__)
                     continue
-                current_cursor = conn.get("cursor", 1)
-                crm_settings = await ensure_crm_settings(db, ws_id)
-                crm_field_keys = {f["key"] for f in active_fields(crm_settings)}
-                
-                start_row = current_cursor + 1
-                end_row = start_row + 200
-                range_str = f"A{start_row}:{column_letter(max(len(headers) - 1, 0))}{end_row}"
-                
-                access_token = conn.get("tokens", {}).get("access_token")
-                if not access_token:
-                    continue
-                
-                async def fetch_values(token):
-                    async with httpx.AsyncClient() as client:
-                        url = values_url(spreadsheet_id, sheet_name, range_str)
-                        return await client.get(url, headers={"Authorization": f"Bearer {token}"})
-                
-                res = await fetch_values(access_token)
-                if res.status_code == 401:
-                    try:
-                        class FakeRequest:
-                            def __init__(self, app_inst):
-                                self.app = app_inst
-                        
-                        fake_req = FakeRequest(app)
-                        access_token = await refresh_access_token(conn, fake_req)
-                        res = await fetch_values(access_token)
-                    except Exception as e:
-                        logger.error("Failed to auto refresh token for workspace %s: %s", ws_id, e)
-                        await db.workflows.update_one({"_id": wf["_id"]}, {"$set": {"status": "draft"}})
-                        await notify(ws_id, "error", "Google Sheets workflow paused", "Authentication expired. Please reconnect.")
-                        continue
-                
-                if res.status_code != 200:
-                    logger.error("Failed to poll sheet values for workspace %s: %s", ws_id, res.text)
-                    continue
-                
-                data = res.json()
-                rows = data.get("values", [])
-                if not rows:
-                    continue
-                
-                new_leads_count = 0
-                import_failed = False
-                for idx, row in enumerate(rows):
-                    row_num = start_row + idx
-                    try:
-                        lead_id, created = await import_sheet_row(db, ws_id, conn, headers, row, row_num, crm_field_keys)
-                    except ValueError:
-                        logger.warning("Sheet import mapping or identity conflict workspace=%s row=%s", ws_id, row_num)
-                        import_failed = True
-                        break
-                    if created:
-                        await schedule_first_qualification_call(db, ws_id, lead_id)
-                        new_leads_count += 1
-
-                if import_failed:
-                    continue
-                new_cursor = current_cursor + len(rows)
-                await db.google_sheet_connections.update_one(
-                    {"workspace_id": ws_id},
-                    {"$set": {"cursor": new_cursor, "updated_at": now_iso()}}
-                )
-                
-                if new_leads_count > 0:
-                    await notify(ws_id, "success", f"{new_leads_count} new leads imported", f"Imported {new_leads_count} new lead(s) from your connected Google Sheet.")
+                if result["created"] > 0:
+                    await notify(ws_id, "success", f"{result['created']} new leads imported", f"Imported {result['created']} new lead(s) from your connected Google Sheet.")
                     
         except Exception:
             logger.exception("google sheets poller tick failed")

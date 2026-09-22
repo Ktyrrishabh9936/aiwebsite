@@ -70,6 +70,27 @@ export default function WorkspaceLayout() {
 
   useEffect(() => { refresh(); loadNotes(); }, [refresh, loadNotes]);
   useEffect(() => {
+    let active = true;
+    const syncGoogleSheet = () => {
+      if (active && !document.hidden) {
+        api.post(`/google/workspaces/${wsId}/sync`).then(({ data }) => {
+          if (!active || !data?.created) return;
+          window.dispatchEvent(new CustomEvent("arevei:sheet-synced", { detail: data }));
+          toast.success(`${data.created} new lead${data.created === 1 ? "" : "s"} imported`);
+          loadNotes();
+        }).catch(() => {});
+      }
+    };
+    syncGoogleSheet();
+    window.addEventListener("focus", syncGoogleSheet);
+    const timer = setInterval(syncGoogleSheet, 30000);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", syncGoogleSheet);
+      clearInterval(timer);
+    };
+  }, [wsId, loadNotes]);
+  useEffect(() => {
     const sync = () => { if (!document.hidden) refresh(); };
     window.addEventListener("focus", sync);
     const timer = setInterval(sync, 15000);

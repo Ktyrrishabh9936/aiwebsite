@@ -293,6 +293,13 @@ export default function CrmInbox() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wsId, statusFilter, page, searchQuery, recordView]);
 
+  useEffect(() => {
+    const refreshImportedLeads = () => loadAll();
+    window.addEventListener("arevei:sheet-synced", refreshImportedLeads);
+    return () => window.removeEventListener("arevei:sheet-synced", refreshImportedLeads);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsId, statusFilter, page, searchQuery, recordView]);
+
   const mergeLead = (updated) => {
     setLeads((prev) => prev.map((lead) => lead.id === updated.id ? updated : lead));
     selectLead(updated);

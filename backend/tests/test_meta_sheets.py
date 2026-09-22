@@ -129,6 +129,53 @@ def test_ai_mapping_keeps_exact_matches_and_adds_semantic_custom_fields(monkeypa
     assert len(result.values()) == len(set(result.values()))
 
 
+def test_sheet_poll_overlap_imports_late_row_behind_cursor(monkeypatch):
+    scheduled = AsyncMock()
+    monkeypatch.setattr("plivo_calls.schedule_first_qualification_call", scheduled)
+
+    async def run(db):
+        ws = str(ObjectId())
+        await ensure_crm_settings(db, ws)
+        headers = ["ID", "Phone", "Name"]
+        conn = {
+            "workspace_id": ws,
+            "spreadsheet_id": "file",
+            "sheet_name": "Leads",
+            "tokens": {},
+            "cursor": 5,
+            "header_row": headers,
+            "column_map": {"meta_lead_id": "ID", "phone": "Phone", "full_name": "Name"},
+        }
+        await db.google_sheet_connections.insert_one(conn)
+        _, created = await sheets.import_sheet_row(
+            db, ws, conn, headers, ["existing", "111", "Existing Lead"], 2, {"phone", "full_name"}
+        )
+        assert created
+
+        async def request(db, conn, method, cells, **kwargs):
+            assert method == "GET"
+            if cells == "1:1":
+                return {"values": [headers]}
+            assert cells == "A2:C251"
+            return {"values": [
+                ["existing", "111", "Existing Lead"],
+                [],
+                ["late-meta-lead", "222", "Late Meta Lead"],
+            ]}
+
+        monkeypatch.setattr(sheets, "sheet_request", request)
+        result = await sheets.poll_sheet_connection(db, ws, conn)
+        assert result == {"created": 1, "reviewed": 2, "cursor": 5}
+        lead = await db.crm_leads.find_one({"workspace_id": ws, "meta_lead_id": "late-meta-lead"})
+        assert lead["phone"] == "222"
+        assert lead["google_sheet_row_number"] == 4
+        stored_conn = await db.google_sheet_connections.find_one({"workspace_id": ws})
+        assert stored_conn["cursor"] == 5
+        scheduled.assert_awaited_once_with(db, ws, str(lead["_id"]))
+
+    asyncio.run(isolated(run))
+
+
 async def seed(db):
     ws = str(ObjectId())
     settings = await ensure_crm_settings(db, ws)

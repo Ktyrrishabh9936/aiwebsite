@@ -18,6 +18,8 @@ from meta_fields import META_FIELDS, header_index, map_sheet_row
 router = APIRouter(prefix="/google")
 
 GOOGLE_READ_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+SHEET_POLL_LOOKBACK_ROWS = 50
+SHEET_POLL_BATCH_ROWS = 250
 
 FIELD_ALIASES = {
     "full_name": ["name", "full name", "lead name", "customer name"],
@@ -519,6 +521,64 @@ async def import_sheet_row(db, ws_id, conn, headers, row, row_number, field_keys
         return str(result.upserted_id), True
     existing = await db.crm_leads.find_one({"workspace_id": ws_id, "sheet_row_key": row_key})
     return str(existing["_id"]), False
+
+
+async def poll_sheet_connection(db, ws_id, conn):
+    """Import one bounded Sheet batch with overlap so late-filled rows are not missed."""
+    from plivo_calls import schedule_first_qualification_call
+
+    header_rows = (await sheet_request(db, conn, "GET", "1:1")).get("values") or [[]]
+    headers = header_rows[0]
+    if not headers:
+        raise ValueError("The bound Sheet does not contain a header row.")
+    current_cursor = max(1, int(conn.get("cursor") or 1))
+    start_row = max(2, current_cursor + 1 - SHEET_POLL_LOOKBACK_ROWS)
+    end_row = start_row + SHEET_POLL_BATCH_ROWS - 1
+    cells = f"A{start_row}:{column_letter(max(len(headers) - 1, 0))}{end_row}"
+    rows = (await sheet_request(db, conn, "GET", cells)).get("values") or []
+    if not rows:
+        return {"created": 0, "reviewed": 0, "cursor": current_cursor}
+
+    settings = await ensure_crm_settings(db, ws_id)
+    field_keys = {field["key"] for field in active_fields(settings)}
+    created_count = 0
+    reviewed_count = 0
+    for offset, row in enumerate(rows):
+        row_number = start_row + offset
+        if not any(str(value or "").strip() for value in row):
+            continue
+        lead_id, created = await import_sheet_row(db, ws_id, conn, headers, row, row_number, field_keys)
+        reviewed_count += 1
+        if created:
+            await schedule_first_qualification_call(db, ws_id, lead_id)
+            created_count += 1
+
+    new_cursor = max(current_cursor, start_row + len(rows) - 1)
+    await db.google_sheet_connections.update_one(
+        {"workspace_id": ws_id},
+        {"$set": {"cursor": new_cursor, "updated_at": now_iso()}},
+    )
+    return {"created": created_count, "reviewed": reviewed_count, "cursor": new_cursor}
+
+
+@router.post("/workspaces/{ws_id}/sync")
+async def sync_sheet_now(ws_id: str, request: Request):
+    """Serverless-safe authenticated poll used by the dashboard and manual recovery."""
+    from crm import require_workspace_access
+
+    await require_workspace_access(request, ws_id)
+    db = get_db(request)
+    workflow = await db.workflows.find_one({"workspace_id": ws_id, "kind": "ads_to_crm"})
+    if not workflow or workflow.get("status") != "published":
+        return {"status": "paused", "created": 0, "reviewed": 0}
+    conn = await db.google_sheet_connections.find_one({"workspace_id": ws_id})
+    if not conn or not conn.get("spreadsheet_id") or not conn.get("sheet_name"):
+        raise HTTPException(409, "Connect and bind a Google Sheet before syncing.")
+    try:
+        result = await poll_sheet_connection(db, ws_id, conn)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    return {"status": "synced", **result}
 
 
 async def sheet_request(db, conn, method, cells, **kwargs):
