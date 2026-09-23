@@ -1193,7 +1193,7 @@ async def scheduler_loop():
 
 
 async def google_sheets_poller_loop():
-    from google_sheets import retry_sheet_statuses, poll_sheet_connection
+    from google_sheets import retry_sheet_statuses, ensure_drive_watch
     await asyncio.sleep(15)
     while True:
         try:
@@ -1209,12 +1209,12 @@ async def google_sheets_poller_loop():
                 if not conn or not conn.get("spreadsheet_id") or not conn.get("sheet_name"):
                     continue
                 try:
-                    result = await poll_sheet_connection(db, ws_id, conn)
+                    # Imports are triggered by Google webhooks. This only renews
+                    # Google's expiring channel and retries CRM-to-Sheet writes.
+                    await ensure_drive_watch(db, conn)
                 except Exception as error:
-                    logger.warning("Sheet poll failed workspace=%s error_type=%s", ws_id, type(error).__name__)
+                    logger.warning("Sheet webhook renewal failed workspace=%s error_type=%s", ws_id, type(error).__name__)
                     continue
-                if result["created"] > 0:
-                    await notify(ws_id, "success", f"{result['created']} new leads imported", f"Imported {result['created']} new lead(s) from your connected Google Sheet.")
                     
         except Exception:
             logger.exception("google sheets poller tick failed")
@@ -1280,6 +1280,7 @@ async def startup():
     await db.code_projects.create_index("user_id")
     await db.code_projects.create_index("workspace_id")
     await db.workflows.create_index([("workspace_id", 1), ("kind", 1)])
+    await db.google_sheet_connections.create_index("drive_watch_channel_id", unique=True, sparse=True)
     await db.crm_leads.create_index([("workspace_id", 1), ("sheet_row_key", 1)], unique=True)
     await db.crm_leads.create_index([("workspace_id", 1), ("plivo_call_uuid", 1)])
     await db.crm_settings.create_index("workspace_id", unique=True)

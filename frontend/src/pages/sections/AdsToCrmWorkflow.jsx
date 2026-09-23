@@ -244,7 +244,7 @@ export default function AdsToCrmWorkflow() {
         <div>
           <h1 className="text-2xl font-bold">Ads to CRM</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Map Google Sheet columns into your configurable CRM fields.
+            Map Google Sheet columns into your CRM. Active workflows receive Google change webhooks and import new rows automatically.
           </p>
         </div>
         {connStatus.connected && connStatus.spreadsheet_id && (
@@ -257,7 +257,7 @@ export default function AdsToCrmWorkflow() {
                 : "bg-primary text-primary-foreground hover:bg-primary/95"
             }`}
           >
-            {workflow.status === "published" ? <><Ban className="w-4 h-4" /> Pause Sync</> : <><Power className="w-4 h-4" /> Activate Poller</>}
+            {workflow.status === "published" ? <><Ban className="w-4 h-4" /> Pause Webhook</> : <><Power className="w-4 h-4" /> Activate Webhook</>}
           </button>
         )}
       </div>

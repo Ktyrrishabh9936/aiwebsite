@@ -102,6 +102,81 @@ def test_google_tab_read_timeout_has_safe_actionable_error(monkeypatch):
     assert "provider" not in caught.value.detail
 
 
+def test_drive_watch_registration_uses_authenticated_https_webhook(monkeypatch):
+    captured = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return None
+        async def post(self, url, **kwargs):
+            captured.append((url, kwargs))
+            return httpx.Response(200, json={
+                "resourceId": "drive-resource",
+                "expiration": str(kwargs["json"]["expiration"]),
+            })
+
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://crm.example")
+    monkeypatch.setattr(sheets.httpx, "AsyncClient", lambda **kwargs: Client())
+
+    async def run(db):
+        conn = {"workspace_id": "ws", "spreadsheet_id": "sheet/file", "tokens": {"access_token": "oauth"}}
+        inserted = await db.google_sheet_connections.insert_one(conn)
+        conn = await db.google_sheet_connections.find_one({"_id": inserted.inserted_id})
+        result = await sheets.ensure_drive_watch(db, conn)
+        assert result["drive_watch_status"] == "active"
+        stored = await db.google_sheet_connections.find_one({"_id": inserted.inserted_id})
+        assert stored["drive_watch_resource_id"] == "drive-resource"
+        assert stored["drive_watch_token"]
+
+    asyncio.run(isolated(run))
+    url, request = captured[0]
+    assert url.endswith("/files/sheet%2Ffile/watch")
+    assert request["headers"] == {"Authorization": "Bearer oauth"}
+    assert request["json"]["address"] == "https://crm.example/api/google/webhooks/drive"
+    assert request["json"]["type"] == "web_hook"
+
+
+def test_drive_webhook_rejects_bad_token_and_imports_for_active_workflow(monkeypatch):
+    imported = AsyncMock(return_value={"created": 1, "reviewed": 1, "cursor": 2})
+    monkeypatch.setattr(sheets, "drain_sheet_connection", imported)
+
+    async def run(db):
+        ws = "workspace"
+        conn = {
+            "workspace_id": ws,
+            "drive_watch_channel_id": "channel",
+            "drive_watch_resource_id": "resource",
+            "drive_watch_token": "proof",
+        }
+        inserted = await db.google_sheet_connections.insert_one(conn)
+        conn["_id"] = inserted.inserted_id
+        await db.workflows.insert_one({"workspace_id": ws, "kind": "ads_to_crm", "status": "published"})
+
+        def request(token):
+            return SimpleNamespace(
+                headers={
+                    "x-goog-channel-id": "channel",
+                    "x-goog-channel-token": token,
+                    "x-goog-resource-id": "resource",
+                    "x-goog-resource-state": "update",
+                },
+                app=SimpleNamespace(state=SimpleNamespace(db=db)),
+            )
+
+        with pytest.raises(HTTPException) as caught:
+            await sheets.google_drive_webhook(request("wrong"))
+        assert caught.value.status_code == 403
+        response = await sheets.google_drive_webhook(request("proof"))
+        assert response.status_code == 204
+        imported.assert_awaited_once()
+        note = await db.notifications.find_one({"workspace_id": ws})
+        assert note["title"] == "1 new leads imported"
+
+    asyncio.run(isolated(run))
+
+
 def test_ai_mapping_keeps_exact_matches_and_adds_semantic_custom_fields(monkeypatch):
     headers = ["id", "Full Name", "phone_number", "campaign_name", "What is your budget?"]
     settings = {"fields": [

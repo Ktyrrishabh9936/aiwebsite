@@ -47,6 +47,12 @@ async def publish_workflow(ws_id: str, request: Request):
     col_map = conn.get("column_map", {})
     if not col_map or not col_map.get("phone"):
         raise HTTPException(status_code=400, detail="Please map the spreadsheet Phone column before publishing.")
+
+    from google_sheets import ensure_drive_watch
+    try:
+        await ensure_drive_watch(db, conn, force=True)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
         
     await db.workflows.update_one(
         {"workspace_id": ws_id, "kind": "ads_to_crm"},
@@ -64,6 +70,21 @@ async def publish_workflow(ws_id: str, request: Request):
 @router.post("/ads-to-crm/unpublish")
 async def unpublish_workflow(ws_id: str, request: Request):
     db = request.app.state.db if hasattr(request.app.state, "db") else request.app.extra.get("db")
+
+    conn = await db.google_sheet_connections.find_one({"workspace_id": ws_id})
+    if conn:
+        from google_sheets import stop_drive_watch
+        try:
+            await stop_drive_watch(db, conn)
+        except Exception:
+            # Pausing locally must still succeed if Google is temporarily unavailable.
+            pass
+        await db.google_sheet_connections.update_one(
+            {"_id": conn["_id"]},
+            {"$set": {"drive_watch_status": "paused", "updated_at": now_iso()},
+             "$unset": {"drive_watch_channel_id": "", "drive_watch_token": "", "drive_watch_resource_id": "", "drive_watch_expiration": "",
+                        "pending_drive_watch_channel_id": "", "pending_drive_watch_token": ""}},
+        )
     
     await db.workflows.update_one(
         {"workspace_id": ws_id, "kind": "ads_to_crm"},

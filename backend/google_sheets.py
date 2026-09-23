@@ -1,13 +1,15 @@
 import os
 import asyncio
+import hmac
 import json
 import logging
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 import urllib.parse
-from fastapi import APIRouter, Request, HTTPException, Query, Depends
+from fastapi import APIRouter, Request, HTTPException, Query, Depends, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from bson import ObjectId
 from models import GoogleSheetConnection, Workflow, now_iso
@@ -20,6 +22,8 @@ router = APIRouter(prefix="/google")
 GOOGLE_READ_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 SHEET_POLL_LOOKBACK_ROWS = 50
 SHEET_POLL_BATCH_ROWS = 250
+DRIVE_WATCH_RENEW_BEFORE_MS = 6 * 60 * 60 * 1000
+DRIVE_WATCH_LIFETIME_MS = 23 * 60 * 60 * 1000
 
 FIELD_ALIASES = {
     "full_name": ["name", "full name", "lead name", "customer name"],
@@ -148,6 +152,116 @@ def get_google_creds():
     if not client_id or not client_secret:
         raise HTTPException(status_code=500, detail="Google OAuth credentials not configured on server.")
     return client_id, client_secret
+
+
+def drive_webhook_url():
+    base = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if not base.startswith("https://"):
+        raise ValueError("PUBLIC_BASE_URL must be a public HTTPS URL before activating the Sheet webhook.")
+    return f"{base}/api/google/webhooks/drive"
+
+
+def drive_watch_is_fresh(conn, now_ms=None):
+    now_ms = now_ms or int(datetime.now(timezone.utc).timestamp() * 1000)
+    try:
+        expiration = int(conn.get("drive_watch_expiration") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(conn.get("drive_watch_channel_id") and expiration > now_ms + DRIVE_WATCH_RENEW_BEFORE_MS)
+
+
+async def stop_drive_watch(db, conn):
+    channel_id = conn.get("drive_watch_channel_id")
+    resource_id = conn.get("drive_watch_resource_id")
+    if not channel_id or not resource_id:
+        return
+    token = conn.get("tokens", {}).get("access_token")
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            "https://www.googleapis.com/drive/v3/channels/stop",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"id": channel_id, "resourceId": resource_id},
+        )
+        if response.status_code == 401:
+            request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db=db)))
+            token = await refresh_access_token(conn, request)
+            response = await client.post(
+                "https://www.googleapis.com/drive/v3/channels/stop",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"id": channel_id, "resourceId": resource_id},
+            )
+    if response.status_code not in {200, 204, 404, 410}:
+        logging.getLogger(__name__).warning(
+            "Could not stop Drive watch workspace=%s status=%s", conn.get("workspace_id"), response.status_code
+        )
+
+
+async def ensure_drive_watch(db, conn, force=False):
+    """Create or renew the Google Drive push channel used as the Sheet change trigger."""
+    if not force and drive_watch_is_fresh(conn):
+        return conn
+    if not conn.get("spreadsheet_id"):
+        raise ValueError("Bind a Google Sheet before activating its webhook.")
+
+    previous = dict(conn)
+    channel_id = str(uuid4())
+    channel_token = secrets.token_urlsafe(32)
+    expiration = int(datetime.now(timezone.utc).timestamp() * 1000) + DRIVE_WATCH_LIFETIME_MS
+    pending = {
+        "pending_drive_watch_channel_id": channel_id,
+        "pending_drive_watch_token": channel_token,
+        "drive_watch_status": "creating",
+        "drive_watch_error": None,
+        "updated_at": now_iso(),
+    }
+    # Google can deliver its initial sync call before files.watch returns.
+    await db.google_sheet_connections.update_one({"_id": conn["_id"]}, {"$set": pending})
+    token = conn.get("tokens", {}).get("access_token")
+    url = f"https://www.googleapis.com/drive/v3/files/{urllib.parse.quote(conn['spreadsheet_id'], safe='')}/watch"
+    payload = {
+        "id": channel_id,
+        "type": "web_hook",
+        "address": drive_webhook_url(),
+        "token": channel_token,
+        "expiration": expiration,
+    }
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(url, headers={"Authorization": f"Bearer {token}"}, json=payload)
+        if response.status_code == 401:
+            request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db=db)))
+            token = await refresh_access_token(conn, request)
+            response = await client.post(url, headers={"Authorization": f"Bearer {token}"}, json=payload)
+    if response.status_code >= 400:
+        safe = f"Google Drive could not activate the Sheet webhook (HTTP {response.status_code})."
+        await db.google_sheet_connections.update_one(
+            {"_id": conn["_id"], "pending_drive_watch_channel_id": channel_id},
+            {"$set": {"drive_watch_status": "failed", "drive_watch_error": safe, "updated_at": now_iso()},
+             "$unset": {"pending_drive_watch_channel_id": "", "pending_drive_watch_token": ""}},
+        )
+        raise ValueError(safe)
+
+    channel = response.json()
+    updates = {
+        "drive_watch_channel_id": channel_id,
+        "drive_watch_token": channel_token,
+        "drive_watch_resource_id": channel.get("resourceId"),
+        "drive_watch_expiration": int(channel.get("expiration") or expiration),
+        "drive_watch_status": "active",
+        "drive_watch_error": None,
+        "drive_watch_updated_at": now_iso(),
+    }
+    await db.google_sheet_connections.update_one(
+        {"_id": conn["_id"], "pending_drive_watch_channel_id": channel_id},
+        {"$set": updates, "$unset": {"pending_drive_watch_channel_id": "", "pending_drive_watch_token": ""}},
+    )
+    if previous.get("drive_watch_channel_id") and previous.get("drive_watch_resource_id"):
+        try:
+            await stop_drive_watch(db, previous)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Old Drive watch cleanup failed workspace=%s", conn.get("workspace_id"), exc_info=True
+            )
+    return {**conn, **updates}
 
 def get_redirect_uri(request: Request):
     env_uri = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI")
@@ -283,11 +397,20 @@ async def get_connection_status(ws_id: str, request: Request):
         "header_row": conn.get("header_row", []),
         "mapping_fields": [{"key": key, "label": label} for key, (_, label) in META_FIELDS.items()] + [{"key": "status", "label": "CRM Status (write-back)"}],
         "write_access": "https://www.googleapis.com/auth/spreadsheets" in conn.get("tokens", {}).get("scope", "").split(),
+        "webhook_status": conn.get("drive_watch_status", "inactive"),
+        "webhook_error": conn.get("drive_watch_error"),
+        "webhook_expires_at": conn.get("drive_watch_expiration"),
     }
 
 @router.delete("/workspaces/{ws_id}")
 async def disconnect_google(ws_id: str, request: Request):
     db = request.app.state.db if hasattr(request.app.state, "db") else request.app.extra.get("db")
+    conn = await db.google_sheet_connections.find_one({"workspace_id": ws_id})
+    if conn:
+        try:
+            await stop_drive_watch(db, conn)
+        except Exception:
+            logging.getLogger(__name__).warning("Drive watch cleanup failed workspace=%s", ws_id, exc_info=True)
     await db.google_sheet_connections.delete_one({"workspace_id": ws_id})
     await db.workflows.update_one({"workspace_id": ws_id, "kind": "ads_to_crm"}, {"$set": {"status": "draft", "sheet_connection_id": None}})
     return {"ok": True}
@@ -364,7 +487,7 @@ async def bind_sheet(ws_id: str, request: Request, body: dict):
     
     if not spreadsheet_id or not spreadsheet_name:
         raise HTTPException(status_code=400, detail="spreadsheet_id and spreadsheet_name required.")
-    
+
     access_token = conn["tokens"].get("access_token")
     
     async def fetch_headers(token):
@@ -383,6 +506,12 @@ async def bind_sheet(ws_id: str, request: Request, body: dict):
         
     vals = res.json().get("values", [])
     headers_list = vals[0] if vals else []
+
+    if conn.get("drive_watch_channel_id"):
+        try:
+            await stop_drive_watch(db, conn)
+        except Exception:
+            logging.getLogger(__name__).warning("Old Drive watch cleanup failed workspace=%s", ws_id, exc_info=True)
     
     await db.google_sheet_connections.update_one(
         {"workspace_id": ws_id},
@@ -392,7 +521,12 @@ async def bind_sheet(ws_id: str, request: Request, body: dict):
             "sheet_name": sheet_name,
             "header_row": headers_list,
             "cursor": 1,
+            "drive_watch_status": "inactive",
             "updated_at": now_iso()
+        }, "$unset": {
+            "drive_watch_channel_id": "", "drive_watch_token": "",
+            "drive_watch_resource_id": "", "drive_watch_expiration": "",
+            "pending_drive_watch_channel_id": "", "pending_drive_watch_token": ""
         }}
     )
     
@@ -411,7 +545,7 @@ async def bind_sheet(ws_id: str, request: Request, body: dict):
         conn_doc = await db.google_sheet_connections.find_one({"workspace_id": ws_id})
         await db.workflows.update_one(
             {"workspace_id": ws_id, "kind": "ads_to_crm"},
-            {"$set": {"sheet_connection_id": str(conn_doc["_id"])}}
+            {"$set": {"sheet_connection_id": str(conn_doc["_id"]), "status": "draft", "published_at": None}}
         )
 
     return {"ok": True, "headers": headers_list}
@@ -561,6 +695,21 @@ async def poll_sheet_connection(db, ws_id, conn):
     return {"created": created_count, "reviewed": reviewed_count, "cursor": new_cursor}
 
 
+async def drain_sheet_connection(db, ws_id, conn, max_batches=20):
+    """Drain appended rows after one notification, including large bulk appends."""
+    total_created = total_reviewed = 0
+    cursor = max(1, int(conn.get("cursor") or 1))
+    for _ in range(max_batches):
+        current = {**conn, "cursor": cursor}
+        result = await poll_sheet_connection(db, ws_id, current)
+        total_created += result["created"]
+        total_reviewed += result["reviewed"]
+        if result["cursor"] <= cursor:
+            break
+        cursor = result["cursor"]
+    return {"created": total_created, "reviewed": total_reviewed, "cursor": cursor}
+
+
 @router.post("/workspaces/{ws_id}/sync")
 async def sync_sheet_now(ws_id: str, request: Request):
     """Serverless-safe authenticated poll used by the dashboard and manual recovery."""
@@ -579,6 +728,70 @@ async def sync_sheet_now(ws_id: str, request: Request):
     except ValueError as error:
         raise HTTPException(409, str(error)) from None
     return {"status": "synced", **result}
+
+
+@router.post("/webhooks/drive")
+async def google_drive_webhook(request: Request):
+    """Receive a Google Drive notification and import newly appended Sheet rows."""
+    db = get_db(request)
+    channel_id = request.headers.get("x-goog-channel-id", "").strip()
+    supplied_token = request.headers.get("x-goog-channel-token", "").strip()
+    resource_id = request.headers.get("x-goog-resource-id", "").strip()
+    resource_state = request.headers.get("x-goog-resource-state", "").strip().lower()
+    if not channel_id or not supplied_token:
+        raise HTTPException(401, "Missing Google notification proof")
+    conn = await db.google_sheet_connections.find_one({"$or": [
+        {"drive_watch_channel_id": channel_id},
+        {"pending_drive_watch_channel_id": channel_id},
+    ]})
+    pending_channel = bool(conn and conn.get("pending_drive_watch_channel_id") == channel_id)
+    expected_token = str((conn or {}).get("pending_drive_watch_token" if pending_channel else "drive_watch_token") or "")
+    if not conn or not expected_token or not hmac.compare_digest(supplied_token, expected_token):
+        raise HTTPException(403, "Invalid Google notification proof")
+    expected_resource = "" if pending_channel else str(conn.get("drive_watch_resource_id") or "")
+    if expected_resource and (not resource_id or not hmac.compare_digest(resource_id, expected_resource)):
+        raise HTTPException(403, "Invalid Google notification resource")
+    if resource_state == "sync" or resource_state not in {"update", "add", "change"}:
+        return Response(status_code=204)
+
+    ws_id = conn["workspace_id"]
+    workflow = await db.workflows.find_one({"workspace_id": ws_id, "kind": "ads_to_crm", "status": "published"})
+    if not workflow:
+        return Response(status_code=204)
+    lock_token = uuid4().hex
+    now = datetime.now(timezone.utc)
+    lease = await db.google_sheet_connections.update_one(
+        {"_id": conn["_id"], "$or": [
+            {"webhook_import_lock_until": {"$exists": False}},
+            {"webhook_import_lock_until": {"$lt": now.isoformat()}},
+        ]},
+        {"$set": {
+            "webhook_import_lock": lock_token,
+            "webhook_import_lock_until": (now + timedelta(minutes=2)).isoformat(),
+        }},
+    )
+    if not lease.modified_count:
+        return Response(status_code=204)
+    try:
+        result = await drain_sheet_connection(db, ws_id, conn)
+        if result["created"]:
+            from models import Notification
+            notification = Notification(
+                workspace_id=ws_id,
+                kind="success",
+                title=f"{result['created']} new leads imported",
+                body=f"Imported {result['created']} new lead(s) from your connected Google Sheet webhook.",
+            )
+            await db.notifications.insert_one(notification.to_mongo())
+    except Exception:
+        logging.getLogger(__name__).exception("Drive webhook import failed workspace=%s", ws_id)
+        raise HTTPException(503, "Sheet import temporarily failed") from None
+    finally:
+        await db.google_sheet_connections.update_one(
+            {"_id": conn["_id"], "webhook_import_lock": lock_token},
+            {"$unset": {"webhook_import_lock": "", "webhook_import_lock_until": ""}},
+        )
+    return Response(status_code=204)
 
 
 async def sheet_request(db, conn, method, cells, **kwargs):

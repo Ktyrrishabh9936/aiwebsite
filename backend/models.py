@@ -121,6 +121,14 @@ class GoogleSheetConnection(BaseDocument):
     column_map: dict = Field(default_factory=dict)  # maps standard keys to headers
     cursor: int = 1  # processed rows cursor
     tokens: dict = Field(default_factory=dict)  # access_token, refresh_token, etc.
+    drive_watch_channel_id: Optional[str] = None
+    drive_watch_resource_id: Optional[str] = None
+    drive_watch_token: Optional[str] = None
+    drive_watch_expiration: Optional[int] = None
+    drive_watch_status: str = "inactive"
+    drive_watch_error: Optional[str] = None
+    pending_drive_watch_channel_id: Optional[str] = None
+    pending_drive_watch_token: Optional[str] = None
     created_at: str = Field(default_factory=now_iso)
     updated_at: str = Field(default_factory=now_iso)
 
