@@ -54,6 +54,12 @@ from plivo_calls import (
 )
 
 
+def test_meta_prefixed_phone_keeps_country_code_for_existing_lead():
+    lead = {"field_values": {"phone": "p:+919322272573"}}
+    assert lead_phone_from_doc(lead) == "+919322272573"
+    assert normalize_phone("P: +919322272573") == "+919322272573"
+
+
 @pytest.mark.parametrize("session, expected", [
     ({"status": "failed", "last_error": "Provider unavailable"}, False),
     ({"status": "reconcile_required"}, True),

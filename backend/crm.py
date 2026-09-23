@@ -8,7 +8,7 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
 
 from models import now_iso
-from meta_fields import META_FIELDS, pending_sheet_sync
+from meta_fields import META_FIELDS, pending_sheet_sync, strip_meta_phone_prefix
 
 router = APIRouter(prefix="/workspaces/{ws_id}/crm")
 
@@ -264,6 +264,8 @@ def default_field_values(doc, settings):
         key = field["key"]
         if key not in values and doc.get(key) is not None:
             values[key] = doc.get(key)
+    if "phone" in values:
+        values["phone"] = strip_meta_phone_prefix(values["phone"])
     return values
 
 
@@ -296,7 +298,7 @@ def validate_field_values(values, settings):
     for key, value in values.items():
         if key not in allowed:
             continue
-        clean[key] = value
+        clean[key] = strip_meta_phone_prefix(value) if key == "phone" else value
     for key, field in allowed.items():
         if field.get("required") and not str(clean.get(key, "")).strip():
             raise HTTPException(status_code=400, detail=f"{field['label']} is required")

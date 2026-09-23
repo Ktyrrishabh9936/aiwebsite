@@ -4,7 +4,7 @@ import CrmReminders from "../../components/CrmReminders";
 import OpportunitySelector from "../../components/OpportunitySelector";
 import LeadQualificationPanel from "../../components/LeadQualificationPanel";
 import CrmPerformance from "./CrmPerformance";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   Users, Calendar, Info, Search, XCircle, Save, BadgeIndianRupee,
@@ -207,6 +207,7 @@ export default function CrmInbox() {
   const [pagination, setPagination] = useState({ total: 0, page: 1, limit: 10 });
   const [selectedLead, setSelectedLead] = useState(null);
   const [fieldValues, setFieldValues] = useState({});
+  const lastServerValues = useRef({});
   const [showCreateLead, setShowCreateLead] = useState(false);
   const [createValues, setCreateValues] = useState({});
   const [paymentPlan, setPaymentPlan] = useState(planFrom(null));
@@ -232,7 +233,9 @@ export default function CrmInbox() {
 
   const selectLead = (lead) => {
     setSelectedLead(lead);
-    setFieldValues(valuesFrom(lead, activeFields));
+    const values = valuesFrom(lead, activeFields);
+    lastServerValues.current = values;
+    setFieldValues(values);
     setPaymentPlan(planFrom(lead));
     setConversionType(lead?.conversion_type || "single_payment");
     const summary = lead?.payment_summary || {};
@@ -245,6 +248,20 @@ export default function CrmInbox() {
       due_amount: summary.due_amount || "0",
       status: summary.status === "completed" ? "Paid" : "Pending",
     }));
+  };
+
+  const refreshSelectedLead = (lead, fields = activeFields) => {
+    const previous = lastServerValues.current;
+    const incoming = valuesFrom(lead, fields);
+    setFieldValues((current) => {
+      const merged = { ...incoming };
+      for (const [key, value] of Object.entries(current)) {
+        if (value !== previous[key]) merged[key] = value;
+      }
+      return merged;
+    });
+    lastServerValues.current = incoming;
+    setSelectedLead(lead);
   };
 
   const openCreateLead = () => {
@@ -274,8 +291,7 @@ export default function CrmInbox() {
       if (selectedLead) {
         const refreshed = items.find((lead) => lead.id === selectedLead.id);
         if (refreshed) {
-          setSelectedLead(refreshed);
-          setFieldValues(valuesFrom(refreshed, (settingsRes.data.fields || []).filter((field) => field.active !== false)));
+          refreshSelectedLead(refreshed, (settingsRes.data.fields || []).filter((field) => field.active !== false));
         } else {
           setSelectedLead(null);
         }
@@ -314,7 +330,7 @@ export default function CrmInbox() {
         const r = await api.get(`/workspaces/${wsId}/crm/leads/${selectedLead.id}`);
         if (!cancelled) {
           setLeads((prev) => prev.map((lead) => lead.id === r.data.id ? r.data : lead));
-          setSelectedLead((prev) => prev?.id === r.data.id ? r.data : prev);
+          refreshSelectedLead(r.data);
         }
       } catch {
         clearInterval(interval);
@@ -328,7 +344,20 @@ export default function CrmInbox() {
     try {
       setSaving(true);
       const r = await api.post(`/workspaces/${wsId}/crm/leads`, { field_values: createValues });
-      toast.success("Lead created");
+      const call = r.data?.qualification_call || {};
+      if (call.status === "failed") {
+        toast.error(`Lead created, but the call failed: ${call.last_error || "Check the lead's call status"}`);
+      } else if (call.status === "reconcile_required") {
+        toast.warning("Lead created, but the call outcome needs review before retrying");
+      } else if (call.status === "scheduled") {
+        toast.success(call.scheduled_for
+          ? `Lead created. Call scheduled for ${new Date(call.scheduled_for).toLocaleString()}`
+          : "Lead created. Qualification call scheduled");
+      } else if (call.status === "started") {
+        toast.success("Lead created. Qualification call started");
+      } else {
+        toast.success("Lead created");
+      }
       setShowCreateLead(false);
       setRecordView("active");
       setStatusFilter("all");
