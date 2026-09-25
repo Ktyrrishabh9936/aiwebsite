@@ -4,7 +4,7 @@ import CrmPerformance from "./CrmPerformance";
 import CrmInbox from "./CrmInbox";
 import api from "../../lib/api";
 
-jest.mock("react-router-dom", () => ({ useParams: () => ({ wsId: "workspace" }), Link: ({ children, to, ...props }) => <a href={to} {...props}>{children}</a> }), { virtual: true });
+jest.mock("react-router-dom", () => ({ useParams: () => ({ wsId: "workspace" }), useLocation: () => ({ search: "" }), Link: ({ children, to, ...props }) => <a href={to} {...props}>{children}</a> }), { virtual: true });
 jest.mock("../../lib/api", () => ({ __esModule: true, API: "/api", formatError: (v) => v, default: { get: jest.fn() } }));
 jest.mock("../../components/LeadQualificationPanel", () => () => null);
 let container, root, response;

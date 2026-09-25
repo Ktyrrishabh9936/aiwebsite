@@ -688,12 +688,11 @@ export default function CrmInbox() {
   };
 
   return (
-    <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
+    <div className="crm-workspace p-4 sm:p-8 max-w-7xl mx-auto space-y-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2"><Users className="w-6 h-6 text-primary" /> CRM</h1>
-          <p className="text-sm text-muted-foreground mt-1">Manage records, states, organization details, receipts, and invoices.</p>
-          <Link to={`/app/w/${wsId}/workflows/ads-to-crm`} className="inline-block mt-2 text-sm text-primary underline">Meta / Sheet mapping</Link>
+          <h1 className="font-display text-3xl sm:text-4xl font-bold tracking-tight">CRM</h1>
+          <p className="text-sm text-muted-foreground mt-2">Move leads forward. Keep every follow-up and payment in view.</p>
         </div>
         <div className="flex rounded-lg border bg-card p-1 w-fit max-w-full overflow-x-auto" role="group" aria-label="CRM sections">
           <TabButton active={activeTab === "records"} onClick={() => setActiveTab("records")} icon={Users} label="Records" />
@@ -738,8 +737,7 @@ export default function CrmInbox() {
               <FilterButton active={recordView === "trash"} onClick={() => { setRecordView("trash"); setStatusFilter("all"); setPage(1); }}><Trash2 className="w-3.5 h-3.5" /> Trash</FilterButton>
             </div>
             <div className="flex gap-2 w-full sm:w-auto">
-              <Link className="text-xs text-primary whitespace-nowrap" to={`/app/w/${wsId}/qualification`}>Voice provider: qualification profile</Link>
-              <button onClick={openCreateLead} className="inline-flex items-center gap-2 px-3 h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold whitespace-nowrap"><Plus className="w-4 h-4" /> New Lead</button>
+              <button onClick={openCreateLead} className="inline-flex items-center justify-center gap-2 px-5 h-11 rounded-lg bg-primary text-primary-foreground text-sm font-semibold whitespace-nowrap"><Plus className="w-4 h-4" /> New Lead</button>
               <div className="relative flex-1 sm:w-72">
                 <Search className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
                 <input value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }} placeholder={recordView === "trash" ? "Search trash..." : "Search leads..."} className="w-full pl-9 pr-4 h-10 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
@@ -747,7 +745,13 @@ export default function CrmInbox() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2" role="group" aria-label="Record views">{["list", "kanban"].map((view) => <button key={view} aria-pressed={recordsLayout === view} onClick={() => { setRecordsLayout(view); if (view === "kanban") setRecordView("active"); }} className={`px-4 py-2 rounded-lg border text-sm font-medium ${recordsLayout === view ? "bg-primary/10 text-primary border-primary/30" : "hover:bg-accent"}`}>{view === "list" ? "List" : "Kanban / pipeline"}</button>)}</div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-1 rounded-lg bg-muted p-1" role="group" aria-label="Record views">{["list", "kanban"].map((view) => <button key={view} aria-pressed={recordsLayout === view} onClick={() => { setRecordsLayout(view); if (view === "kanban") setRecordView("active"); }} className={`min-h-9 px-4 rounded-md text-sm font-medium ${recordsLayout === view ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>{view === "list" ? "List" : "Pipeline"}</button>)}</div>
+            <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-muted-foreground">
+              <Link to={`/app/w/${wsId}/workflows/ads-to-crm`} className="inline-flex items-center min-h-9 underline underline-offset-4 hover:text-foreground">Lead source mapping</Link>
+              <Link to={`/app/w/${wsId}/qualification`} className="inline-flex items-center min-h-9 underline underline-offset-4 hover:text-foreground">Voice qualification settings</Link>
+            </div>
+          </div>
           <div className={`grid gap-6 items-start ${selectedLead ? "xl:grid-cols-[minmax(0,1fr)_560px]" : "grid-cols-1"}`}>
             <div className="space-y-3 min-w-0">
               {recordsLayout === "kanban" && recordView !== "trash" ? <CrmPipeline wsId={wsId} states={states} search={searchQuery} statusFilter={statusFilter} onSelect={openLead} revision={pipelineRevision} onChanged={(lead) => { setPipelineRevision((v) => v + 1); setSelectedLead((old) => old?.id === lead.id ? lead : old); loadAll(); }} /> : <>

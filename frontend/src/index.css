@@ -88,6 +88,37 @@
 }
 .animate-fade-up { animation: fade-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
 
+/* Keep operational screens consistent without changing public pages. */
+:is(.workspace-overview, .crm-workspace) :is(button, a, input, select, textarea):focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 3px;
+}
+
+.workspace-overview > .bg-card,
+.workspace-overview > .grid > .bg-card {
+    border-radius: 0.75rem;
+}
+
+.workspace-overview :is(h2, h3) {
+    text-wrap: balance;
+}
+
+.crm-workspace input[type='datetime-local'] {
+    min-width: 0;
+    max-width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    :is(.workspace-overview, .crm-workspace) *,
+    :is(.workspace-overview, .crm-workspace) *::before,
+    :is(.workspace-overview, .crm-workspace) *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
 @keyframes tracing {
     0% { background-position: -200% 0; }
     100% { background-position: 200% 0; }
