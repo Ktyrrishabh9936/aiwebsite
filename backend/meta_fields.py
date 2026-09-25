@@ -1,4 +1,14 @@
 """Source attribution and mapping metadata, separate from editable CRM fields."""
+import re
+
+
+def strip_meta_phone_prefix(value):
+    """Remove Meta's `p:` phone marker while retaining the country-code plus sign."""
+    if not isinstance(value, str):
+        return value
+    return re.sub(r"^p\s*:\s*(?=\+?\d)", "", value.strip(), count=1, flags=re.IGNORECASE)
+
+
 META_FIELDS = {
     "meta_lead_id": ("id", "Meta Lead ID"),
     "meta_created_time": ("created_time", "Meta Lead Created Time"),
@@ -36,7 +46,7 @@ def map_sheet_row(headers, row, column_map, field_keys):
                 value = str(value).strip() if value is not None else None
             attribution[key] = value
         else:
-            values[key] = value
+            values[key] = strip_meta_phone_prefix(value) if key == "phone" else value
     return values, attribution
 
 

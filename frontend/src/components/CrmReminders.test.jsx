@@ -23,6 +23,8 @@ test("daily planner filters dates, opens the lead and marks a reminder done", as
   const open = jest.fn();
   await act(async () => root.render(<CrmReminders wsId="ws" onOpenLead={open} />));
   expect(api.get).toHaveBeenCalledWith("/workspaces/ws/crm/reminders", { params: expect.objectContaining({ start: expect.any(String), end: expect.any(String), status: "pending" }) });
+  expect(container.querySelector('[aria-current="date"]')?.getAttribute("aria-pressed")).toBe("true");
+  expect(container.textContent).toContain("Due ");
   expect(container.textContent).toContain("Share prices");
   await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Diya").click());
   expect(open).toHaveBeenCalledWith("lead");

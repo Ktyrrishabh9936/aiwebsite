@@ -9,7 +9,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Res
 from fastapi.responses import HTMLResponse
 
 from models import now_iso
-from meta_fields import META_FIELDS, pending_sheet_sync
+from meta_fields import META_FIELDS, pending_sheet_sync, strip_meta_phone_prefix
 from request_metrics import timed
 
 VALID_FIELD_TYPES = {
@@ -262,6 +262,8 @@ def default_field_values(doc, settings):
         key = field["key"]
         if key not in values and doc.get(key) is not None:
             values[key] = doc.get(key)
+    if "phone" in values:
+        values["phone"] = strip_meta_phone_prefix(values["phone"])
     return values
 
 
@@ -294,7 +296,7 @@ def validate_field_values(values, settings):
     for key, value in values.items():
         if key not in allowed:
             continue
-        clean[key] = value
+        clean[key] = strip_meta_phone_prefix(value) if key == "phone" else value
     for key, field in allowed.items():
         if field.get("required") and not str(clean.get(key, "")).strip():
             raise HTTPException(status_code=400, detail=f"{field['label']} is required")
@@ -323,31 +325,46 @@ LEAD_SUMMARY_FIELDS = {
 }
 
 
-def lead_search_query(search):
-    term = str(search or "").strip()
-    if not term:
-        return None
-    escaped = re.escape(term)
-    return {"$expr": {"$anyElementTrue": {"$map": {
-        "input": {"$objectToArray": {"$ifNull": ["$field_values", {}]}},
-        "as": "field",
-        "in": {"$regexMatch": {
-            "input": {"$convert": {"input": "$$field.v", "to": "string", "onError": "", "onNull": ""}},
-            "regex": escaped,
-            "options": "i",
-        }},
-    }}}}
+LEAD_SEARCH_FIELDS = (
+    "field_values.full_name", "full_name", "field_values.phone", "phone",
+    "field_values.email", "email", "meta_campaign_name", "campaign_name",
+    "field_values.campaign_name", "fields.campaign_name",
+)
+LEAD_CAMPAIGN_FIELDS = ("meta_campaign_name", "campaign_name", "field_values.campaign_name", "fields.campaign_name")
 
 
-async def paginated_leads(db, ws_id, settings, status=None, page=1, limit=20, search="", trashed=False):
+def apply_lead_filters(query, search="", campaign="", created_from=None, created_before=None):
+    """Apply the same CRM filters to records and pipeline views."""
+    query = dict(query)
+    for term, fields in ((search.strip(), LEAD_SEARCH_FIELDS), (campaign.strip(), LEAD_CAMPAIGN_FIELDS)):
+        if term:
+            pattern = {"$regex": re.escape(term), "$options": "i"}
+            query.setdefault("$and", []).append({"$or": [{field: pattern} for field in fields]})
+    if created_from or created_before:
+        if ((created_from and created_from.tzinfo is None)
+                or (created_before and created_before.tzinfo is None)):
+            raise HTTPException(422, "Date filters must include a timezone")
+        if created_from and created_before and created_from >= created_before:
+            raise HTTPException(422, "From time must be before the end time")
+        bounds = {}
+        if created_from:
+            bounds["$gte"] = created_from.astimezone(timezone.utc).isoformat()
+        if created_before:
+            bounds["$lt"] = created_before.astimezone(timezone.utc).isoformat()
+        query["created_at"] = bounds
+    return query
+
+
+async def paginated_leads(
+    db, ws_id, settings, status=None, page=1, limit=20, search="", trashed=False,
+    campaign="", created_from=None, created_before=None,
+):
     safe_limit = max(1, min(int(limit or 20), 100))
     safe_page = max(1, int(page or 1))
     query = lead_query(ws_id, only_trashed=trashed)
     if status:
         query["status"] = status
-    search_filter = lead_search_query(search)
-    if search_filter:
-        query["$and"] = [search_filter]
+    query = apply_lead_filters(query, search, campaign, created_from, created_before)
     cursor = (db.crm_leads.find(query, LEAD_SUMMARY_FIELDS)
               .sort("created_at", -1)
               .skip((safe_page - 1) * safe_limit)
@@ -1365,25 +1382,25 @@ async def list_leads(
     status: str = Query(None),
     page: int = Query(None),
     limit: int = Query(20),
-    search: str = Query(""),
+    search: str = Query("", max_length=200),
+    campaign: str = Query("", max_length=200),
+    created_from: datetime = Query(None),
+    created_before: datetime = Query(None),
     trashed: bool = Query(False),
 ):
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
-    if page is not None:
-        return await paginated_leads(db, ws_id, settings, status, page, limit, search, trashed)
     q = lead_query(ws_id, only_trashed=trashed)
     if status:
         q["status"] = status
-    all_docs = await db.crm_leads.find(q).sort("created_at", -1).to_list(1000)
-    decorated = [decorate_lead(d, settings) for d in all_docs]
-    if search:
-        term = search.lower()
-        decorated = [
-            lead for lead in decorated
-            if any(term in str(v or "").lower() for v in (lead.get("field_values") or {}).values())
-        ]
-    return decorated
+    q = apply_lead_filters(q, search, campaign, created_from, created_before)
+    if page is None:
+        docs = await db.crm_leads.find(q).sort("created_at", -1).to_list(1000)
+        return [decorate_lead(doc, settings) for doc in docs]
+    return await paginated_leads(
+        db, ws_id, settings, status, page, limit, search, trashed,
+        campaign, created_from, created_before,
+    )
 
 
 @router.get("/bootstrap")
@@ -1394,6 +1411,9 @@ async def crm_bootstrap(
     page: int = Query(1),
     limit: int = Query(20),
     search: str = Query(""),
+    campaign: str = Query(""),
+    created_from: datetime = Query(None),
+    created_before: datetime = Query(None),
     trashed: bool = Query(False),
 ):
     """Return the initial CRM screen with one workspace authorization check."""
@@ -1404,7 +1424,10 @@ async def crm_bootstrap(
         settings = await ensure_crm_settings(db, ws_id)
     async with timed(request, "db_crm_bootstrap"):
         leads, agents, selected_agent_id = await asyncio.gather(
-            paginated_leads(db, ws_id, settings, status, page, limit, search, trashed),
+            paginated_leads(
+                db, ws_id, settings, status, page, limit, search, trashed,
+                campaign, created_from, created_before,
+            ),
             _workspace_agents(db, ws_id),
             _selected_agent_id(db, ws_id),
         )
@@ -1564,6 +1587,12 @@ async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = B
         "updated_at": now_iso(),
     }
     updates.update(pending_sheet_sync(doc, status))
+    if status == "won" and (doc.get("opportunity") or {}).get("module") == "real_estate":
+        _, workspace = await require_workspace_access(request, ws_id)
+        from sales_modules import finalize_opportunity
+        updates["opportunity"] = await finalize_opportunity(db, ws_id, doc, workspace)
+        updates["customer_status"] = "customer"
+        updates["converted_at"] = doc.get("converted_at") or now_iso()
     qualification = doc.get("qualification_call") or {}
     if doc.get("status") == "lost" and status != "lost" and qualification.get("qualification_category") == "junk":
         updates["qualification_call.qualification_category"] = ""
@@ -1578,6 +1607,7 @@ async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = B
 
 @router.post("/leads/{lead_id}/convert")
 async def convert_lead(ws_id: str, lead_id: str, request: Request, body: dict = Body(default=None)):
+    await require_workspace_access(request, ws_id)
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
     body = body or {}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useOutletContext, useNavigate } from "react-router-dom";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import {
   Brain,
   FileText,
@@ -31,12 +31,12 @@ const zeroAnalytics = {
   scheduled_calls: [],
 };
 
-function Stat({ icon: Icon, label, value, testid }) {
+function Stat({ icon: Icon, label, value, testid, detail }) {
   return (
-    <div className="border border-border rounded-md bg-card p-5" data-testid={testid}>
-      <Icon className="w-5 h-5 text-primary mb-3" />
-      <div className="font-display text-3xl font-black break-words">{value}</div>
-      <div className="text-sm text-muted-foreground">{label}</div>
+    <div className="min-w-0 rounded-xl border bg-card p-4 sm:p-5" data-testid={testid}>
+      <div className="flex items-center justify-between gap-2 text-sm text-muted-foreground"><span>{label}</span><Icon aria-hidden="true" className="w-4 h-4 shrink-0" /></div>
+      <div className="mt-3 text-2xl sm:text-3xl font-semibold tracking-tight tabular-nums break-words">{value}</div>
+      {detail && <div className="mt-2 text-xs text-muted-foreground leading-relaxed">{detail}</div>}
     </div>
   );
 }
@@ -55,9 +55,16 @@ function chartData(rows, keyName) {
 }
 
 function AnalyticsChart({ title, data, empty }) {
+  const [metric, setMetric] = useState("leads");
+  const reduceMotion = useReducedMotion();
   return (
-    <div className="border border-border rounded-md bg-card p-6">
-      <h3 className="font-display font-bold mb-4">{title}</h3>
+    <section className="min-w-0 border border-border rounded-xl bg-card p-4 sm:p-6" aria-label={title}>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+        <h2 className="font-semibold">{title}</h2>
+        <div role="group" aria-label={`${title} measure`} className="inline-flex rounded-lg bg-muted p-1">
+          {["leads", "payments"].map((value) => <button key={value} type="button" aria-pressed={metric === value} onClick={() => setMetric(value)} className={`min-h-9 rounded-md px-3 text-xs font-medium ${metric === value ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>{value === "leads" ? "Leads" : "Collected"}</button>)}
+        </div>
+      </div>
       {data.length === 0 ? (
         <div className="h-56 grid place-items-center text-sm text-muted-foreground">{empty}</div>
       ) : (
@@ -66,15 +73,14 @@ function AnalyticsChart({ title, data, empty }) {
             <BarChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
               <XAxis dataKey="label" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-              <Tooltip formatter={(value, name) => (name === "payments" ? money(value) : value)} />
-              <Bar dataKey="leads" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="payments" fill="hsl(var(--muted-foreground))" radius={[4, 4, 0, 0]} />
+              <YAxis width={70} allowDecimals={metric === "payments"} tickFormatter={metric === "payments" ? (value) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", notation: "compact", maximumFractionDigits: 1 }).format(value) : undefined} tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
+              <Tooltip contentStyle={{ background: "hsl(var(--card))", borderColor: "hsl(var(--border))", color: "hsl(var(--foreground))", borderRadius: 8 }} formatter={(value) => [metric === "payments" ? money(value) : value, metric === "payments" ? "Collected" : "Leads"]} />
+              <Bar dataKey={metric} fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} isAnimationActive={!reduceMotion} />
             </BarChart>
           </ResponsiveContainer>
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -86,11 +92,13 @@ export default function Overview() {
   const [crmAnalytics, setCrmAnalytics] = useState(zeroAnalytics);
   const [genning, setGenning] = useState(false);
   const [cancellingCallId, setCancellingCallId] = useState("");
+  const [analyticsStatus, setAnalyticsStatus] = useState("loading");
+  const reduceMotion = useReducedMotion();
 
   const load = useCallback(() => {
     api.get(`/workspaces/${ws.id}/tasks`).then((r) => setTasks(r.data)).catch(() => {});
     api.get(`/workspaces/${ws.id}/blogs`).then((r) => setBlogs(r.data)).catch(() => {});
-    api.get(`/workspaces/${ws.id}/crm/analytics/overview`).then((r) => setCrmAnalytics({ ...zeroAnalytics, ...r.data })).catch(() => setCrmAnalytics(zeroAnalytics));
+    api.get(`/workspaces/${ws.id}/crm/analytics/overview`).then((r) => { setCrmAnalytics({ ...zeroAnalytics, ...r.data }); setAnalyticsStatus("ready"); }).catch(() => setAnalyticsStatus("error"));
   }, [ws.id]);
 
   useEffect(() => {
@@ -134,9 +142,10 @@ export default function Overview() {
   const days = chartData(crmAnalytics.day_buckets, "date");
   const months = chartData(crmAnalytics.month_buckets, "month");
   const scheduledCalls = crmAnalytics.scheduled_calls || [];
+  const metricValue = (value) => analyticsStatus === "ready" ? value : "—";
 
   return (
-    <div className="p-6 sm:p-10 max-w-6xl mx-auto space-y-8">
+    <div className="workspace-overview p-4 sm:p-8 max-w-7xl mx-auto space-y-7">
       {building && (
         <div className="border border-border rounded-md bg-card p-6 flex items-center gap-4">
           <Loader2 className="w-6 h-6 text-primary animate-spin" />
@@ -159,32 +168,28 @@ export default function Overview() {
         </div>
       )}
 
-      <div>
-        <h1 className="font-display text-3xl font-black tracking-tight">Overview</h1>
-        <p className="text-muted-foreground mt-1">Your AI manager's command center.</p>
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div><h1 className="font-display text-3xl sm:text-4xl font-bold tracking-tight">Business overview</h1>
+        <p className="text-sm text-muted-foreground mt-2">Track your leads, collections, and next steps.</p></div>
+        <button onClick={() => nav("crm")} className="inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg bg-primary text-primary-foreground text-sm font-semibold">Open CRM <ArrowRight className="w-4 h-4" /></button>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Stat icon={Brain} label="Brain status" value={ws.brain_status === "ready" ? "Ready" : "..."} testid="stat-brain" />
-        <Stat icon={ListChecks} label="Scheduled tasks" value={tasks.length} testid="stat-tasks" />
-        <Stat icon={FileText} label="Published blogs" value={published} testid="stat-blogs" />
-        <Stat icon={Sparkles} label="Roadmap months" value={(ws.roadmap || []).length} testid="stat-roadmap" />
-      </div>
+      {analyticsStatus === "error" && <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-card p-4 text-sm"><p>CRM data couldn’t be refreshed. Your records are still available in CRM.</p><button onClick={load} className="inline-flex min-h-10 items-center gap-2 px-3 rounded-lg border font-medium"><RefreshCw size={14} /> Try again</button></div>}
+      {analyticsStatus === "loading" && <p role="status" className="text-sm text-muted-foreground">Loading your CRM overview…</p>}
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Stat icon={Users} label="Total leads" value={totals.leads} testid="stat-crm-total-leads" />
-        <Stat icon={CalendarDays} label="Leads this month" value={monthTotals.leads} testid="stat-crm-month-leads" />
-        <Stat icon={Users} label="Leads today" value={todayTotals.leads} testid="stat-crm-today-leads" />
-        <Stat icon={Users} label="Customers" value={totals.customers} testid="stat-crm-customers" />
-        <Stat icon={BadgeIndianRupee} label="Total collected" value={money(totals.payments_collected)} testid="stat-crm-total-collected" />
-        <Stat icon={BadgeIndianRupee} label="Collected this month" value={money(monthTotals.payments_collected)} testid="stat-crm-month-collected" />
-        <Stat icon={WalletCards} label="Due amount" value={money(totals.due_amount)} testid="stat-crm-due" />
-        <Stat icon={Users} label="New / active leads" value={`${totals.new_leads || 0} / ${totals.active_leads || 0}`} testid="stat-crm-active" />
-      </div>
+      <section aria-label="Sales snapshot" className="space-y-4">
+        <div className="grid grid-cols-1 min-[400px]:grid-cols-2 xl:grid-cols-4 gap-3">
+          <Stat icon={Users} label="Total leads" value={metricValue(totals.leads)} detail={analyticsStatus === "ready" ? `${todayTotals.leads} today · ${monthTotals.leads} this month` : "All time"} testid="stat-crm-total-leads" />
+          <Stat icon={BadgeIndianRupee} label="Total collected" value={metricValue(money(totals.payments_collected))} detail={analyticsStatus === "ready" ? `${money(monthTotals.payments_collected)} this month` : "All time"} testid="stat-crm-total-collected" />
+          <Stat icon={WalletCards} label="Outstanding amount" value={metricValue(money(totals.due_amount))} detail="Payments still to be collected" testid="stat-crm-due" />
+          <Stat icon={Users} label="Customers" value={metricValue(totals.customers)} detail={analyticsStatus === "ready" ? `${totals.new_leads || 0} new leads · ${totals.active_leads || 0} active` : "Converted leads"} testid="stat-crm-customers" />
+        </div>
+      </section>
 
+      {analyticsStatus === "ready" && <>
       <div className="grid lg:grid-cols-2 gap-4">
-        <AnalyticsChart title="Day-wise CRM" data={days} empty="No daily CRM activity yet." />
-        <AnalyticsChart title="Month-wise CRM" data={months} empty="No monthly CRM activity yet." />
+        <AnalyticsChart title="Daily activity" data={days} empty="Add a lead or record a payment to see daily activity." />
+        <AnalyticsChart title="Monthly activity" data={months} empty="Your monthly trends will appear as you add leads and payments." />
       </div>
 
       <div className="border border-border rounded-md bg-card p-6">
@@ -228,8 +233,20 @@ export default function Overview() {
         </div>
       </div>
 
+      </>}
+
+      <section aria-labelledby="workspace-activity" className="space-y-4">
+        <h2 id="workspace-activity" className="text-lg font-semibold">Workspace activity</h2>
+        <div className="grid grid-cols-1 min-[400px]:grid-cols-2 lg:grid-cols-4 gap-3">
+          <Stat icon={Brain} label="Business brain" value={({ ready: "Ready", building: "Training", pending: "Queued", error: "Needs attention" })[ws.brain_status] || "Not started"} testid="stat-brain" />
+          <Stat icon={ListChecks} label="Scheduled tasks" value={tasks.length} testid="stat-tasks" />
+          <Stat icon={FileText} label="Published blogs" value={published} testid="stat-blogs" />
+          <Stat icon={CalendarDays} label="Roadmap months" value={(ws.roadmap || []).length} testid="stat-roadmap" />
+        </div>
+      </section>
+
       {ws.brain_status === "ready" && (ws.roadmap || []).length === 0 && (
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="border border-primary/30 rounded-md bg-primary/5 p-8 text-center">
+        <motion.div initial={reduceMotion ? false : { opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="border border-primary/30 rounded-xl bg-primary/5 p-6 sm:p-8 text-center">
           <Sparkles className="w-8 h-8 text-primary mx-auto mb-3" />
           <h3 className="font-display text-xl font-bold">Brain is ready. Generate your growth plan.</h3>
           <p className="text-muted-foreground mt-1 mb-5">The manager will draft a 12-month roadmap and auto-schedule daily tasks.</p>
@@ -247,7 +264,7 @@ export default function Overview() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="border border-border rounded-md bg-card p-6">
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-display font-bold">Upcoming tasks</h3>

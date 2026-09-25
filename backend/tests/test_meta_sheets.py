@@ -9,7 +9,7 @@ from fastapi import HTTPException
 
 import google_sheets as sheets
 import llm_service
-from crm import ensure_crm_settings, update_lead, convert_lead, normalize_field
+from crm import default_field_values, ensure_crm_settings, update_lead, convert_lead, normalize_field, validate_field_values
 from meta_fields import META_FIELDS, map_sheet_row, pending_sheet_sync
 from migrate_meta_sheets import migrate
 from models import CRMLead
@@ -39,6 +39,44 @@ def test_headers_and_ranges():
     assert "%27Sales%20O%27%27Brien%27%21AA2" in sheets.values_url("file", "Sales O'Brien", "AA2")
     with pytest.raises(ValueError):
         map_sheet_row(["id", "ID"], ["1", "2"], {"meta_lead_id": "id"}, [])
+
+
+def test_meta_phone_prefix_is_removed_from_mapped_lead():
+    values, _ = map_sheet_row(["Phone", "Name"], ["p:+919322272573", "Akesh"],
+                              {"phone": "Phone", "full_name": "Name"}, ["phone", "full_name"])
+    assert values == {"phone": "+919322272573", "full_name": "Akesh"}
+
+
+def test_manual_lead_phone_prefix_is_removed_before_saving():
+    settings = {"fields": [{"key": "phone", "label": "Phone", "required": True, "active": True}]}
+    assert validate_field_values({"phone": "p:+919322272573"}, settings) == {"phone": "+919322272573"}
+
+
+def test_existing_prefixed_phone_is_clean_in_crm_response():
+    settings = {"fields": [{"key": "phone", "active": True}]}
+    assert default_field_values({"field_values": {"phone": "p:+919322272573"}}, settings) == {
+        "phone": "+919322272573"}
+
+
+def test_reimport_repairs_prefixed_phone_on_existing_lead():
+    async def run(db):
+        ws = str(ObjectId())
+        conn = {"spreadsheet_id": "file", "sheet_name": "Leads",
+                "column_map": {"meta_lead_id": "ID", "phone": "Phone"}}
+        headers = ["ID", "Phone"]
+        lead_id, created = await sheets.import_sheet_row(
+            db, ws, conn, headers, ["lead-1", "p:+919322272573"], 2, {"phone"})
+        assert created
+        await db.crm_leads.update_one({"_id": ObjectId(lead_id)}, {"$set": {
+            "phone": "p:+919322272573", "field_values.phone": "p:+919322272573"}})
+        _, created = await sheets.import_sheet_row(
+            db, ws, conn, headers, ["lead-1", "p:+919322272573"], 2, {"phone"})
+        assert not created
+        lead = await db.crm_leads.find_one({"_id": ObjectId(lead_id)})
+        assert lead["phone"] == "+919322272573"
+        assert lead["field_values"]["phone"] == "+919322272573"
+
+    asyncio.run(isolated(run))
 
 
 def test_google_transport_refresh_and_raw_status_write(monkeypatch):

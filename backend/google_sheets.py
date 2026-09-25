@@ -15,7 +15,7 @@ from bson import ObjectId
 from models import GoogleSheetConnection, Workflow, now_iso
 import httpx
 from crm import active_fields, ensure_crm_settings
-from meta_fields import META_FIELDS, header_index, map_sheet_row
+from meta_fields import META_FIELDS, header_index, map_sheet_row, strip_meta_phone_prefix
 
 router = APIRouter(prefix="/google")
 
@@ -639,7 +639,15 @@ async def import_sheet_row(db, ws_id, conn, headers, row, row_number, field_keys
         if existing.get("google_sheet_spreadsheet_id") and (existing["google_sheet_spreadsheet_id"], existing.get("google_sheet_name")) != (conn["spreadsheet_id"], conn["sheet_name"]):
             raise ValueError("Meta Lead ID already belongs to another source Sheet in this workspace.")
         # A replay enriches source data but never resets sales status or enqueues write-back.
-        await db.crm_leads.update_one({"_id": existing["_id"], "workspace_id": ws_id}, {"$set": {**attribution, **source, "fields": raw}})
+        updates = {**attribution, **source, "fields": raw}
+        incoming_phone = values.get("phone")
+        if incoming_phone:
+            for path, old_phone in (("phone", existing.get("phone")),
+                                    ("field_values.phone", (existing.get("field_values") or {}).get("phone"))):
+                if (isinstance(old_phone, str) and old_phone != incoming_phone
+                        and strip_meta_phone_prefix(old_phone) == incoming_phone):
+                    updates[path] = incoming_phone
+        await db.crm_leads.update_one({"_id": existing["_id"], "workspace_id": ws_id}, {"$set": updates})
         return str(existing["_id"]), False
     status = "new"
     if conn.get("column_map", {}).get("status"):

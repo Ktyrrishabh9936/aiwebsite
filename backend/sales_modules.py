@@ -22,9 +22,24 @@ async def offerings_for(db, ws_id, workspace):
     items = []
     if modules["real_estate"]:
         async for row in db.properties.find({"workspace_id": ws_id, "status": {"$in": ["available", "reserved"]}}).sort("name", 1):
+            # Apartment projects organize flats; the flat is the saleable item.
+            if row.get("subtype") == "Apartment" and row.get("container_kind") == "project":
+                continue
             items.append({"id": str(row["_id"]), "module": "real_estate", "kind": "property", "name": row.get("name", "Property"),
                           "description": row.get("location", ""), "price": row.get("price", "0"), "price_minor": safe_money_minor(row.get("price", "0")),
                           "available_quantity": 1})
+        projects = {str(row["_id"]): row async for row in db.properties.find({"workspace_id": ws_id}, {"name": 1, "status": 1})}
+        async for unit in db.property_units.find({"workspace_id": ws_id, "status": "available"}).sort([("tower", 1), ("unit_number", 1)]):
+            project = projects.get(unit.get("property_id"))
+            if not project or project.get("status") not in {"available", "reserved"}:
+                continue
+            items.append({"id": str(unit["_id"]), "module": "real_estate", "kind": "unit",
+                          "project_id": unit["property_id"], "project_name": project.get("name", "Apartment"),
+                          "tower": unit["tower"], "unit_number": unit["unit_number"], "bhk": unit["bhk"],
+                          "listing_type": unit.get("listing_type", "sale"),
+                          "listing_version": unit.get("listing_version", 1),
+                          "name": f"{project.get('name', 'Apartment')} / {unit['tower']} / Flat {unit['unit_number']} / {unit['bhk']}",
+                          "price_minor": unit.get("asking_price_minor", 0), "available_quantity": 1})
     if modules["agency"]:
         query = {"workspace_id": ws_id, "status": "active", "$or": [{"kind": "service"}, {"kind": "product", "stock_quantity": {"$gt": 0}}]}
         async for row in db.catalog_items.find(query).sort("name", 1):
@@ -50,7 +65,7 @@ async def set_opportunity(ws_id: str, lead_id: str, request: Request, body: dict
     lead = await db.crm_leads.find_one({**lead_query(ws_id), "_id": ObjectId(lead_id)})
     if not lead:
         raise HTTPException(404, "Lead not found")
-    if lead.get("customer_status") == "customer" or (lead.get("opportunity") or {}).get("sale_status") == "sold":
+    if lead.get("customer_status") == "customer" or (lead.get("opportunity") or {}).get("sale_status") in {"sold", "rented"}:
         raise HTTPException(409, "Sold opportunities cannot be changed")
     item_id = str(body.get("item_id") or "")
     module = str(body.get("module") or "")
@@ -65,7 +80,7 @@ async def set_opportunity(ws_id: str, lead_id: str, request: Request, body: dict
         quantity = max(1, int(body.get("quantity") or 1))
     except (TypeError, ValueError):
         raise HTTPException(400, "Quantity must be a whole number") from None
-    if item["kind"] == "property":
+    if item["kind"] in {"property", "unit"}:
         quantity = 1
     if item["available_quantity"] is not None and quantity > item["available_quantity"]:
         raise HTTPException(409, "Requested quantity exceeds available stock")
@@ -75,13 +90,15 @@ async def set_opportunity(ws_id: str, lead_id: str, request: Request, body: dict
     opportunity = {"module": module, "kind": item["kind"], "item_id": item_id, "name": item["name"],
                    "quantity": quantity, "unit_price_minor": unit_price_minor, "total_minor": unit_price_minor * quantity,
                    "currency": workspace_currency(workspace), "sale_status": "selected", "selected_at": now_iso()}
+    if item["kind"] == "unit":
+        opportunity.update({key: item[key] for key in ("project_id", "project_name", "tower", "unit_number", "bhk", "listing_type", "listing_version")})
     await db.crm_leads.update_one({"_id": lead["_id"], "workspace_id": ws_id}, {"$set": {"opportunity": opportunity, "updated_at": now_iso()}})
     return decorate_lead(await db.crm_leads.find_one({"_id": lead["_id"]}), await ensure_crm_settings(db, ws_id))
 
 
 async def finalize_opportunity(db, ws_id, lead, workspace):
     opportunity = dict(lead.get("opportunity") or {})
-    if not opportunity or opportunity.get("sale_status") == "sold":
+    if not opportunity or opportunity.get("sale_status") in {"sold", "rented"}:
         return opportunity
     item_id = opportunity.get("item_id", "")
     if not ObjectId.is_valid(item_id):
@@ -89,7 +106,38 @@ async def finalize_opportunity(db, ws_id, lead, workspace):
     module, kind = opportunity.get("module"), opportunity.get("kind")
     require_module(workspace, module)
     lead_id = str(lead["_id"])
-    if module == "real_estate":
+    if module == "real_estate" and kind == "unit":
+        unit_query = {"_id": ObjectId(item_id), "workspace_id": ws_id, "property_id": opportunity.get("project_id")}
+        unit = await db.property_units.find_one(unit_query)
+        version = opportunity.get("listing_version", 1)
+        # Recover a completed atomic unit sale if the lead update was interrupted.
+        previous = next((entry for entry in (unit or {}).get("transactions", [])
+                         if entry.get("lead_id") == lead_id and entry.get("listing_version", 1) == version), None)
+        if previous:
+            opportunity.update(sale_status="rented" if previous["type"] == "rent" else "sold",
+                               sold_value_minor=previous["value_minor"], sold_at=previous["at"])
+            return opportunity
+        project_id = opportunity.get("project_id", "")
+        project = await db.properties.find_one({"_id": ObjectId(project_id), "workspace_id": ws_id}) if ObjectId.is_valid(project_id) else None
+        if not project or project.get("status") not in {"available", "reserved"}:
+            raise HTTPException(409, "This apartment project is not active")
+        sale_status = "rented" if opportunity.get("listing_type") == "rent" else "sold"
+        result = await db.property_units.find_one_and_update(
+            {**unit_query, "status": "available", "listing_type": opportunity.get("listing_type", "sale"),
+             "$or": [{"listing_version": version}] + ([{"listing_version": {"$exists": False}}] if version == 1 else [])},
+            {"$set": {"status": sale_status, "sold_to_lead_id": lead_id, "sold_at": now_iso(),
+                      "sold_value_minor": int(opportunity.get("total_minor") or 0), "updated_at": now_iso()},
+             "$push": {"transactions": {"type": opportunity.get("listing_type", "sale"), "lead_id": lead_id,
+                                        "listing_version": version, "currency": workspace_currency(workspace),
+                                        "value_minor": int(opportunity.get("total_minor") or 0), "at": now_iso()}}},
+            return_document=ReturnDocument.AFTER)
+        if not result:
+            raise HTTPException(409, "The selected flat is no longer available")
+        opportunity.update({"sale_status": sale_status, "sold_value_minor": int(opportunity.get("total_minor") or 0)})
+    elif module == "real_estate":
+        project = await db.properties.find_one({"_id": ObjectId(item_id), "workspace_id": ws_id})
+        if project and project.get("subtype") == "Apartment" and project.get("container_kind") == "project":
+            raise HTTPException(409, "Select a numbered flat instead of the entire apartment project")
         result = await db.properties.find_one_and_update(
             {"_id": ObjectId(item_id), "workspace_id": ws_id, "status": {"$in": ["available", "reserved"]}},
             {"$set": {"status": "sold", "sold_to_lead_id": lead_id, "sold_at": now_iso(), "updated_at": now_iso()}},
@@ -111,5 +159,6 @@ async def finalize_opportunity(db, ws_id, lead, workspace):
             raise HTTPException(409, "The selected service is no longer active")
     else:
         raise HTTPException(409, "The selected opportunity type is invalid")
-    opportunity.update({"sale_status": "sold", "sold_at": now_iso(), "currency": workspace_currency(workspace)})
+    opportunity.update({"sale_status": opportunity.get("sale_status") if opportunity.get("sale_status") in {"sold", "rented"} else "sold",
+                        "sold_at": now_iso(), "currency": workspace_currency(workspace)})
     return opportunity

@@ -19,6 +19,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popove
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
+import useReminderNotifications from "../hooks/useReminderNotifications";
 
 const kindDot = { success: "bg-primary", approval: "bg-amber-500", error: "bg-destructive", info: "bg-muted-foreground" };
 const workspaceStatus = {
@@ -34,6 +35,7 @@ export default function WorkspaceLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  useReminderNotifications(wsId, navigate);
   const [ws, setWs] = useState(null);
   const [notes, setNotes] = useState([]);
   const [workspaces, setWorkspaces] = useState([]);

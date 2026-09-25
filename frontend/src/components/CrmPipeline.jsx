@@ -2,15 +2,15 @@ import { useEffect, useState } from "react";
 import api, { formatError } from "../lib/api";
 import { formatMoneyMinor } from "../lib/currency";
 
-function Column({ stage, wsId, search, states, onSelect, onChanged, revision }) {
+function Column({ stage, wsId, filters, states, onSelect, onChanged, revision }) {
   const [items, setItems] = useState([]), [total, setTotal] = useState(0), [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false), [error, setError] = useState("");
-  useEffect(() => { setPage(0); }, [search, revision]);
+  useEffect(() => { setPage(0); }, [filters, revision]);
   useEffect(() => {
     let live = true; setLoading(true); setError("");
-    api.get(`/workspaces/${wsId}/crm/pipeline`, { params: { status: stage.key, search, offset: page * 30, limit: 30 } }).then(({ data }) => { if (live) { setItems(data.items); setTotal(data.total); } }).catch((e) => { if (live) setError(formatError(e.response?.data?.detail || e.message)); }).finally(() => { if (live) setLoading(false); });
+    api.get(`/workspaces/${wsId}/crm/pipeline`, { params: { status: stage.key, ...filters, offset: page * 30, limit: 30 } }).then(({ data }) => { if (live) { setItems(data.items); setTotal(data.total); } }).catch((e) => { if (live) setError(formatError(e.response?.data?.detail || e.message)); }).finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
-  }, [wsId, stage.key, search, page, revision]);
+  }, [wsId, stage.key, filters, page, revision]);
   const move = async (lead, status) => {
     setBusy(true); setError("");
     try { const { data } = await api.patch(`/workspaces/${wsId}/crm/pipeline/leads/${lead.id}`, { status }); onChanged(data); }
@@ -30,12 +30,12 @@ function Column({ stage, wsId, search, states, onSelect, onChanged, revision }) 
   </section>;
 }
 
-export default function CrmPipeline({ wsId, states, search, onSelect, onChanged, statusFilter, revision }) {
+export default function CrmPipeline({ wsId, states, filters, onSelect, onChanged, statusFilter, revision }) {
   const [pipelineValue, setPipelineValue] = useState({ value_minor: 0, currency: "INR" });
   useEffect(() => {
     let live = true;
-    api.get(`/workspaces/${wsId}/crm/pipeline-value`, { params: { search, status: statusFilter } }).then(({ data }) => { if (live) setPipelineValue(data); }).catch(() => {});
+    api.get(`/workspaces/${wsId}/crm/pipeline-value`, { params: { ...filters, status: statusFilter } }).then(({ data }) => { if (live) setPipelineValue(data); }).catch(() => {});
     return () => { live = false; };
-  }, [wsId, search, statusFilter, revision]);
-  return <div><div className="mb-3 flex items-end justify-between gap-3 rounded-lg border bg-card p-4"><div><p className="text-xs text-muted-foreground">Open pipeline value</p><p className="font-display text-2xl font-black">{formatMoneyMinor(pipelineValue.value_minor, pipelineValue.currency)}</p></div><p className="max-w-xs text-right text-xs text-muted-foreground">Total value of linked opportunities in this view.</p></div><p className="text-xs text-muted-foreground mb-3">Open a card to view the lead. Use its stage menu to move it through your pipeline.</p><div className="flex gap-4 overflow-x-auto pb-4" aria-label="CRM Kanban board">{states.filter((stage) => statusFilter === "all" || stage.key === statusFilter).map((stage) => <Column key={stage.key} {...{ stage, wsId, search, states, onSelect, onChanged, revision }} />)}</div></div>;
+  }, [wsId, filters, statusFilter, revision]);
+  return <div><div className="mb-3 flex items-end justify-between gap-3 rounded-lg border bg-card p-4"><div><p className="text-xs text-muted-foreground">Open pipeline value</p><p className="font-display text-2xl font-black">{formatMoneyMinor(pipelineValue.value_minor, pipelineValue.currency)}</p></div><p className="max-w-xs text-right text-xs text-muted-foreground">Total value of linked opportunities in this view.</p></div><p className="text-xs text-muted-foreground mb-3">Open a card to view the lead. Use its stage menu to move it through your pipeline.</p><div className="flex gap-4 overflow-x-auto pb-4" aria-label="CRM Kanban board">{states.filter((stage) => statusFilter === "all" || stage.key === statusFilter).map((stage) => <Column key={stage.key} {...{ stage, wsId, filters, states, onSelect, onChanged, revision }} />)}</div></div>;
 }

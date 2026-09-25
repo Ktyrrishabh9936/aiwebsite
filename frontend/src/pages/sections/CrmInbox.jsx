@@ -4,7 +4,7 @@ import CrmReminders from "../../components/CrmReminders";
 import OpportunitySelector from "../../components/OpportunitySelector";
 import LeadQualificationPanel from "../../components/LeadQualificationPanel";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 import {
   Users, Calendar, Info, Search, XCircle, Save, BadgeIndianRupee,
   Plus, CheckCircle2, Settings, Trash2, Columns3, Palette, Building2,
@@ -186,7 +186,9 @@ function finalInvoiceDownloadUrl(wsId, leadId) {
 
 export default function CrmInbox() {
   const { wsId } = useParams();
-  const [activeTab, setActiveTab] = useState("records");
+  const location = useLocation();
+  const [activeTab, setActiveTab] = useState(() => new URLSearchParams(window.location.search).get("tab") === "reminders" ? "reminders" : "records");
+  useEffect(() => { if (new URLSearchParams(location.search).get("tab") === "reminders") setActiveTab("reminders"); }, [location.search]);
   const [recordsLayout, setRecordsLayout] = useState("list");
   const [pipelineRevision, setPipelineRevision] = useState(0);
   const openLead = async (leadOrId) => {
@@ -207,10 +209,15 @@ export default function CrmInbox() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [campaignQuery, setCampaignQuery] = useState("");
+  const [createdFrom, setCreatedFrom] = useState("");
+  const [createdBefore, setCreatedBefore] = useState("");
+  const [debouncedLeadFilters, setDebouncedLeadFilters] = useState({});
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ total: 0, page: 1, limit: 10 });
   const [selectedLead, setSelectedLead] = useState(null);
   const [fieldValues, setFieldValues] = useState({});
+  const lastServerValues = useRef({});
   const [showCreateLead, setShowCreateLead] = useState(false);
   const [createValues, setCreateValues] = useState({});
   const [paymentPlan, setPaymentPlan] = useState(planFrom(null));
@@ -222,6 +229,12 @@ export default function CrmInbox() {
   const listRefreshInFlight = useRef(false);
 
   const activeFields = useMemo(() => (settings.fields || []).filter((field) => field.active !== false), [settings.fields]);
+  const leadFilters = useMemo(() => ({
+    ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
+    ...(campaignQuery.trim() ? { campaign: campaignQuery.trim() } : {}),
+    ...(createdFrom ? { created_from: new Date(createdFrom).toISOString() } : {}),
+    ...(createdBefore ? { created_before: new Date(new Date(createdBefore).getTime() + 60_000).toISOString() } : {}),
+  }), [debouncedSearch, campaignQuery, createdFrom, createdBefore]);
   const states = useMemo(() => {
     const base = settings.states?.length ? settings.states : [{ key: "new", label: "New", color: "blue" }];
     const hasAiQualified = base.some((state) => state.key === "ai_qualified");
@@ -237,7 +250,9 @@ export default function CrmInbox() {
 
   const selectLead = (lead) => {
     setSelectedLead(lead);
-    setFieldValues(valuesFrom(lead, activeFields));
+    const values = valuesFrom(lead, activeFields);
+    lastServerValues.current = values;
+    setFieldValues(values);
     setPaymentPlan(planFrom(lead));
     setConversionType(lead?.conversion_type || "single_payment");
     const summary = lead?.payment_summary || {};
@@ -252,6 +267,20 @@ export default function CrmInbox() {
     }));
   };
 
+  const refreshSelectedLead = (lead, fields = activeFields) => {
+    const previous = lastServerValues.current;
+    const incoming = valuesFrom(lead, fields);
+    setFieldValues((current) => {
+      const merged = { ...incoming };
+      for (const [key, value] of Object.entries(current)) {
+        if (value !== previous[key]) merged[key] = value;
+      }
+      return merged;
+    });
+    lastServerValues.current = incoming;
+    setSelectedLead(lead);
+  };
+
   const openCreateLead = () => {
     setCreateValues(emptyValues(activeFields));
     setShowCreateLead(true);
@@ -260,7 +289,7 @@ export default function CrmInbox() {
   const leadListParams = () => {
     const params = new URLSearchParams({ page: String(page), limit: "10" });
     if (statusFilter !== "all") params.set("status", statusFilter);
-    if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
+    Object.entries(debouncedLeadFilters).forEach(([key, value]) => params.set(key, value));
     if (recordView === "trash") params.set("trashed", "true");
     return params;
   };
@@ -294,6 +323,14 @@ export default function CrmInbox() {
       setPlivoAgentState(nextPlivoAgents);
       setSelectedAgentId((current) => nextSelectedAgentId(current, nextPlivoAgents));
       applyLeadPage(data.leads);
+      if (selectedLead) {
+        const refreshed = (data.leads?.items || []).find((lead) => lead.id === selectedLead.id);
+        if (refreshed) {
+          refreshSelectedLead(refreshed, (data.settings?.fields || []).filter((field) => field.active !== false));
+        } else {
+          setSelectedLead(null);
+        }
+      }
     } catch (e) {
       if (e.code === "ERR_CANCELED") return;
       toast.error(formatError(e.response?.data?.detail));
@@ -308,18 +345,23 @@ export default function CrmInbox() {
   }, [searchQuery]);
 
   useEffect(() => {
+    const timer = setTimeout(() => setDebouncedLeadFilters(leadFilters), 300);
+    return () => clearTimeout(timer);
+  }, [leadFilters]);
+
+  useEffect(() => {
     const controller = new AbortController();
     const t = setTimeout(() => loadAll(controller.signal), 50);
     return () => { clearTimeout(t); controller.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsId, statusFilter, page, debouncedSearch, recordView]);
+  }, [wsId, statusFilter, page, debouncedLeadFilters, recordView]);
 
   useEffect(() => {
     const refreshImportedLeads = () => refreshLeadList();
     window.addEventListener("arevei:sheet-synced", refreshImportedLeads);
     return () => window.removeEventListener("arevei:sheet-synced", refreshImportedLeads);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsId, statusFilter, page, debouncedSearch, recordView]);
+  }, [wsId, statusFilter, page, debouncedLeadFilters, recordView]);
 
   // A Sheet webhook runs on the server, so an already-open browser cannot
   // receive its new rows directly. Refresh only the lightweight lead page
@@ -331,7 +373,7 @@ export default function CrmInbox() {
     window.addEventListener("focus", refreshWhenVisible);
     return () => { clearInterval(interval); window.removeEventListener("focus", refreshWhenVisible); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, wsId, statusFilter, page, debouncedSearch, recordView]);
+  }, [activeTab, wsId, statusFilter, page, debouncedLeadFilters, recordView]);
 
   const mergeLead = (updated) => {
     setLeads((prev) => prev.map((lead) => lead.id === updated.id ? updated : lead));
@@ -347,7 +389,7 @@ export default function CrmInbox() {
         const r = await api.get(`/workspaces/${wsId}/crm/leads/${selectedLead.id}`);
         if (!cancelled) {
           setLeads((prev) => prev.map((lead) => lead.id === r.data.id ? r.data : lead));
-          setSelectedLead((prev) => prev?.id === r.data.id ? r.data : prev);
+          refreshSelectedLead(r.data);
         }
       } catch {
         clearInterval(interval);
@@ -361,7 +403,20 @@ export default function CrmInbox() {
     try {
       setSaving(true);
       const r = await api.post(`/workspaces/${wsId}/crm/leads`, { field_values: createValues });
-      toast.success("Lead created");
+      const call = r.data?.qualification_call || {};
+      if (call.status === "failed") {
+        toast.error(`Lead created, but the call failed: ${call.last_error || "Check the lead's call status"}`);
+      } else if (call.status === "reconcile_required") {
+        toast.warning("Lead created, but the call outcome needs review before retrying");
+      } else if (call.status === "scheduled") {
+        toast.success(call.scheduled_for
+          ? `Lead created. Call scheduled for ${new Date(call.scheduled_for).toLocaleString()}`
+          : "Lead created. Qualification call scheduled");
+      } else if (call.status === "started") {
+        toast.success("Lead created. Qualification call started");
+      } else {
+        toast.success("Lead created");
+      }
       setShowCreateLead(false);
       setRecordView("active");
       setStatusFilter("all");
@@ -692,12 +747,11 @@ export default function CrmInbox() {
   };
 
   return (
-    <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
+    <div className="crm-workspace p-4 sm:p-8 max-w-7xl mx-auto space-y-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2"><Users className="w-6 h-6 text-primary" /> CRM</h1>
-          <p className="text-sm text-muted-foreground mt-1">Manage records, states, organization details, receipts, and invoices.</p>
-          <Link to={`/app/w/${wsId}/workflows/ads-to-crm`} className="inline-block mt-2 text-sm text-primary underline">Meta / Sheet mapping</Link>
+          <h1 className="font-display text-3xl sm:text-4xl font-bold tracking-tight">CRM</h1>
+          <p className="text-sm text-muted-foreground mt-2">Move leads forward. Keep every follow-up and payment in view.</p>
         </div>
         <div className="flex rounded-lg border bg-card p-1 w-fit max-w-full overflow-x-auto" role="group" aria-label="CRM sections">
           <TabButton active={activeTab === "records"} onClick={() => setActiveTab("records")} icon={Users} label="Records" />
@@ -735,26 +789,43 @@ export default function CrmInbox() {
         />
       ) : (
         <>
-          <div className="flex flex-col sm:flex-row gap-3 items-center justify-between">
+          <div className="flex flex-col-reverse lg:flex-row gap-4 lg:items-start justify-between">
             <div className="flex flex-wrap gap-1.5 w-full sm:w-auto">
               <FilterButton active={recordView === "active" && statusFilter === "all"} onClick={() => { setRecordView("active"); setStatusFilter("all"); setPage(1); }}>All Leads</FilterButton>
               {states.map((state) => <FilterButton key={state.key} active={recordView === "active" && statusFilter === state.key} onClick={() => { setRecordView("active"); setStatusFilter(state.key); setPage(1); }}>{state.label}</FilterButton>)}
               <FilterButton active={recordView === "trash"} onClick={() => { setRecordView("trash"); setStatusFilter("all"); setPage(1); }}><Trash2 className="w-3.5 h-3.5" /> Trash</FilterButton>
             </div>
-            <div className="flex gap-2 w-full sm:w-auto">
-              <Link className="text-xs text-primary whitespace-nowrap" to={`/app/w/${wsId}/qualification`}>Voice provider: qualification profile</Link>
-              <button onClick={openCreateLead} className="inline-flex items-center gap-2 px-3 h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold whitespace-nowrap"><Plus className="w-4 h-4" /> New Lead</button>
-              <div className="relative flex-1 sm:w-72">
-                <Search className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
-                <input value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }} placeholder={recordView === "trash" ? "Search trash..." : "Search leads..."} className="w-full pl-9 pr-4 h-10 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
-              </div>
+            <div className="flex shrink-0 lg:justify-end">
+              <button onClick={openCreateLead} className="inline-flex items-center justify-center gap-2 px-5 h-11 rounded-lg bg-primary text-primary-foreground text-sm font-semibold whitespace-nowrap"><Plus className="w-4 h-4" /> New Lead</button>
             </div>
           </div>
 
-          <div className="flex items-center gap-2" role="group" aria-label="Record views">{["list", "kanban"].map((view) => <button key={view} aria-pressed={recordsLayout === view} onClick={() => { setRecordsLayout(view); if (view === "kanban") setRecordView("active"); }} className={`px-4 py-2 rounded-lg border text-sm font-medium ${recordsLayout === view ? "bg-primary/10 text-primary border-primary/30" : "hover:bg-accent"}`}>{view === "list" ? "List" : "Kanban / pipeline"}</button>)}</div>
+          <div className="grid gap-3 rounded-xl border bg-card p-3 sm:grid-cols-2 xl:grid-cols-[minmax(220px,2fr)_minmax(160px,1fr)_minmax(160px,1fr)_minmax(160px,1fr)_auto] xl:items-end" role="search" aria-label="Filter CRM leads">
+            <label className="text-xs font-medium text-muted-foreground">Search leads
+              <div className="relative mt-1"><Search className="absolute left-3 top-3 w-4 h-4" /><input value={searchQuery} maxLength={200} onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }} placeholder="Name, phone, or campaign" className="w-full h-10 pl-9 pr-3 rounded-lg border bg-background text-sm text-foreground" /></div>
+            </label>
+            <label className="text-xs font-medium text-muted-foreground">Campaign
+              <input value={campaignQuery} maxLength={200} onChange={(e) => { setCampaignQuery(e.target.value); setPage(1); }} placeholder="Filter campaign" className="mt-1 w-full h-10 px-3 rounded-lg border bg-background text-sm text-foreground" />
+            </label>
+            <label className="text-xs font-medium text-muted-foreground">Created from
+              <input type="datetime-local" value={createdFrom} onChange={(e) => { setCreatedFrom(e.target.value); setPage(1); }} className="mt-1 w-full h-10 px-2 rounded-lg border bg-background text-sm text-foreground" />
+            </label>
+            <label className="text-xs font-medium text-muted-foreground">Created through
+              <input type="datetime-local" min={createdFrom || undefined} value={createdBefore} onChange={(e) => { setCreatedBefore(e.target.value); setPage(1); }} className="mt-1 w-full h-10 px-2 rounded-lg border bg-background text-sm text-foreground" />
+            </label>
+            <button type="button" disabled={!searchQuery && !campaignQuery && !createdFrom && !createdBefore} onClick={() => { setSearchQuery(""); setCampaignQuery(""); setCreatedFrom(""); setCreatedBefore(""); setPage(1); }} className="h-10 px-3 rounded-lg border bg-background text-sm font-medium hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed">Clear filters</button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-1 rounded-lg bg-muted p-1" role="group" aria-label="Record views">{["list", "kanban"].map((view) => <button key={view} aria-pressed={recordsLayout === view} onClick={() => { setRecordsLayout(view); if (view === "kanban") setRecordView("active"); }} className={`min-h-9 px-4 rounded-md text-sm font-medium ${recordsLayout === view ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>{view === "list" ? "List" : "Pipeline"}</button>)}</div>
+            <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-muted-foreground">
+              <Link to={`/app/w/${wsId}/workflows/ads-to-crm`} className="inline-flex items-center min-h-9 underline underline-offset-4 hover:text-foreground">Lead source mapping</Link>
+              <Link to={`/app/w/${wsId}/qualification`} className="inline-flex items-center min-h-9 underline underline-offset-4 hover:text-foreground">Voice qualification settings</Link>
+            </div>
+          </div>
           <div className={`grid gap-6 items-start ${selectedLead ? "xl:grid-cols-[minmax(0,1fr)_560px]" : "grid-cols-1"}`}>
             <div className="space-y-3 min-w-0">
-              {recordsLayout === "kanban" && recordView !== "trash" ? <CrmPipeline wsId={wsId} states={states} search={searchQuery} statusFilter={statusFilter} onSelect={openLead} revision={pipelineRevision} onChanged={(lead) => { setPipelineRevision((v) => v + 1); setSelectedLead((old) => old?.id === lead.id ? lead : old); loadAll(); }} /> : <>
+              {recordsLayout === "kanban" && recordView !== "trash" ? <CrmPipeline wsId={wsId} states={states} filters={debouncedLeadFilters} statusFilter={statusFilter} onSelect={openLead} revision={pipelineRevision} onChanged={(lead) => { setPipelineRevision((v) => v + 1); setSelectedLead((old) => old?.id === lead.id ? lead : old); loadAll(); }} /> : <>
               <LeadTable leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} canCallWithAI={hasCallableAgent} onSelect={openLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
               <Pagination page={page} totalPages={totalPages} total={pagination.total} onPage={setPage} />
               </>}

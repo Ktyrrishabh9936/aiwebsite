@@ -23,6 +23,7 @@ from crm import (
     normalize_lead_note,
 )
 from llm_service import DEFAULT_MODEL, generate_json
+from meta_fields import strip_meta_phone_prefix
 from models import now_iso
 
 
@@ -108,7 +109,7 @@ SUMMARY_KEYS = (
 
 
 def normalize_phone(value):
-    raw = str(value or "").strip()
+    raw = strip_meta_phone_prefix(str(value or "").strip())
     digits = "".join(ch for ch in raw if ch.isdigit())
     if raw.startswith("+"):
         return f"+{digits}"
