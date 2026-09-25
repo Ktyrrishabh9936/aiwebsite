@@ -44,6 +44,8 @@ def money_minor(value):
         amount = Decimal(str(value or "0").replace(",", "").strip())
     except (InvalidOperation, ValueError):
         raise HTTPException(400, "Price must be a valid number") from None
+    if not amount.is_finite() or amount > Decimal("100000000000000"):
+        raise HTTPException(400, "Price must be a finite number within the supported range")
     if amount < 0:
         raise HTTPException(400, "Price cannot be negative")
     return int((amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))

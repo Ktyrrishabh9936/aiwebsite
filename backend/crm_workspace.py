@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from bson import ObjectId
 
-from crm import db_from, require_workspace_access, lead_query, doc_out
+from crm import apply_lead_filters, db_from, require_workspace_access, lead_query, doc_out
 from models import now_iso
 from workspace_modules import workspace_currency
 
@@ -39,14 +39,10 @@ async def access(request, ws_id):
 
 
 @router.get("/pipeline")
-async def pipeline(ws_id: str, request: Request, status: str = Query(max_length=100), search: str = Query(default="", max_length=200), offset: int = Query(default=0, ge=0), limit: int = Query(default=30, ge=1, le=100)):
+async def pipeline(ws_id: str, request: Request, status: str = Query(max_length=100), search: str = Query(default="", max_length=200), campaign: str = Query(default="", max_length=200), created_from: datetime = Query(None), created_before: datetime = Query(None), offset: int = Query(default=0, ge=0), limit: int = Query(default=30, ge=1, le=100)):
     _, workspace = await access(request, ws_id)
-    query = lead_query(ws_id)
+    query = apply_lead_filters(lead_query(ws_id), search, campaign, created_from, created_before)
     query["status"] = status
-    if search.strip():
-        import re
-        pattern = {"$regex": re.escape(search.strip()), "$options": "i"}
-        query["$and"] = [{"$or": [{field: pattern} for field in ("field_values.full_name", "field_values.phone", "field_values.email", "full_name", "phone", "email")]}]
     db = db_from(request)
     total = await db.crm_leads.count_documents(query)
     docs = await db.crm_leads.find(query, {"field_values.full_name": 1, "field_values.phone": 1, "field_values.email": 1, "full_name": 1, "phone": 1, "email": 1, "status": 1, "created_at": 1, "lead_status": 1, "opportunity": 1}).sort([("created_at", -1), ("_id", -1)]).skip(offset).limit(limit).to_list(limit)
@@ -56,15 +52,11 @@ async def pipeline(ws_id: str, request: Request, status: str = Query(max_length=
 
 
 @router.get("/pipeline-value")
-async def pipeline_value(ws_id: str, request: Request, search: str = Query(default="", max_length=200), status: str = Query(default="all", max_length=100)):
+async def pipeline_value(ws_id: str, request: Request, search: str = Query(default="", max_length=200), campaign: str = Query(default="", max_length=200), created_from: datetime = Query(None), created_before: datetime = Query(None), status: str = Query(default="all", max_length=100)):
     _, workspace = await access(request, ws_id)
-    query = lead_query(ws_id)
+    query = apply_lead_filters(lead_query(ws_id), search, campaign, created_from, created_before)
     if status != "all":
         query["status"] = status
-    if search.strip():
-        import re
-        pattern = {"$regex": re.escape(search.strip()), "$options": "i"}
-        query["$and"] = [{"$or": [{field: pattern} for field in ("field_values.full_name", "field_values.phone", "field_values.email", "full_name", "phone", "email")]}]
     values = await db_from(request).crm_leads.aggregate([{"$match": query}, {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$opportunity.total_minor", 0]}}}}]).to_list(1)
     return {"value_minor": values[0]["total"] if values else 0, "currency": workspace_currency(workspace)}
 

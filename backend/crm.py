@@ -314,6 +314,36 @@ def lead_query(ws_id, include_trashed=False, only_trashed=False):
     return q
 
 
+LEAD_SEARCH_FIELDS = (
+    "field_values.full_name", "full_name", "field_values.phone", "phone",
+    "field_values.email", "email", "meta_campaign_name", "campaign_name",
+    "field_values.campaign_name", "fields.campaign_name",
+)
+LEAD_CAMPAIGN_FIELDS = ("meta_campaign_name", "campaign_name", "field_values.campaign_name", "fields.campaign_name")
+
+
+def apply_lead_filters(query, search="", campaign="", created_from=None, created_before=None):
+    """Apply the same CRM filters to records and pipeline views."""
+    query = dict(query)
+    for term, fields in ((search.strip(), LEAD_SEARCH_FIELDS), (campaign.strip(), LEAD_CAMPAIGN_FIELDS)):
+        if term:
+            pattern = {"$regex": re.escape(term), "$options": "i"}
+            query.setdefault("$and", []).append({"$or": [{field: pattern} for field in fields]})
+    if created_from or created_before:
+        if ((created_from and created_from.tzinfo is None)
+                or (created_before and created_before.tzinfo is None)):
+            raise HTTPException(422, "Date filters must include a timezone")
+        if created_from and created_before and created_from >= created_before:
+            raise HTTPException(422, "From time must be before the end time")
+        bounds = {}
+        if created_from:
+            bounds["$gte"] = created_from.astimezone(timezone.utc).isoformat()
+        if created_before:
+            bounds["$lt"] = created_before.astimezone(timezone.utc).isoformat()
+        query["created_at"] = bounds
+    return query
+
+
 def build_manual_lead(ws_id, body, settings):
     body = body or {}
     states = {s["key"] for s in settings.get("states", [])}
@@ -1319,7 +1349,10 @@ async def list_leads(
     status: str = Query(None),
     page: int = Query(None),
     limit: int = Query(20),
-    search: str = Query(""),
+    search: str = Query("", max_length=200),
+    campaign: str = Query("", max_length=200),
+    created_from: datetime = Query(None),
+    created_before: datetime = Query(None),
     trashed: bool = Query(False),
 ):
     db = db_from(request)
@@ -1328,22 +1361,18 @@ async def list_leads(
     q = lead_query(ws_id, only_trashed=trashed)
     if status:
         q["status"] = status
-    all_docs = await db.crm_leads.find(q).sort("created_at", -1).to_list(1000)
-    decorated = [decorate_lead(d, settings) for d in all_docs]
-    if search:
-        term = search.lower()
-        decorated = [
-            lead for lead in decorated
-            if any(term in str(v or "").lower() for v in (lead.get("field_values") or {}).values())
-        ]
+    q = apply_lead_filters(q, search, campaign, created_from, created_before)
     if page is None:
-        return decorated
+        docs = await db.crm_leads.find(q).sort("created_at", -1).to_list(1000)
+        return [decorate_lead(doc, settings) for doc in docs]
     safe_limit = max(1, min(int(limit or 20), 100))
     safe_page = max(1, int(page or 1))
     start = (safe_page - 1) * safe_limit
+    total = await db.crm_leads.count_documents(q)
+    docs = await db.crm_leads.find(q).sort("created_at", -1).skip(start).limit(safe_limit).to_list(safe_limit)
     return {
-        "items": decorated[start:start + safe_limit],
-        "total": len(decorated),
+        "items": [decorate_lead(doc, settings) for doc in docs],
+        "total": total,
         "page": safe_page,
         "limit": safe_limit,
     }
@@ -1496,6 +1525,12 @@ async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = B
         "updated_at": now_iso(),
     }
     updates.update(pending_sheet_sync(doc, status))
+    if status == "won" and (doc.get("opportunity") or {}).get("module") == "real_estate":
+        _, workspace = await require_workspace_access(request, ws_id)
+        from sales_modules import finalize_opportunity
+        updates["opportunity"] = await finalize_opportunity(db, ws_id, doc, workspace)
+        updates["customer_status"] = "customer"
+        updates["converted_at"] = doc.get("converted_at") or now_iso()
     qualification = doc.get("qualification_call") or {}
     if doc.get("status") == "lost" and status != "lost" and qualification.get("qualification_category") == "junk":
         updates["qualification_call.qualification_category"] = ""
@@ -1510,6 +1545,7 @@ async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = B
 
 @router.post("/leads/{lead_id}/convert")
 async def convert_lead(ws_id: str, lead_id: str, request: Request, body: dict = Body(default=None)):
+    await require_workspace_access(request, ws_id)
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
     body = body or {}

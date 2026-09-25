@@ -1294,6 +1294,8 @@ async def startup():
     await db.crm_call_logs.create_index([("workspace_id", 1), ("lead_id", 1), ("kind", 1)])
     await db.catalog_items.create_index([("workspace_id", 1), ("kind", 1), ("status", 1)])
     await db.properties.create_index([("workspace_id", 1), ("status", 1)])
+    await db.property_units.create_index([("workspace_id", 1), ("property_id", 1), ("tower", 1), ("unit_number", 1)], unique=True)
+    await db.property_units.create_index([("workspace_id", 1), ("status", 1), ("property_id", 1)])
     await db.crm_leads.create_index([("workspace_id", 1), ("status", 1), ("opportunity.total_minor", 1)])
     await db.ai_usage_events.create_index([("workspace_id", 1), ("day", -1), ("process", 1)])
     await seed_admin(db)
