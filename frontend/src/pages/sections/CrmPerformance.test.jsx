@@ -12,7 +12,7 @@ beforeEach(() => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
   response = { funnel: { total_leads: 102, eligible_leads: 100, leads_attempted: 90 }, calling: { calls_attempted: 95, connected: 85, no_answer: 5, busy: 3, failed: 2, completed_conversations: 80, connection_rate: 89.5, average_duration_seconds: 62 }, qualification: { qualified: 65, disqualified: 15, follow_up_required: 5, completion_rate: 80 }, reviews: { reviewed: 100, correct: 85, incorrect: 15, not_reviewed: 2, accuracy: 85 } };
-  api.get.mockImplementation(async (url) => ({ data: url.endsWith("/profiles") ? { profiles: [{ id: "profile", product_name: "Homes" }] } : url.endsWith("/performance") ? response : url.includes("/leads?") ? { items: [], total: 0 } : { fields: [], states: [], agents: [], templates: [] } }));
+  api.get.mockImplementation(async (url) => ({ data: url.endsWith("/profiles") ? { profiles: [{ id: "profile", product_name: "Homes" }] } : url.endsWith("/performance") ? response : url.includes("/crm/bootstrap?") ? { settings: { fields: [], states: [], templates: [], organization: {} }, agents: { agents: [], selected_agent_config_id: "" }, leads: { items: [], total: 0, page: 1, limit: 10 } } : url.includes("/leads?") ? { items: [], total: 0 } : { fields: [], states: [], agents: [], templates: [] } }));
 });
 afterEach(() => { act(() => root.unmount()); container.remove(); jest.clearAllMocks(); });
 
@@ -58,4 +58,31 @@ test("Performance tab is inside CRM and Records and Settings remain accessible",
   await act(async () => button("Records").click());
   expect(container.textContent).toContain("New Lead");
   expect(container.querySelector('[aria-label="CRM Performance"]')).toBeNull();
+});
+
+test("clicking a lead fetches detail by ID rather than stringifying the lead object", async () => {
+  const summary = { id: "lead-123", status: "new", field_values: { full_name: "Webhook Lead" }, created_at: "2026-09-25T00:00:00Z" };
+  api.get.mockImplementation(async (url) => ({ data:
+    url.includes("/crm/bootstrap?")
+      ? { settings: { fields: [{ key: "full_name", label: "Name", active: true }], states: [{ key: "new", label: "New", color: "blue" }], templates: [], organization: {} }, agents: { agents: [], selected_agent_config_id: "" }, leads: { items: [summary], total: 1, page: 1, limit: 10 } }
+      : url.endsWith("/crm/leads/lead-123") ? { ...summary, lead_notes: [] } : {}
+  }));
+  await act(async () => root.render(<CrmInbox />));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+  const row = [...container.querySelectorAll("tbody tr")].find((item) => item.textContent.includes("Webhook Lead"));
+  await act(async () => row.click());
+  expect(api.get).toHaveBeenCalledWith("/workspaces/workspace/crm/leads/lead-123");
+  expect(api.get.mock.calls.some(([url]) => url.includes("[object"))).toBe(false);
+});
+
+test("a Sheet sync event refreshes only the paginated lead list", async () => {
+  await act(async () => root.render(<CrmInbox />));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+  api.get.mockClear();
+  await act(async () => window.dispatchEvent(new Event("arevei:sheet-synced")));
+  expect(api.get).toHaveBeenCalledWith(
+    "/workspaces/workspace/crm/leads?page=1&limit=10",
+    expect.objectContaining({ signal: undefined }),
+  );
+  expect(api.get.mock.calls.some(([url]) => url.includes("/crm/bootstrap"))).toBe(false);
 });

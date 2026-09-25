@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import datetime, timezone, timedelta
 from types import SimpleNamespace
 
@@ -22,10 +23,17 @@ class FakeCollection:
     def __init__(self):
         self.docs = []
 
-    async def find_one(self, query):
-        for doc in self.docs:
+    async def find_one(self, query, sort=None, projection=None):
+        docs = list(self.docs)
+        if sort:
+            for key, direction in reversed(sort):
+                docs.sort(key=lambda item: item.get(key, ""), reverse=direction < 0)
+        for doc in docs:
             if all(doc.get(key) == value for key, value in query.items()):
-                return dict(doc)
+                result = dict(doc)
+                if projection:
+                    result = {key: value for key, value in result.items() if projection.get(key) or key == "_id"}
+                return result
         return None
 
     async def insert_one(self, doc):
@@ -46,6 +54,7 @@ class FakeDb:
     def __init__(self):
         self.users = FakeCollection()
         self.password_reset_tokens = FakeCollection()
+        self.workspaces = FakeCollection()
 
 
 def run(coro):
@@ -131,3 +140,35 @@ def test_register_does_not_block_when_email_fails(monkeypatch):
 
     assert result["user"]["email"] == "riya@example.com"
     assert len(db.users.docs) == 1
+
+
+def test_login_returns_default_workspace_and_bcrypt_does_not_block_loop(monkeypatch):
+    db = FakeDb()
+    monkeypatch.setenv("JWT_SECRET", "test-login-signing-secret-long-enough")
+    user_id = ObjectId()
+    db.users.docs.append({
+        "_id": user_id,
+        "name": "Riya",
+        "email": "riya@example.com",
+        "password_hash": auth.hash_password("secret1"),
+    })
+    older, newer = ObjectId(), ObjectId()
+    db.workspaces.docs.extend([
+        {"_id": older, "user_id": str(user_id), "created_at": "2026-01-01"},
+        {"_id": newer, "user_id": str(user_id), "created_at": "2026-02-01"},
+    ])
+    router = auth.build_auth_router(db)
+    response = SimpleNamespace(set_cookie=lambda *args, **kwargs: None)
+
+    async def scenario():
+        body = SimpleNamespace(email="riya@example.com", password="secret1")
+        login_task = asyncio.create_task(route(router, "/api/auth/login")(body, response))
+        started = time.perf_counter()
+        await asyncio.sleep(0.01)
+        tick_elapsed = time.perf_counter() - started
+        result = await login_task
+        return tick_elapsed, result
+
+    tick_elapsed, result = run(scenario())
+    assert tick_elapsed < 0.1
+    assert result["default_workspace_id"] == str(newer)

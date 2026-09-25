@@ -1,16 +1,16 @@
 import html
 import re
+import asyncio
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
-from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
 
 from models import now_iso
 from meta_fields import META_FIELDS, pending_sheet_sync
-
-router = APIRouter(prefix="/workspaces/{ws_id}/crm")
+from request_metrics import timed
 
 VALID_FIELD_TYPES = {
     "text",
@@ -89,17 +89,17 @@ def db_from(request):
     return request.app.state.db if hasattr(request.app.state, "db") else request.app.extra.get("db")
 
 
-async def require_workspace_access(request, ws_id):
-    from auth import get_current_user
+async def require_workspace_access(request: Request, ws_id: str):
+    from auth import get_current_user_and_workspace
 
     db = db_from(request)
-    user = await get_current_user(request, db)
-    workspace = await db.workspaces.find_one({"_id": oid(ws_id)})
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    if str(workspace.get("user_id")) != str(user.get("_id")) and user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Forbidden")
-    return user, workspace
+    return await get_current_user_and_workspace(request, db, ws_id)
+
+
+router = APIRouter(
+    prefix="/workspaces/{ws_id}/crm",
+    dependencies=[Depends(require_workspace_access)],
+)
 
 
 def doc_out(doc):
@@ -111,7 +111,7 @@ def doc_out(doc):
 
 
 def iso_after_days(days):
-    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    return datetime.now(timezone.utc) + timedelta(days=days)
 
 
 async def purge_expired_trashed_leads(db, ws_id):
@@ -233,12 +233,10 @@ async def ensure_crm_settings(db, ws_id):
     if settings:
         fields = phone_first_fields(settings.get("fields") or [])
         states = normalize_states(settings.get("states") or [])
-        if fields != (settings.get("fields") or []):
-            await db.crm_settings.update_one({"workspace_id": ws_id}, {"$set": {"fields": fields, "updated_at": now_iso()}})
-            settings["fields"] = fields
-        if states != (settings.get("states") or []):
-            await db.crm_settings.update_one({"workspace_id": ws_id}, {"$set": {"states": states, "updated_at": now_iso()}})
-            settings["states"] = states
+        # Compatibility normalization stays read-only. migrate_runtime.py
+        # persists the normalized representation outside request handling.
+        settings["fields"] = fields
+        settings["states"] = states
         return settings
     settings = {
         "workspace_id": ws_id,
@@ -308,8 +306,60 @@ def lead_query(ws_id, include_trashed=False, only_trashed=False):
     if only_trashed:
         q["deleted_at"] = {"$ne": None}
     elif not include_trashed:
-        q["$or"] = [{"deleted_at": {"$exists": False}}, {"deleted_at": None}]
+        # Equality with null also matches legacy documents where the field is
+        # absent and can use the compound list indexes.
+        q["deleted_at"] = None
     return q
+
+
+LEAD_SUMMARY_FIELDS = {
+    "workspace_id": 1, "field_values": 1, "status": 1,
+    "customer_status": 1, "conversion_type": 1,
+    "qualification_status": 1, "qualification_call.status": 1,
+    "qualification_call.scheduled_for": 1,
+    "qualification_call.qualification_status": 1,
+    "qualification_call.qualification_category": 1,
+    "created_at": 1, "updated_at": 1, "deleted_at": 1, "delete_after": 1,
+}
+
+
+def lead_search_query(search):
+    term = str(search or "").strip()
+    if not term:
+        return None
+    escaped = re.escape(term)
+    return {"$expr": {"$anyElementTrue": {"$map": {
+        "input": {"$objectToArray": {"$ifNull": ["$field_values", {}]}},
+        "as": "field",
+        "in": {"$regexMatch": {
+            "input": {"$convert": {"input": "$$field.v", "to": "string", "onError": "", "onNull": ""}},
+            "regex": escaped,
+            "options": "i",
+        }},
+    }}}}
+
+
+async def paginated_leads(db, ws_id, settings, status=None, page=1, limit=20, search="", trashed=False):
+    safe_limit = max(1, min(int(limit or 20), 100))
+    safe_page = max(1, int(page or 1))
+    query = lead_query(ws_id, only_trashed=trashed)
+    if status:
+        query["status"] = status
+    search_filter = lead_search_query(search)
+    if search_filter:
+        query["$and"] = [search_filter]
+    cursor = (db.crm_leads.find(query, LEAD_SUMMARY_FIELDS)
+              .sort("created_at", -1)
+              .skip((safe_page - 1) * safe_limit)
+              .limit(safe_limit))
+    total, docs = await asyncio.gather(
+        db.crm_leads.count_documents(query),
+        cursor.to_list(safe_limit),
+    )
+    return {
+        "items": [decorate_lead(doc, settings) for doc in docs],
+        "total": total, "page": safe_page, "limit": safe_limit,
+    }
 
 
 def build_manual_lead(ws_id, body, settings):
@@ -1301,10 +1351,8 @@ async def update_organization(ws_id: str, request: Request, body: dict = Body(..
 
 @router.get("/analytics/overview")
 async def crm_analytics_overview(ws_id: str, request: Request):
-    await require_workspace_access(request, ws_id)
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
-    await purge_expired_trashed_leads(db, ws_id)
     docs = await db.crm_leads.find(lead_query(ws_id)).sort("created_at", -1).to_list(5000)
     leads = [decorate_lead(doc, settings) for doc in docs]
     return build_crm_analytics(leads)
@@ -1322,7 +1370,8 @@ async def list_leads(
 ):
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
-    await purge_expired_trashed_leads(db, ws_id)
+    if page is not None:
+        return await paginated_leads(db, ws_id, settings, status, page, limit, search, trashed)
     q = lead_query(ws_id, only_trashed=trashed)
     if status:
         q["status"] = status
@@ -1334,16 +1383,39 @@ async def list_leads(
             lead for lead in decorated
             if any(term in str(v or "").lower() for v in (lead.get("field_values") or {}).values())
         ]
-    if page is None:
-        return decorated
-    safe_limit = max(1, min(int(limit or 20), 100))
-    safe_page = max(1, int(page or 1))
-    start = (safe_page - 1) * safe_limit
+    return decorated
+
+
+@router.get("/bootstrap")
+async def crm_bootstrap(
+    ws_id: str,
+    request: Request,
+    status: str = Query(None),
+    page: int = Query(1),
+    limit: int = Query(20),
+    search: str = Query(""),
+    trashed: bool = Query(False),
+):
+    """Return the initial CRM screen with one workspace authorization check."""
+    from plivo_agents import _selected_agent_id, _workspace_agents
+
+    db = db_from(request)
+    async with timed(request, "db_crm_settings"):
+        settings = await ensure_crm_settings(db, ws_id)
+    async with timed(request, "db_crm_bootstrap"):
+        leads, agents, selected_agent_id = await asyncio.gather(
+            paginated_leads(db, ws_id, settings, status, page, limit, search, trashed),
+            _workspace_agents(db, ws_id),
+            _selected_agent_id(db, ws_id),
+        )
     return {
-        "items": decorated[start:start + safe_limit],
-        "total": len(decorated),
-        "page": safe_page,
-        "limit": safe_limit,
+        "settings": doc_out(settings),
+        "agents": {
+            "agents": agents,
+            "selected_agent_config_id": selected_agent_id,
+            "legacy_environment_agent": None,
+        },
+        "leads": leads,
     }
 
 
@@ -1351,7 +1423,6 @@ async def list_leads(
 async def create_lead(ws_id: str, request: Request, body: dict = Body(...)):
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
-    await purge_expired_trashed_leads(db, ws_id)
     lead_doc = build_manual_lead(ws_id, body, settings)
     await db.crm_leads.insert_one(lead_doc)
     from plivo_calls import schedule_first_qualification_call
@@ -1364,7 +1435,6 @@ async def create_lead(ws_id: str, request: Request, body: dict = Body(...)):
 async def get_lead(ws_id: str, lead_id: str, request: Request):
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
-    await purge_expired_trashed_leads(db, ws_id)
     doc = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
     if not doc:
         raise HTTPException(status_code=404, detail="Lead not found")
@@ -1373,7 +1443,6 @@ async def get_lead(ws_id: str, lead_id: str, request: Request):
 
 @router.post("/leads/{lead_id}/calls/outbound")
 async def start_lead_outbound_call(ws_id: str, lead_id: str, request: Request, body: dict = Body(None)):
-    await require_workspace_access(request, ws_id)
     from plivo_calls import start_outbound_call, start_qualification_call
 
     db = db_from(request)
@@ -1384,8 +1453,11 @@ async def start_lead_outbound_call(ws_id: str, lead_id: str, request: Request, b
 
 
 @router.post("/leads/{lead_id}/calls/qualification/cancel")
-async def cancel_lead_qualification_call(ws_id: str, lead_id: str, request: Request):
-    user, _ = await require_workspace_access(request, ws_id)
+async def cancel_lead_qualification_call(
+    ws_id: str, lead_id: str, request: Request,
+    access=Depends(require_workspace_access),
+):
+    user, _ = access
     from plivo_calls import cancel_scheduled_qualification_call
 
     db = db_from(request)
@@ -1396,7 +1468,6 @@ async def cancel_lead_qualification_call(ws_id: str, lead_id: str, request: Requ
 async def trash_lead(ws_id: str, lead_id: str, request: Request):
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
-    await purge_expired_trashed_leads(db, ws_id)
     now = now_iso()
     result = await db.crm_leads.update_one(
         {
@@ -1415,7 +1486,6 @@ async def trash_lead(ws_id: str, lead_id: str, request: Request):
 async def restore_lead(ws_id: str, lead_id: str, request: Request):
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
-    await purge_expired_trashed_leads(db, ws_id)
     result = await db.crm_leads.update_one(
         {"workspace_id": ws_id, "_id": oid(lead_id), "deleted_at": {"$ne": None}},
         {"$set": {"updated_at": now_iso()}, "$unset": {"deleted_at": "", "delete_after": ""}},

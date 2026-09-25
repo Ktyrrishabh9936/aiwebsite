@@ -3,8 +3,7 @@ import CrmPipeline from "../../components/CrmPipeline";
 import CrmReminders from "../../components/CrmReminders";
 import OpportunitySelector from "../../components/OpportunitySelector";
 import LeadQualificationPanel from "../../components/LeadQualificationPanel";
-import CrmPerformance from "./CrmPerformance";
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   Users, Calendar, Info, Search, XCircle, Save, BadgeIndianRupee,
@@ -14,6 +13,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import api, { API, formatError } from "../../lib/api";
+
+const CrmPerformance = lazy(() => import("./CrmPerformance"));
 
 const FIELD_TYPES = ["text", "long_text", "email", "phone", "number", "currency", "date", "datetime", "boolean", "select", "multi_select", "url", "json"];
 const DEFAULT_STAGES = [];
@@ -188,8 +189,10 @@ export default function CrmInbox() {
   const [activeTab, setActiveTab] = useState("records");
   const [recordsLayout, setRecordsLayout] = useState("list");
   const [pipelineRevision, setPipelineRevision] = useState(0);
-  const openLead = async (id) => {
-    try { const { data } = await api.get(`/workspaces/${wsId}/crm/leads/${id}`); selectLead(data); }
+  const openLead = async (leadOrId) => {
+    const id = typeof leadOrId === "object" ? leadOrId?.id : leadOrId;
+    if (!id) return;
+    try { const { data } = await api.get(`/workspaces/${wsId}/crm/leads/${encodeURIComponent(id)}`); selectLead(data); }
     catch (e) { toast.error(formatError(e.response?.data?.detail)); }
   };
   const [recordView, setRecordView] = useState("active");
@@ -203,6 +206,7 @@ export default function CrmInbox() {
   const [cancellingCallId, setCancellingCallId] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ total: 0, page: 1, limit: 10 });
   const [selectedLead, setSelectedLead] = useState(null);
@@ -215,6 +219,7 @@ export default function CrmInbox() {
   const [newField, setNewField] = useState({ label: "", key: "", type: "text", required: false, options: [] });
   const [newState, setNewState] = useState({ label: "", key: "", color: "blue" });
   const [templateDraft, setTemplateDraft] = useState({ name: "Receipt", type: "receipt", button_label: "Download Receipt", active: true, html: "<h1>Receipt</h1><p>{{full_name}}</p><p>{{email}}</p><table>{{payment_plan.stages}}</table>" });
+  const listRefreshInFlight = useRef(false);
 
   const activeFields = useMemo(() => (settings.fields || []).filter((field) => field.active !== false), [settings.fields]);
   const states = useMemo(() => {
@@ -252,35 +257,45 @@ export default function CrmInbox() {
     setShowCreateLead(true);
   };
 
-  const loadAll = async () => {
+  const leadListParams = () => {
+    const params = new URLSearchParams({ page: String(page), limit: "10" });
+    if (statusFilter !== "all") params.set("status", statusFilter);
+    if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
+    if (recordView === "trash") params.set("trashed", "true");
+    return params;
+  };
+
+  const applyLeadPage = (leadPage) => {
+    const items = leadPage?.items || [];
+    setLeads(items);
+    setPagination({ total: leadPage?.total || 0, page: leadPage?.page || page, limit: leadPage?.limit || 10 });
+  };
+
+  const refreshLeadList = async (signal) => {
+    if (listRefreshInFlight.current) return;
+    listRefreshInFlight.current = true;
+    try {
+      const { data } = await api.get(`/workspaces/${wsId}/crm/leads?${leadListParams().toString()}`, { signal });
+      applyLeadPage(data);
+    } catch (e) {
+      if (e.code !== "ERR_CANCELED") toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      listRefreshInFlight.current = false;
+    }
+  };
+
+  const loadAll = async (signal) => {
     try {
       setLoading(true);
-      const params = new URLSearchParams({ page: String(page), limit: "10" });
-      if (statusFilter !== "all") params.set("status", statusFilter);
-      if (searchQuery.trim()) params.set("search", searchQuery.trim());
-      if (recordView === "trash") params.set("trashed", "true");
-      const [settingsRes, leadsRes, plivoAgentsRes] = await Promise.all([
-        api.get(`/workspaces/${wsId}/crm/settings`),
-        api.get(`/workspaces/${wsId}/crm/leads?${params.toString()}`),
-        api.get(`/workspaces/${wsId}/crm/plivo/agents`)
-      ]);
-      setSettings(settingsRes.data);
-      const nextPlivoAgents = plivoAgentsRes.data || { agents: [], selected_agent_config_id: "", legacy_environment_agent: null };
+      const params = leadListParams();
+      const { data } = await api.get(`/workspaces/${wsId}/crm/bootstrap?${params.toString()}`, { signal });
+      setSettings(data.settings);
+      const nextPlivoAgents = data.agents || { agents: [], selected_agent_config_id: "", legacy_environment_agent: null };
       setPlivoAgentState(nextPlivoAgents);
       setSelectedAgentId((current) => nextSelectedAgentId(current, nextPlivoAgents));
-      const items = leadsRes.data.items || [];
-      setLeads(items);
-      setPagination({ total: leadsRes.data.total || 0, page: leadsRes.data.page || page, limit: leadsRes.data.limit || 10 });
-      if (selectedLead) {
-        const refreshed = items.find((lead) => lead.id === selectedLead.id);
-        if (refreshed) {
-          setSelectedLead(refreshed);
-          setFieldValues(valuesFrom(refreshed, (settingsRes.data.fields || []).filter((field) => field.active !== false)));
-        } else {
-          setSelectedLead(null);
-        }
-      }
+      applyLeadPage(data.leads);
     } catch (e) {
+      if (e.code === "ERR_CANCELED") return;
       toast.error(formatError(e.response?.data?.detail));
     } finally {
       setLoading(false);
@@ -288,17 +303,35 @@ export default function CrmInbox() {
   };
 
   useEffect(() => {
-    const t = setTimeout(loadAll, 200);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsId, statusFilter, page, searchQuery, recordView]);
+    const timer = setTimeout(() => setDebouncedSearch(searchQuery), 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   useEffect(() => {
-    const refreshImportedLeads = () => loadAll();
+    const controller = new AbortController();
+    const t = setTimeout(() => loadAll(controller.signal), 50);
+    return () => { clearTimeout(t); controller.abort(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsId, statusFilter, page, debouncedSearch, recordView]);
+
+  useEffect(() => {
+    const refreshImportedLeads = () => refreshLeadList();
     window.addEventListener("arevei:sheet-synced", refreshImportedLeads);
     return () => window.removeEventListener("arevei:sheet-synced", refreshImportedLeads);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsId, statusFilter, page, searchQuery, recordView]);
+  }, [wsId, statusFilter, page, debouncedSearch, recordView]);
+
+  // A Sheet webhook runs on the server, so an already-open browser cannot
+  // receive its new rows directly. Refresh only the lightweight lead page
+  // while CRM records are visible; bootstrap/settings/agents are not repeated.
+  useEffect(() => {
+    if (activeTab !== "records") return undefined;
+    const refreshWhenVisible = () => { if (!document.hidden) refreshLeadList(); };
+    const interval = setInterval(refreshWhenVisible, 15000);
+    window.addEventListener("focus", refreshWhenVisible);
+    return () => { clearInterval(interval); window.removeEventListener("focus", refreshWhenVisible); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, wsId, statusFilter, page, debouncedSearch, recordView]);
 
   const mergeLead = (updated) => {
     setLeads((prev) => prev.map((lead) => lead.id === updated.id ? updated : lead));
@@ -674,7 +707,7 @@ export default function CrmInbox() {
         </div>
       </div>
 
-      {activeTab === "reminders" ? <CrmReminders wsId={wsId} onOpenLead={async (id) => { await openLead(id); setActiveTab("records"); }} /> : activeTab === "performance" ? <CrmPerformance wsId={wsId} states={states} /> : activeTab === "settings" ? (
+      {activeTab === "reminders" ? <CrmReminders wsId={wsId} onOpenLead={async (id) => { await openLead(id); setActiveTab("records"); }} /> : activeTab === "performance" ? <Suspense fallback={<div className="rounded-xl border bg-card p-8 text-sm text-muted-foreground">Loading performance…</div>}><CrmPerformance wsId={wsId} states={states} /></Suspense> : activeTab === "settings" ? (
         <SettingsPanel
           fields={settings.fields || []}
           states={states}
@@ -722,7 +755,7 @@ export default function CrmInbox() {
           <div className={`grid gap-6 items-start ${selectedLead ? "xl:grid-cols-[minmax(0,1fr)_560px]" : "grid-cols-1"}`}>
             <div className="space-y-3 min-w-0">
               {recordsLayout === "kanban" && recordView !== "trash" ? <CrmPipeline wsId={wsId} states={states} search={searchQuery} statusFilter={statusFilter} onSelect={openLead} revision={pipelineRevision} onChanged={(lead) => { setPipelineRevision((v) => v + 1); setSelectedLead((old) => old?.id === lead.id ? lead : old); loadAll(); }} /> : <>
-              <LeadTable leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} canCallWithAI={hasCallableAgent} onSelect={selectLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
+              <LeadTable leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} canCallWithAI={hasCallableAgent} onSelect={openLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
               <Pagination page={page} totalPages={totalPages} total={pagination.total} onPage={setPage} />
               </>}
             </div>

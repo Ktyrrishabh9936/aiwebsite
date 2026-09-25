@@ -1,4 +1,5 @@
 import os
+import asyncio
 import jwt
 import bcrypt
 import hashlib
@@ -35,6 +36,16 @@ def verify_password(plain: str, hashed: str) -> bool:
         return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
     except Exception:
         return False
+
+
+async def hash_password_async(password: str) -> str:
+    """Keep bcrypt CPU work off the ASGI event loop."""
+    return await asyncio.to_thread(hash_password, password)
+
+
+async def verify_password_async(plain: str, hashed: str) -> bool:
+    """Keep bcrypt CPU work off the ASGI event loop."""
+    return await asyncio.to_thread(verify_password, plain, hashed)
 
 
 def create_access_token(user_id: str, email: str) -> str:
@@ -77,6 +88,20 @@ class ResetPasswordInput(BaseModel):
 def build_auth_router(db):
     router = APIRouter(prefix="/api/auth", tags=["auth"])
 
+    async def _default_workspace_id(user):
+        workspaces = getattr(db, "workspaces", None)
+        if workspaces is None:
+            return None
+        try:
+            workspace = await workspaces.find_one(
+                {"user_id": str(user["_id"])},
+                sort=[("created_at", -1)],
+                projection={"_id": 1},
+            )
+        except TypeError:  # Lightweight test doubles may only accept a query.
+            workspace = await workspaces.find_one({"user_id": str(user["_id"])})
+        return str(workspace["_id"]) if workspace else None
+
     async def _issue(user, response: Response):
         token = create_access_token(str(user["_id"]), user["email"])
         response.set_cookie("access_token", token, httponly=True, secure=True,
@@ -84,6 +109,7 @@ def build_auth_router(db):
         return {
             "token": token,
             "user": {"id": str(user["_id"]), "name": user.get("name"), "email": user["email"], "role": user.get("role", "user")},
+            "default_workspace_id": await _default_workspace_id(user),
         }
 
     @router.post("/register")
@@ -91,7 +117,7 @@ def build_auth_router(db):
         email = body.email.lower()
         if await db.users.find_one({"email": email}):
             raise HTTPException(status_code=400, detail="Email already registered")
-        doc = {"name": body.name, "email": email, "password_hash": hash_password(body.password),
+        doc = {"name": body.name, "email": email, "password_hash": await hash_password_async(body.password),
                "role": "user", "created_at": datetime.now(timezone.utc).isoformat()}
         res = await db.users.insert_one(doc)
         doc["_id"] = res.inserted_id
@@ -103,7 +129,7 @@ def build_auth_router(db):
     async def login(body: LoginInput, response: Response):
         email = body.email.lower()
         user = await db.users.find_one({"email": email})
-        if not user or not verify_password(body.password, user["password_hash"]):
+        if not user or not await verify_password_async(body.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid email or password")
         return await _issue(user, response)
 
@@ -147,7 +173,7 @@ def build_auth_router(db):
             raise HTTPException(status_code=400, detail="Invalid or expired reset link")
         result = await db.users.update_one(
             {"_id": ObjectId(doc["user_id"])},
-            {"$set": {"password_hash": hash_password(body.password), "updated_at": now.isoformat()}},
+            {"$set": {"password_hash": await hash_password_async(body.password), "updated_at": now.isoformat()}},
         )
         if result.matched_count == 0:
             raise HTTPException(status_code=400, detail="Invalid or expired reset link")
@@ -157,12 +183,21 @@ def build_auth_router(db):
     @router.get("/me")
     async def me(request: Request):
         user = await get_current_user(request, db)
-        return {"id": str(user["_id"]), "name": user.get("name"), "email": user["email"], "role": user.get("role", "user")}
+        return {"id": str(user["_id"]), "name": user.get("name"), "email": user["email"], "role": user.get("role", "user"),
+                "default_workspace_id": await _default_workspace_id(user)}
 
     return router
 
 
 async def get_current_user(request: Request, db) -> dict:
+    payload = access_token_payload(request)
+    user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
+def access_token_payload(request: Request) -> dict:
     token = request.cookies.get("access_token")
     if not token:
         auth = request.headers.get("Authorization", "")
@@ -171,15 +206,32 @@ async def get_current_user(request: Request, db) -> dict:
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
-        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
-        if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        return user
+        return jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+async def get_current_user_and_workspace(request: Request, db, workspace_id: str):
+    """Resolve user and workspace concurrently after local JWT validation."""
+    payload = access_token_payload(request)
+    try:
+        user_id = ObjectId(payload["sub"])
+        workspace_oid = ObjectId(workspace_id)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user, workspace = await asyncio.gather(
+        db.users.find_one({"_id": user_id}),
+        db.workspaces.find_one({"_id": workspace_oid}),
+    )
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if str(workspace.get("user_id")) != str(user.get("_id")) and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return user, workspace
 
 
 async def seed_admin(db):

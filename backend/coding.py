@@ -11,8 +11,18 @@ from fastapi import APIRouter, Request, HTTPException, Body
 from fastapi.responses import StreamingResponse
 
 from auth import get_current_user
-import daytona_service as dz
-import coding_agent
+
+
+def _daytona():
+    # Daytona imports thousands of generated SDK models. Load it only for code
+    # workspace requests, never for login/CRM cold starts.
+    import daytona_service
+    return daytona_service
+
+
+def _coding_agent():
+    import coding_agent
+    return coding_agent
 
 logger = logging.getLogger("coding")
 MAX_ATTACHMENTS = 3
@@ -250,9 +260,9 @@ def build_coding_router(db):
 
     async def provision(pid, template):
         try:
-            sb = await dz.create_sandbox(pid)
+            sb = await _daytona().create_sandbox(pid)
             for path, content in SCAFFOLDS.get(template, SCAFFOLDS["blank"]).items():
-                await dz.write_file(sb, path, content)
+                await _daytona().write_file(sb, path, content)
             await db.code_projects.update_one({"_id": ObjectId(pid)},
                                               {"$set": {"sandbox_id": sb.id, "sandbox_status": "ready"}})
         except Exception as e:
@@ -263,7 +273,7 @@ def build_coding_router(db):
     async def get_started_sandbox(proj):
         if not proj.get("sandbox_id"):
             raise HTTPException(409, "Sandbox not provisioned yet")
-        return await dz.ensure_started(proj["sandbox_id"])
+        return await _daytona().ensure_started(proj["sandbox_id"])
 
     # ---------- models ----------
     @router.get("/models")
@@ -289,6 +299,7 @@ def build_coding_router(db):
                 return {"configured": has_boto3 and has_creds, "reason": reason}
             return {"configured": False, "reason": "Unknown provider"}
 
+        coding_agent = _coding_agent()
         visible_models = [m for m in coding_agent.CODING_MODELS if m.get("provider") != "bedrock"]
         statuses = {provider: provider_status(provider) for provider in ("openai", "openrouter", "nvidia")}
         models = [{**m, **provider_status(m.get("provider"))} for m in visible_models]
@@ -318,7 +329,7 @@ def build_coding_router(db):
             "user_id": str(user["_id"]),
             "name": body.get("name") or "Untitled project",
             "template": template,
-            "model_id": body.get("model_id") or coding_agent.DEFAULT_CODING_MODEL,
+            "model_id": body.get("model_id") or _coding_agent().DEFAULT_CODING_MODEL,
             "workspace_id": body.get("workspace_id") if await owned_workspace(body.get("workspace_id"), user) else None,
             "sandbox_id": None,
             "sandbox_status": "provisioning",
@@ -342,7 +353,7 @@ def build_coding_router(db):
             "user_id": str(user["_id"]),
             "name": body.get("name") or repo_url.rstrip("/").split("/")[-1].replace(".git", "") or "GitHub project",
             "template": "github",
-            "model_id": body.get("model_id") or coding_agent.DEFAULT_CODING_MODEL,
+            "model_id": body.get("model_id") or _coding_agent().DEFAULT_CODING_MODEL,
             "workspace_id": body.get("workspace_id") if await owned_workspace(body.get("workspace_id"), user) else None,
             "sandbox_id": None,
             "sandbox_status": "provisioning",
@@ -357,8 +368,8 @@ def build_coding_router(db):
 
         async def import_bg():
             try:
-                sb = await dz.create_sandbox(pid)
-                await dz.import_github_repo(sb, repo_url, body.get("branch"), os.environ.get("GITHUB_TOKEN"))
+                sb = await _daytona().create_sandbox(pid)
+                await _daytona().import_github_repo(sb, repo_url, body.get("branch"), os.environ.get("GITHUB_TOKEN"))
                 await db.code_projects.update_one({"_id": ObjectId(pid)},
                                                   {"$set": {"sandbox_id": sb.id, "sandbox_status": "ready"}})
             except Exception as e:
@@ -420,7 +431,7 @@ def build_coding_router(db):
         user = await user_of(request)
         proj = await owned(pid, user)
         if proj.get("sandbox_id"):
-            asyncio.create_task(dz.delete_sandbox(proj["sandbox_id"]))
+            asyncio.create_task(_daytona().delete_sandbox(proj["sandbox_id"]))
         await db.code_projects.delete_one({"_id": ObjectId(pid)})
         await db.code_messages.delete_many({"project_id": pid})
         return {"ok": True}
@@ -438,21 +449,21 @@ def build_coding_router(db):
         user = await user_of(request)
         proj = await owned(pid, user)
         sb = await get_started_sandbox(proj)
-        return {"tree": await dz.list_tree(sb)}
+        return {"tree": await _daytona().list_tree(sb)}
 
     @router.get("/projects/{pid}/file")
     async def get_file(pid: str, path: str, request: Request):
         user = await user_of(request)
         proj = await owned(pid, user)
         sb = await get_started_sandbox(proj)
-        return {"path": path, "content": await dz.read_file(sb, path)}
+        return {"path": path, "content": await _daytona().read_file(sb, path)}
 
     @router.put("/projects/{pid}/file")
     async def put_file(pid: str, request: Request, body: dict = Body(...)):
         user = await user_of(request)
         proj = await owned(pid, user)
         sb = await get_started_sandbox(proj)
-        await dz.write_file(sb, body["path"], body.get("content", ""))
+        await _daytona().write_file(sb, body["path"], body.get("content", ""))
         return {"ok": True}
 
     # ---------- terminal ----------
@@ -461,7 +472,7 @@ def build_coding_router(db):
         user = await user_of(request)
         proj = await owned(pid, user)
         sb = await get_started_sandbox(proj)
-        res = await dz.exec_cmd(sb, body.get("command", "echo"), timeout=min(int(body.get("timeout", 90)), 110))
+        res = await _daytona().exec_cmd(sb, body.get("command", "echo"), timeout=min(int(body.get("timeout", 90)), 110))
         return res
 
     # ---------- preview ----------
@@ -470,7 +481,7 @@ def build_coding_router(db):
         user = await user_of(request)
         proj = await owned(pid, user)
         sb = await get_started_sandbox(proj)
-        await dz.start_dev_server(sb)
+        await _daytona().start_dev_server(sb)
         await db.code_projects.update_one({"_id": ObjectId(pid)}, {"$set": {"preview_url": None}})
         return {"starting": True}
 
@@ -479,7 +490,7 @@ def build_coding_router(db):
         user = await user_of(request)
         proj = await owned(pid, user)
         sb = await get_started_sandbox(proj)
-        status = await dz.preview_status(sb, existing_url=proj.get("preview_url"))
+        status = await _daytona().preview_status(sb, existing_url=proj.get("preview_url"))
         if status.get("url"):
             await db.code_projects.update_one({"_id": ObjectId(pid)}, {"$set": {"preview_url": status["url"]}})
         return status
@@ -501,16 +512,17 @@ def build_coding_router(db):
         message = body.get("message", "")
         model_id = body.get("model_id") or proj.get("model_id")
         attachments = validate_chat_attachments(body.get("attachments"))
+        coding_agent = _coding_agent()
         model = coding_agent.CODING_MODEL_MAP.get(model_id) or coding_agent.CODING_MODEL_MAP[coding_agent.DEFAULT_CODING_MODEL]
         if attachments and not model.get("vision"):
             raise HTTPException(400, "Select a vision-capable model before sending image references.")
         sb = await get_started_sandbox(proj)
 
         ops = {
-            "list_files": lambda: dz.list_tree(sb),
-            "read_file": lambda p: dz.read_file(sb, p),
-            "write_file": lambda p, c: dz.write_file(sb, p, c),
-            "run_command": lambda c: dz.exec_cmd(sb, c),
+            "list_files": lambda: _daytona().list_tree(sb),
+            "read_file": lambda p: _daytona().read_file(sb, p),
+            "write_file": lambda p, c: _daytona().write_file(sb, p, c),
+            "run_command": lambda c: _daytona().exec_cmd(sb, c),
         }
 
         hist_docs = await db.code_messages.find({"project_id": pid}).sort("created_at", 1).to_list(500)

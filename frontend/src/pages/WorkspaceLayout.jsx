@@ -1,4 +1,5 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useParams, useNavigate, Link, useLocation } from "react-router-dom";
 import {
   AlertCircle, Bell, CheckCircle2, Globe, Loader2, LogOut, Plus, Settings as SettingsIcon,
@@ -32,6 +33,7 @@ export default function WorkspaceLayout() {
   const location = useLocation();
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [ws, setWs] = useState(null);
   const [notes, setNotes] = useState([]);
   const [workspaces, setWorkspaces] = useState([]);
@@ -44,6 +46,7 @@ export default function WorkspaceLayout() {
   const [agentVisited, setAgentVisited] = useState(false);
   const [mobileNavigation, setMobileNavigation] = useState(false);
   const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem("arevei_sidebar_collapsed") === "true"; } catch { return false; } });
+  const refreshInFlight = useRef(null);
   const toggleSidebar = () => setCollapsed((previous) => { const next = !previous; try { localStorage.setItem("arevei_sidebar_collapsed", String(next)); } catch {} return next; });
   useEffect(() => { setMobileNavigation(false); }, [location.pathname]);
   const currentSection = location.pathname.split("/")[4] || "";
@@ -51,14 +54,40 @@ export default function WorkspaceLayout() {
   useEffect(() => { setAgentMode(false); }, [location.pathname]);
 
   const refresh = useCallback(async () => {
+    if (refreshInFlight.current) return refreshInFlight.current;
+    const request = (async () => {
+      try {
+        const r = await api.get(`/workspaces/${wsId}`);
+        setWs(r.data);
+        return r.data;
+      } catch {
+        setNotFound(true);
+        return null;
+      } finally {
+        refreshInFlight.current = null;
+      }
+    })();
+    refreshInFlight.current = request;
+    return request;
+  }, [wsId]);
+
+  const loadBootstrap = useCallback(async () => {
     try {
-      const r = await api.get(`/workspaces/${wsId}`);
-      setWs(r.data);
-      return r.data;
+      const data = await queryClient.fetchQuery({
+        queryKey: ["workspace-bootstrap", wsId],
+        queryFn: async () => (await api.get(`/workspaces/${wsId}/bootstrap`)).data,
+        staleTime: 60_000,
+      });
+      setWs(data.workspace);
+      setWorkspaces(data.workspaces || []);
+      setNotes(data.notifications || []);
+      setNotFound(false);
+      return data;
     } catch {
       setNotFound(true);
+      return null;
     }
-  }, [wsId]);
+  }, [queryClient, wsId]);
 
   const loadNotes = useCallback(() => {
     api.get(`/workspaces/${wsId}/notifications`).then((r) => setNotes(r.data)).catch(() => {});
@@ -68,26 +97,24 @@ export default function WorkspaceLayout() {
     api.get("/workspaces").then((r) => setWorkspaces(r.data)).catch(() => {});
   }, []);
 
-  useEffect(() => { refresh(); loadNotes(); }, [refresh, loadNotes]);
+  useEffect(() => { loadBootstrap(); }, [loadBootstrap]);
   useEffect(() => {
     const sync = () => { if (!document.hidden) refresh(); };
-    window.addEventListener("focus", sync);
-    const timer = setInterval(sync, 15000);
-    return () => { window.removeEventListener("focus", sync); clearInterval(timer); };
+    const timer = setInterval(sync, 60000);
+    return () => clearInterval(timer);
   }, [refresh]);
-  useEffect(() => { loadWorkspaces(); }, [loadWorkspaces]);
-
   // poll while brain building
   useEffect(() => {
     if (ws?.brain_status === "building") {
-      const t = setInterval(() => { refresh(); loadNotes(); }, 4000);
+      const t = setInterval(() => { if (!document.hidden) refresh(); }, 15000);
       return () => clearInterval(t);
     }
-  }, [ws?.brain_status, refresh, loadNotes]);
+  }, [ws?.brain_status, refresh]);
 
   const changeModel = async (modelId) => {
     const r = await api.patch(`/workspaces/${wsId}`, { model_id: modelId });
     setWs(r.data);
+    queryClient.setQueryData(["workspace-bootstrap", wsId], (current) => current ? { ...current, workspace: r.data } : current);
     toast.success("Model updated");
   };
 
@@ -99,6 +126,7 @@ export default function WorkspaceLayout() {
       toast.success("Workspace created - training brain");
       setWorkspaceOpen(false);
       setWorkspaceUrl("");
+      queryClient.invalidateQueries({ queryKey: ["workspace-bootstrap"] });
       loadWorkspaces();
       navigate(`/app/w/${r.data.id}`);
     } catch {

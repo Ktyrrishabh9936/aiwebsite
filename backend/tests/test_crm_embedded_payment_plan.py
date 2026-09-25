@@ -93,7 +93,7 @@ def test_lead_query_separates_active_and_trash():
     trash = lead_query("workspace-1", only_trashed=True)
 
     assert active["workspace_id"] == "workspace-1"
-    assert active["$or"] == [{"deleted_at": {"$exists": False}}, {"deleted_at": None}]
+    assert active["deleted_at"] is None
     assert trash == {"workspace_id": "workspace-1", "deleted_at": {"$ne": None}}
     assert TRASH_RETENTION_DAYS == 30
 

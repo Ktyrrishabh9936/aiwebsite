@@ -1,37 +1,38 @@
 import "./App.css";
+import { lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from "react-router-dom";
 import { Toaster } from "./components/ui/sonner";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { ThemeProvider } from "./context/ThemeContext";
 
-import Landing from "./pages/Landing";
-import CheckDemo from "./pages/CheckDemo";
-import Login from "./pages/Login";
-import Register from "./pages/Register";
-import ForgotPassword from "./pages/ForgotPassword";
-import ResetPassword from "./pages/ResetPassword";
-import Dashboard from "./pages/Dashboard";
-import Onboarding from "./pages/Onboarding";
-import CodeProjects from "./pages/CodeProjects";
-import CodeWorkspace from "./pages/CodeWorkspace";
-import WorkspaceLayout from "./pages/WorkspaceLayout";
-import Overview from "./pages/sections/Overview";
-import Brain from "./pages/sections/Brain";
-import Manager from "./pages/sections/Manager";
-import Agents from "./pages/sections/Agents";
-import Qualification from "./pages/sections/Qualification";
-import Tasks from "./pages/sections/Tasks";
-import Blogs from "./pages/sections/Blogs";
-import BlogEditor from "./pages/sections/BlogEditor";
-import Embed from "./pages/sections/Embed";
-import PublicBlog from "./pages/PublicBlog";
-import Workflows from "./pages/sections/Workflows";
-import AdsToCrmWorkflow from "./pages/sections/AdsToCrmWorkflow";
-import CrmInbox from "./pages/sections/CrmInbox";
-import Projects from "./pages/sections/Projects";
-import Properties from "./pages/sections/Properties";
-import ProductsServices from "./pages/sections/ProductsServices";
-import Settings from "./pages/sections/Settings";
+const Landing = lazy(() => import("./pages/Landing"));
+const CheckDemo = lazy(() => import("./pages/CheckDemo"));
+const Login = lazy(() => import("./pages/Login"));
+const Register = lazy(() => import("./pages/Register"));
+const ForgotPassword = lazy(() => import("./pages/ForgotPassword"));
+const ResetPassword = lazy(() => import("./pages/ResetPassword"));
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const Onboarding = lazy(() => import("./pages/Onboarding"));
+const CodeProjects = lazy(() => import("./pages/CodeProjects"));
+const CodeWorkspace = lazy(() => import("./pages/CodeWorkspace"));
+const WorkspaceLayout = lazy(() => import("./pages/WorkspaceLayout"));
+const Overview = lazy(() => import("./pages/sections/Overview"));
+const Brain = lazy(() => import("./pages/sections/Brain"));
+const Manager = lazy(() => import("./pages/sections/Manager"));
+const Agents = lazy(() => import("./pages/sections/Agents"));
+const Qualification = lazy(() => import("./pages/sections/Qualification"));
+const Tasks = lazy(() => import("./pages/sections/Tasks"));
+const Blogs = lazy(() => import("./pages/sections/Blogs"));
+const BlogEditor = lazy(() => import("./pages/sections/BlogEditor"));
+const Embed = lazy(() => import("./pages/sections/Embed"));
+const PublicBlog = lazy(() => import("./pages/PublicBlog"));
+const Workflows = lazy(() => import("./pages/sections/Workflows"));
+const AdsToCrmWorkflow = lazy(() => import("./pages/sections/AdsToCrmWorkflow"));
+const CrmInbox = lazy(() => import("./pages/sections/CrmInbox"));
+const Projects = lazy(() => import("./pages/sections/Projects"));
+const Properties = lazy(() => import("./pages/sections/Properties"));
+const ProductsServices = lazy(() => import("./pages/sections/ProductsServices"));
+const Settings = lazy(() => import("./pages/sections/Settings"));
 
 function Protected() {
   const { user, ready } = useAuth();
@@ -46,6 +47,7 @@ function App() {
       <ThemeProvider>
         <AuthProvider>
           <BrowserRouter>
+            <Suspense fallback={<div className="min-h-screen grid place-items-center text-muted-foreground">Loading…</div>}>
             <Routes>
               <Route path="/" element={<Landing />} />
               <Route path="/check-demo" element={<CheckDemo />} />
@@ -79,6 +81,7 @@ function App() {
                 </Route>
               </Route>
             </Routes>
+            </Suspense>
           </BrowserRouter>
           <Toaster position="top-right" richColors />
         </AuthProvider>

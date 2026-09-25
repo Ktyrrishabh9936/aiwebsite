@@ -6,6 +6,7 @@ import importlib.util
 import time
 import json
 import re
+import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,26 +22,72 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 
 from models import Workspace, Task, Blog, Notification, BLOG_IMAGE_POOL, now_iso
-from auth import build_auth_router, get_current_user, seed_admin
+from auth import build_auth_router, get_current_user, get_current_user_and_workspace
 from coding import build_coding_router
 import agents
 import llm_service
 from ai_usage import configure_usage, usage_scope
 from manager_service import ManagerService
-from manager_voice import build_voice_router, initialize_voice_storage
+from manager_voice import build_voice_router
+from request_metrics import timed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("server")
 
-client = AsyncIOMotorClient(os.environ["MONGO_URL"])
+client = AsyncIOMotorClient(
+    os.environ["MONGO_URL"],
+    appname="arevei-api",
+    serverSelectionTimeoutMS=int(os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS", "5000")),
+    connectTimeoutMS=int(os.environ.get("MONGO_CONNECT_TIMEOUT_MS", "5000")),
+    socketTimeoutMS=int(os.environ.get("MONGO_SOCKET_TIMEOUT_MS", "10000")),
+    maxPoolSize=int(os.environ.get("MONGO_MAX_POOL_SIZE", "20")),
+    maxConnecting=int(os.environ.get("MONGO_MAX_CONNECTING", "4")),
+)
 db = client[os.environ["DB_NAME"]]
 configure_usage(db)
 
 app = FastAPI(title="Arevei AI Manager")
 api = APIRouter(prefix="/api")
+PROCESS_STARTED_AT = time.perf_counter()
+_first_request = True
 PUBLIC_BLOG_RATE = {}
 PUBLIC_BLOG_RATE_LIMIT = 120
 PUBLIC_BLOG_RATE_WINDOW = 60
+
+
+@app.middleware("http")
+async def request_timing(request: Request, call_next):
+    """Emit low-cardinality, privacy-safe request latency diagnostics."""
+    global _first_request
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    started = time.perf_counter()
+    cold_start = _first_request
+    _first_request = False
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", "unmatched")
+        logger.exception(
+            "request_complete request_id=%s method=%s route=%s status=500 duration_ms=%s cold_start=%s region=%s",
+            request_id, request.method, route_path, elapsed_ms, cold_start,
+            os.environ.get("VERCEL_REGION", "local"),
+        )
+        raise
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+    route = request.scope.get("route")
+    route_path = getattr(route, "path", request.url.path)
+    response.headers["X-Request-ID"] = request_id
+    timing_parts = [f'app;dur={elapsed_ms}']
+    timing_parts.extend(f'{name};dur={duration}' for name, duration in getattr(request.state, "server_timings", []))
+    response.headers["Server-Timing"] = ", ".join(timing_parts)
+    logger.info(
+        "request_complete request_id=%s method=%s route=%s status=%s duration_ms=%s cold_start=%s region=%s process_age_ms=%s",
+        request_id, request.method, route_path, response.status_code, elapsed_ms, cold_start,
+        os.environ.get("VERCEL_REGION", "local"), round((time.perf_counter() - PROCESS_STARTED_AT) * 1000, 1),
+    )
+    return response
 
 
 def oid(v):
@@ -230,6 +277,8 @@ async def create_workspace(request: Request, body: dict = Body(...)):
                    brain_status="building")
     res = await db.workspaces.insert_one(ws.to_mongo())
     ws_id = str(res.inserted_id)
+    from crm import ensure_crm_settings
+    await ensure_crm_settings(db, ws_id)
     asyncio.create_task(_build_brain_bg(ws_id, url, model_id))
     doc = await db.workspaces.find_one({"_id": res.inserted_id})
     return workspace_out(doc)
@@ -247,6 +296,23 @@ async def get_workspace(ws_id: str, request: Request):
     user = await require_user(request)
     ws = await owned_workspace(ws_id, user)
     return workspace_out(ws)
+
+
+@api.get("/workspaces/{ws_id}/bootstrap")
+async def workspace_bootstrap(ws_id: str, request: Request):
+    """Load the workspace shell with one authentication lookup and parallel reads."""
+    async with timed(request, "db_authorize"):
+        user, ws = await get_current_user_and_workspace(request, db, ws_id)
+    async with timed(request, "db_bootstrap"):
+        workspace_docs, notification_docs = await asyncio.gather(
+            db.workspaces.find({"user_id": str(user["_id"])}).sort("created_at", -1).to_list(100),
+            db.notifications.find({"workspace_id": ws_id}).sort("created_at", -1).to_list(50),
+        )
+    return {
+        "workspace": workspace_out(ws),
+        "workspaces": [workspace_out(doc) for doc in workspace_docs],
+        "notifications": [doc_out(doc) for doc in notification_docs],
+    }
 
 
 @api.patch("/workspaces/{ws_id}")
@@ -1265,39 +1331,13 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     app.state.db = db
-    try:
-        await initialize_voice_storage(db)
-        app.state.voice_storage_ready = True
-    except Exception:
-        # The optional voice test must not prevent the existing application starting.
-        app.state.voice_storage_ready = False
-        logger.warning("voice_storage_initialization_failed")
-    await db.users.create_index("email", unique=True)
-    await db.password_reset_tokens.create_index("token_hash", unique=True)
-    await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
-    await db.workspaces.create_index("public_key")
-    await db.blogs.create_index("slug", unique=True)
-    await db.code_projects.create_index("user_id")
-    await db.code_projects.create_index("workspace_id")
-    await db.workflows.create_index([("workspace_id", 1), ("kind", 1)])
-    await db.google_sheet_connections.create_index("drive_watch_channel_id", unique=True, sparse=True)
-    await db.crm_leads.create_index([("workspace_id", 1), ("sheet_row_key", 1)], unique=True)
-    await db.crm_leads.create_index([("workspace_id", 1), ("plivo_call_uuid", 1)])
-    await db.crm_settings.create_index("workspace_id", unique=True)
-    await db.workspace_voice_provider_configs.create_index([("workspace_id", 1), ("provider", 1)], unique=True)
-    await db.plivo_agent_configs.create_index([("workspace_id", 1), ("enabled", 1), ("is_default", 1)])
-    await db.plivo_call_sessions.create_index([("workspace_id", 1), ("lead_id", 1), ("status", 1)])
-    await db.plivo_call_sessions.create_index([("workspace_id", 1), ("created_at", -1)])
-    await db.plivo_call_events.create_index([("workspace_id", 1), ("idempotency_key", 1)], unique=True)
-    await db.plivo_call_events.create_index([("workspace_id", 1), ("lead_id", 1), ("created_at", -1)])
-    await db.qualification_profiles.create_index([("workspace_id", 1), ("campaign_id", 1)], unique=True, partialFilterExpression={"campaign_id": {"$type": "string"}})
-    await db.crm_call_logs.create_index([("workspace_id", 1), ("lead_id", 1), ("kind", 1)])
-    await db.catalog_items.create_index([("workspace_id", 1), ("kind", 1), ("status", 1)])
-    await db.properties.create_index([("workspace_id", 1), ("status", 1)])
-    await db.crm_leads.create_index([("workspace_id", 1), ("status", 1), ("opportunity.total_minor", 1)])
-    await db.ai_usage_events.create_index([("workspace_id", 1), ("day", -1), ("process", 1)])
-    await seed_admin(db)
-    if os.environ.get("DISABLE_BACKGROUND_JOBS", "").strip().lower() not in {"1", "true", "yes"}:
+    # Indexes, data normalization, and admin provisioning belong to the
+    # explicit deployment migration, not every serverless cold start.
+    app.state.voice_storage_ready = True
+    background_jobs_disabled = os.environ.get("DISABLE_BACKGROUND_JOBS", "").strip().lower() in {"1", "true", "yes"}
+    if not background_jobs_disabled:
+        if os.environ.get("VERCEL"):
+            logger.warning("Background loops are enabled on Vercel; keep them enabled for compatibility until a durable worker is deployed")
         asyncio.create_task(scheduler_loop())
         asyncio.create_task(google_sheets_poller_loop())
     else:

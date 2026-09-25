@@ -19,9 +19,11 @@ export default function Login() {
     e.preventDefault();
     setLoading(true);
     try {
-      await login(email, password);
+      const session = await login(email, password);
       toast.success("Welcome back");
-      nav(localStorage.getItem("arevei_onboarded") ? "/app" : "/welcome");
+      if (!localStorage.getItem("arevei_onboarded")) nav("/welcome");
+      else if (session?.default_workspace_id) nav(`/app/w/${session.default_workspace_id}`);
+      else nav("/app");
     } catch (err) {
       toast.error(formatError(err.response?.data?.detail) || "Login failed");
     } finally {
