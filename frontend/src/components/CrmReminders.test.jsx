@@ -28,6 +28,7 @@ test("daily planner filters dates, opens the lead and marks a reminder done", as
   expect(container.textContent).toContain("Share prices");
   await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Diya").click());
   expect(open).toHaveBeenCalledWith("lead");
-  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Mark done").click());
-  expect(api.patch).toHaveBeenCalledWith("/workspaces/ws/crm/reminders/task", { status: "done" });
+  await change(container.querySelector('input[placeholder="Record the lead’s response before completing"]'), "Asked for a call tomorrow");
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Complete follow-up").click());
+  expect(api.patch).toHaveBeenCalledWith("/workspaces/ws/crm/reminders/task", { status: "done", outcome: "Asked for a call tomorrow" });
 });

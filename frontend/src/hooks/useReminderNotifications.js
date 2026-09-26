@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import api from "../lib/api";
+import { currentDevice, pushSupported } from "../lib/pushNotifications";
 
 export default function useReminderNotifications(wsId, navigate) {
   useEffect(() => {
@@ -14,6 +15,11 @@ export default function useReminderNotifications(wsId, navigate) {
       checking = true;
       const checkedAt = Date.now();
       try {
+        // Server push owns notifications on subscribed devices, including while open.
+        if (pushSupported() && (await currentDevice(wsId)).enabled) {
+          lastChecked = checkedAt;
+          return;
+        }
         const notified = JSON.parse(localStorage.getItem(storageKey) || "{}");
         const start = new Date(lastChecked - 30 * 1000).toISOString();
         const end = new Date(checkedAt).toISOString();
@@ -30,7 +36,7 @@ export default function useReminderNotifications(wsId, navigate) {
             if (notified[item.id] === item.scheduled_time) continue;
             const dueAt = new Date(item.scheduled_time);
             if (Number.isNaN(dueAt.getTime()) || dueAt.getTime() > checkedAt) continue;
-            const notification = new Notification(`Reminder: ${item.title}`, {
+            const notification = new Notification(`Follow-up: ${item.title}`, {
               body: `${item.lead_name || "Lead"} · Due ${dueAt.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`,
               tag: `crm-reminder-${wsId}-${item.id}`,
             });

@@ -23,6 +23,7 @@ from bson import ObjectId
 
 from models import Workspace, Task, Blog, Notification, BLOG_IMAGE_POOL, now_iso
 from auth import build_auth_router, get_current_user, get_current_user_and_workspace
+from push_notifications import router as push_router, push_scheduler
 from coding import build_coding_router
 import agents
 import llm_service
@@ -287,30 +288,33 @@ async def create_workspace(request: Request, body: dict = Body(...)):
 @api.get("/workspaces")
 async def list_workspaces(request: Request):
     user = await require_user(request)
-    docs = await db.workspaces.find({"user_id": str(user["_id"])}).sort("created_at", -1).to_list(100)
-    return [workspace_out(d) for d in docs]
+    from workspace_access import accessible_workspaces
+    return await accessible_workspaces(db, user)
 
 
 @api.get("/workspaces/{ws_id}")
 async def get_workspace(ws_id: str, request: Request):
-    user = await require_user(request)
-    ws = await owned_workspace(ws_id, user)
-    return workspace_out(ws)
+    from workspace_access import member_context, workspace_shell
+    _, ws, membership = await member_context(request, db, ws_id)
+    return {**workspace_out(ws), "access_role": "owner"} if membership["role"] == "owner" else workspace_shell(ws, membership)
 
 
 @api.get("/workspaces/{ws_id}/bootstrap")
 async def workspace_bootstrap(ws_id: str, request: Request):
     """Load the workspace shell with one authentication lookup and parallel reads."""
     async with timed(request, "db_authorize"):
-        user, ws = await get_current_user_and_workspace(request, db, ws_id)
+        from workspace_access import member_context, workspace_shell, accessible_workspaces
+        user, ws, membership = await member_context(request, db, ws_id)
+    if membership["role"] != "owner":
+        return {"workspace": workspace_shell(ws, membership), "workspaces": await accessible_workspaces(db, user), "notifications": []}
     async with timed(request, "db_bootstrap"):
         workspace_docs, notification_docs = await asyncio.gather(
             db.workspaces.find({"user_id": str(user["_id"])}).sort("created_at", -1).to_list(100),
             db.notifications.find({"workspace_id": ws_id}).sort("created_at", -1).to_list(50),
         )
     return {
-        "workspace": workspace_out(ws),
-        "workspaces": [workspace_out(doc) for doc in workspace_docs],
+        "workspace": {**workspace_out(ws), "access_role": "owner"},
+        "workspaces": await accessible_workspaces(db, user),
         "notifications": [doc_out(doc) for doc in notification_docs],
     }
 
@@ -1290,6 +1294,10 @@ async def google_sheets_poller_loop():
 from google_sheets import router as google_sheets_router
 from workflows import router as workflows_router
 from crm import router as crm_router
+from sms import router as sms_router
+from sales_team import router as sales_team_router
+from sales_team import shared_router as shared_leads_router
+from memberships import owner_router as members_router, invite_router as membership_invites_router, portal_router as sales_portal_router
 from plivo_agents import router as plivo_agents_router
 from qualification_api import router as qualification_router
 from crm_performance import router as crm_performance_router
@@ -1302,6 +1310,12 @@ from ai_usage import router as ai_usage_router
 api.include_router(google_sheets_router)
 api.include_router(workflows_router)
 api.include_router(crm_router)
+api.include_router(sms_router)
+api.include_router(sales_team_router)
+api.include_router(shared_leads_router)
+api.include_router(members_router)
+api.include_router(membership_invites_router)
+api.include_router(sales_portal_router)
 api.include_router(plivo_agents_router)
 from voice_api import router as voice_providers_router
 api.include_router(voice_providers_router)
@@ -1312,6 +1326,7 @@ api.include_router(properties_router)
 api.include_router(catalog_router)
 api.include_router(sales_modules_router)
 api.include_router(ai_usage_router)
+api.include_router(push_router)
 api.include_router(build_voice_router(db, manager_service, owned_workspace, require_user))
 
 app.include_router(build_auth_router(db))
@@ -1340,6 +1355,8 @@ async def startup():
             logger.warning("Background loops are enabled on Vercel; keep them enabled for compatibility until a durable worker is deployed")
         asyncio.create_task(scheduler_loop())
         asyncio.create_task(google_sheets_poller_loop())
+        if not os.environ.get("VERCEL"):
+            app.state.push_scheduler = asyncio.create_task(push_scheduler(db))
     else:
         logger.info("Background scheduler and Google Sheets poller disabled")
     logger.info("Arevei backend ready")
@@ -1347,4 +1364,11 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    push_job = getattr(app.state, "push_scheduler", None)
+    if push_job:
+        push_job.cancel()
+        try:
+            await push_job
+        except asyncio.CancelledError:
+            pass
     client.close()

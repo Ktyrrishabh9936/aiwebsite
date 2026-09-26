@@ -322,9 +322,16 @@ def fake_sheet(monkeypatch, duplicate=False, failure=False):
 
 
 def test_status_changes_matching_replay_and_conversion(monkeypatch):
+    from auth import create_access_token
+    monkeypatch.setenv("JWT_SECRET", "sheet-conversion-test-only-signing-secret")
     writes = fake_sheet(monkeypatch)
     async def run(db):
         ws, lead_id, conn, request = await seed(db)
+        user_id = ObjectId()
+        await db.users.insert_one({"_id": user_id, "email": "sheet-conversion@example.test"})
+        await db.workspaces.insert_one({"_id": ObjectId(ws), "user_id": str(user_id)})
+        request.cookies = {}
+        request.headers = {"Authorization": "Bearer " + create_access_token(str(user_id), "sheet-conversion@example.test")}
         query = {"_id": ObjectId(lead_id)}
         assert (await db.crm_leads.find_one(query))["field_values"]["budget"] == "90000"
         result = await update_lead(ws, lead_id, request, {"status": "qualified"})

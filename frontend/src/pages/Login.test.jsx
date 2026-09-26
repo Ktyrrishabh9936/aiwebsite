@@ -7,6 +7,7 @@ const mockNavigate = jest.fn();
 jest.mock("react-router-dom", () => ({
   Link: ({ children, to, ...props }) => <a href={to} {...props}>{children}</a>,
   useNavigate: () => mockNavigate,
+  useLocation: () => ({ state: {} }),
 }), { virtual: true });
 jest.mock("../context/AuthContext", () => ({ useAuth: jest.fn() }));
 jest.mock("sonner", () => ({ toast: { success: jest.fn(), error: jest.fn() } }));

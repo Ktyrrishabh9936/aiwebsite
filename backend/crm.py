@@ -258,6 +258,9 @@ def active_fields(settings):
 
 def default_field_values(doc, settings):
     values = dict(doc.get("field_values") or {})
+    assignment = doc.get("sales_assignment") or {}
+    if "sales_agent_id" in assignment:
+        values["assigned_salesperson"] = assignment.get("sales_agent_name", "") if assignment.get("sales_agent_id") else ""
     for field in active_fields(settings):
         key = field["key"]
         if key not in values and doc.get(key) is not None:
@@ -271,6 +274,8 @@ def decorate_lead(doc, settings):
     out = doc_out(doc)
     if not out:
         return None
+    if out.get("lead_share"):
+        out["lead_share"] = {key: out["lead_share"].get(key) for key in ("agent_id", "agent_name", "created_at", "authenticated")}
     values = default_field_values(doc, settings)
     out["field_values"] = values
     for key in ("email", "full_name", "phone", "address", "source", "assigned_salesperson"):
@@ -315,6 +320,7 @@ def lead_query(ws_id, include_trashed=False, only_trashed=False):
 
 
 LEAD_SUMMARY_FIELDS = {
+    "sales_assignment": 1,
     "workspace_id": 1, "field_values": 1, "status": 1,
     "customer_status": 1, "conversion_type": 1,
     "qualification_status": 1, "qualification_call.status": 1,
@@ -333,13 +339,24 @@ LEAD_SEARCH_FIELDS = (
 LEAD_CAMPAIGN_FIELDS = ("meta_campaign_name", "campaign_name", "field_values.campaign_name", "fields.campaign_name")
 
 
-def apply_lead_filters(query, search="", campaign="", created_from=None, created_before=None):
+def apply_lead_filters(query, search="", campaign="", created_from=None, created_before=None, sales_agent_id="", channel_partner_id="", introduced_by_id=""):
     """Apply the same CRM filters to records and pipeline views."""
     query = dict(query)
+    for key, value in (("sales_agent_id", sales_agent_id), ("channel_partner_id", channel_partner_id), ("introduced_by_id", introduced_by_id)):
+        if value:
+            query[f"sales_assignment.{key}"] = value
     for term, fields in ((search.strip(), LEAD_SEARCH_FIELDS), (campaign.strip(), LEAD_CAMPAIGN_FIELDS)):
         if term:
             pattern = {"$regex": re.escape(term), "$options": "i"}
-            query.setdefault("$and", []).append({"$or": [{field: pattern} for field in fields]})
+            alternatives = [{field: pattern} for field in fields]
+            if fields == LEAD_SEARCH_FIELDS:
+                alternatives.append({"$expr": {"$anyElementTrue": [{"$map": {
+                    "input": {"$objectToArray": {"$ifNull": ["$field_values", {}]}},
+                    "as": "field", "in": {"$regexMatch": {
+                        "input": {"$convert": {"input": "$$field.v", "to": "string", "onError": "", "onNull": ""}},
+                        "regex": re.escape(term), "options": "i"},
+                }}}]}})
+            query.setdefault("$and", []).append({"$or": alternatives})
     if created_from or created_before:
         if ((created_from and created_from.tzinfo is None)
                 or (created_before and created_before.tzinfo is None)):
@@ -357,14 +374,14 @@ def apply_lead_filters(query, search="", campaign="", created_from=None, created
 
 async def paginated_leads(
     db, ws_id, settings, status=None, page=1, limit=20, search="", trashed=False,
-    campaign="", created_from=None, created_before=None,
+    campaign="", created_from=None, created_before=None, sales_agent_id="", channel_partner_id="", introduced_by_id="",
 ):
     safe_limit = max(1, min(int(limit or 20), 100))
     safe_page = max(1, int(page or 1))
     query = lead_query(ws_id, only_trashed=trashed)
     if status:
         query["status"] = status
-    query = apply_lead_filters(query, search, campaign, created_from, created_before)
+    query = apply_lead_filters(query, search, campaign, created_from, created_before, sales_agent_id, channel_partner_id, introduced_by_id)
     cursor = (db.crm_leads.find(query, LEAD_SUMMARY_FIELDS)
               .sort("created_at", -1)
               .skip((safe_page - 1) * safe_limit)
@@ -381,6 +398,9 @@ async def paginated_leads(
 
 def build_manual_lead(ws_id, body, settings):
     body = body or {}
+    trigger_ai_call = body.get("trigger_ai_call", True)
+    if not isinstance(trigger_ai_call, bool):
+        raise HTTPException(status_code=422, detail="trigger_ai_call must be true or false")
     states = {s["key"] for s in settings.get("states", [])}
     status = body.get("status") or "new"
     if status not in states:
@@ -391,6 +411,9 @@ def build_manual_lead(ws_id, body, settings):
     values = validate_field_values(incoming_values or {}, settings)
     lead_id = ObjectId()
     now = now_iso()
+    timeline = [{"type": "created", "label": "Lead created manually", "created_at": now}]
+    if not trigger_ai_call:
+        timeline.append({"type": "ai_call_skipped", "label": "Automatic AI call skipped on creation", "created_at": now})
     return {
         "_id": lead_id,
         "workspace_id": ws_id,
@@ -406,6 +429,7 @@ def build_manual_lead(ws_id, body, settings):
         "lead_notes": [],
         "communication_summary": {},
         "qualification_call": {},
+        "auto_qualification_enabled": trigger_ai_call,
         "lead_status": "NEW",
         "call_outcome": None,
         "qualification_score": None,
@@ -419,7 +443,7 @@ def build_manual_lead(ws_id, body, settings):
         "conversion_type": None,
         "converted_at": None,
         "payment_plan": {},
-        "timeline": [{"type": "created", "label": "Lead created manually", "created_at": now}],
+        "timeline": timeline,
         "receipts": [],
         "final_invoice": {},
         "deleted_at": None,
@@ -1387,19 +1411,23 @@ async def list_leads(
     created_from: datetime = Query(None),
     created_before: datetime = Query(None),
     trashed: bool = Query(False),
+    sales_agent_id: str = Query(""),
+    channel_partner_id: str = Query(""),
+    introduced_by_id: str = Query(""),
 ):
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
     q = lead_query(ws_id, only_trashed=trashed)
     if status:
         q["status"] = status
-    q = apply_lead_filters(q, search, campaign, created_from, created_before)
+    q = apply_lead_filters(q, search, campaign, created_from, created_before, sales_agent_id, channel_partner_id, introduced_by_id)
     if page is None:
         docs = await db.crm_leads.find(q).sort("created_at", -1).to_list(1000)
         return [decorate_lead(doc, settings) for doc in docs]
     return await paginated_leads(
         db, ws_id, settings, status, page, limit, search, trashed,
         campaign, created_from, created_before,
+        sales_agent_id, channel_partner_id, introduced_by_id,
     )
 
 
@@ -1415,6 +1443,9 @@ async def crm_bootstrap(
     created_from: datetime = Query(None),
     created_before: datetime = Query(None),
     trashed: bool = Query(False),
+    sales_agent_id: str = Query(""),
+    channel_partner_id: str = Query(""),
+    introduced_by_id: str = Query(""),
 ):
     """Return the initial CRM screen with one workspace authorization check."""
     from plivo_agents import _selected_agent_id, _workspace_agents
@@ -1427,6 +1458,7 @@ async def crm_bootstrap(
             paginated_leads(
                 db, ws_id, settings, status, page, limit, search, trashed,
                 campaign, created_from, created_before,
+                sales_agent_id, channel_partner_id, introduced_by_id,
             ),
             _workspace_agents(db, ws_id),
             _selected_agent_id(db, ws_id),
@@ -1447,10 +1479,14 @@ async def create_lead(ws_id: str, request: Request, body: dict = Body(...)):
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
     lead_doc = build_manual_lead(ws_id, body, settings)
+    if body.get("sales_assignment"):
+        from sales_team import attribution
+        lead_doc["sales_assignment"] = await attribution(db, ws_id, body["sales_assignment"])
     await db.crm_leads.insert_one(lead_doc)
-    from plivo_calls import schedule_first_qualification_call
+    if lead_doc["auto_qualification_enabled"]:
+        from plivo_calls import schedule_first_qualification_call
 
-    await schedule_first_qualification_call(db, ws_id, str(lead_doc["_id"]))
+        await schedule_first_qualification_call(db, ws_id, str(lead_doc["_id"]))
     return decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": lead_doc["_id"]}), settings)
 
 

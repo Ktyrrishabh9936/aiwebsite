@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import api, { formatError } from "../lib/api";
 import { formatMoneyMinor } from "../lib/currency";
+import FollowUpAction, { FollowUpSnapshot, useFollowUpSnapshots } from "./FollowUpAction";
 
 function Column({ stage, wsId, filters, states, onSelect, onChanged, revision }) {
   const [items, setItems] = useState([]), [total, setTotal] = useState(0), [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const snapshots = useFollowUpSnapshots(wsId, items.map((lead) => lead.id));
   useEffect(() => { setPage(0); }, [filters, revision]);
   useEffect(() => {
     let live = true; setLoading(true); setError("");
@@ -23,7 +25,8 @@ function Column({ stage, wsId, filters, states, onSelect, onChanged, revision })
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
       {loading ? <p className="text-xs text-muted-foreground">Loading leads…</p> : <>{!items.length && <p className="text-xs text-muted-foreground py-5 text-center">No leads in this stage</p>}{items.map((lead) => { const values = lead.field_values || {}; return <article key={lead.id} className="rounded-lg border bg-card shadow-sm p-3 space-y-3">
         <button onClick={() => onSelect(lead.id)} className="block w-full text-left rounded focus-visible:ring-2 focus-visible:ring-ring"><p className="text-sm font-semibold break-words">{values.full_name || lead.full_name || values.phone || lead.phone || "Unnamed lead"}</p><p className="text-xs text-muted-foreground mt-1">{values.phone || lead.phone || "No phone"}</p><p className="text-[11px] text-muted-foreground mt-2">{lead.lead_status?.replaceAll("_", " ") || "New lead"}</p>{lead.opportunity?.name && <div className="mt-2 border-t pt-2"><p className="text-xs font-medium truncate">{lead.opportunity.name}</p><p className="text-xs text-primary font-semibold">{formatMoneyMinor(lead.opportunity.total_minor, lead.opportunity.currency)}</p></div>}</button>
-        <select aria-label={`Move ${values.full_name || lead.full_name || "lead"} to stage`} disabled={busy} value={lead.status} onChange={(e) => move(lead, e.target.value)} className="w-full border rounded-md bg-background p-1.5 text-xs">{states.map((state) => <option key={state.key} value={state.key}>{state.label}</option>)}</select>
+        <FollowUpSnapshot snapshot={snapshots[lead.id]} compact />
+        <div className="flex gap-2 items-center"><select aria-label={`Move ${values.full_name || lead.full_name || "lead"} to stage`} disabled={busy} value={lead.status} onChange={(e) => move(lead, e.target.value)} className="min-w-0 flex-1 border rounded-md bg-background p-1.5 text-xs">{states.map((state) => <option key={state.key} value={state.key}>{state.label}</option>)}</select><FollowUpAction wsId={wsId} lead={lead} snapshot={snapshots[lead.id]} compact /></div>
       </article>; })}</>}
     </div>
     {total > 30 && <footer className="p-3 flex justify-between text-xs border-t"><button disabled={!page || loading} onClick={() => setPage((v) => v - 1)}>Previous</button><span>{page + 1} / {Math.ceil(total / 30)}</span><button disabled={(page + 1) * 30 >= total || loading} onClick={() => setPage((v) => v + 1)}>Next</button></footer>}

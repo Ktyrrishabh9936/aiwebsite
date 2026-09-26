@@ -283,7 +283,8 @@ export default function Tasks() {
                 {(t.status === "done" || t.status === "awaiting_approval") && (
                   <button onClick={() => setDetail(t)} data-testid={`task-view-${t.id}`} className="grid place-items-center w-9 h-9 rounded-full border border-border hover:bg-accent" title="View output"><Eye className="w-4 h-4" /></button>
                 )}
-                {["qualification_engine", "crm_reminder"].includes(t.source) && t.status === "pending" && <><Link className="text-sm text-primary px-2" to={`/app/w/${ws.id}/crm`}>Open CRM</Link><button onClick={() => approve(t.id, true)} disabled={busy === t.id} className="px-3 h-9 rounded-full border text-sm disabled:opacity-60">Mark done</button></>}
+                {t.source === "crm_reminder" && t.status === "pending" && <Link className="text-sm text-primary px-2" to={`/app/w/${ws.id}/crm?tab=reminders`}>Record follow-up outcome in CRM</Link>}
+                {t.source === "qualification_engine" && t.status === "pending" && <><Link className="text-sm text-primary px-2" to={`/app/w/${ws.id}/crm`}>Open CRM</Link><button onClick={() => approve(t.id, true)} disabled={busy === t.id} className="px-3 h-9 rounded-full border text-sm disabled:opacity-60">Mark done</button></>}
                 {t.status === "pending" && !["qualification_engine", "crm_reminder"].includes(t.source) && (
                   <button onClick={() => run(t.id)} disabled={busy === t.id} data-testid={`task-run-${t.id}`} className="inline-flex items-center gap-1.5 px-3 h-9 rounded-full bg-primary text-primary-foreground text-sm font-medium disabled:opacity-60">
                     {busy === t.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />} Run

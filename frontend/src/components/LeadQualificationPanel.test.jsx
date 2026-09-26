@@ -45,3 +45,13 @@ test("a call refresh does not reset a just-saved profile or reload the profile l
   expect(api.get.mock.calls.filter(([url]) => url.endsWith("/profiles"))).toHaveLength(1);
   expect(api.get.mock.calls.filter(([url]) => url.endsWith("/history"))).toHaveLength(2);
 });
+
+
+test("agent sees the same qualification results and history without profile management", async () => {
+  await act(async () => root.render(<LeadQualificationPanel lead={{ id: "lead", call_outcome: "CONNECTED" }} readOnly apiBase="/workspaces/workspace/sales-portal/qualification" />));
+  expect(container.textContent).toContain("CONNECTED");
+  expect(container.querySelector("select")).toBeNull();
+  expect(container.textContent).not.toContain("Configure profiles");
+  expect(api.get).toHaveBeenCalledTimes(1);
+  expect(api.get).toHaveBeenCalledWith("/workspaces/workspace/sales-portal/qualification/leads/lead/history");
+});

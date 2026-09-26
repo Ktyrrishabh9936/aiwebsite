@@ -1,11 +1,40 @@
-const CACHE = "arevei-pwa-test-v1";
+const CACHE = "arevei-pwa-test-v2";
 const testPage = new URL("pwa-test.html", self.registration.scope).href;
 const offlinePage = new URL("offline.html", self.registration.scope).href;
 const assets = [testPage, offlinePage, "pwa-icon-192.png", "pwa-icon-512.png", "manifest.json"]
   .map((path) => new URL(path, self.registration.scope).href);
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(assets)));
+  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(assets)).then(() => self.skipWaiting()));
+});
+
+self.addEventListener("push", (event) => {
+  let payload = {};
+  try { payload = event.data?.json() || {}; } catch { /* Show a fallback for an empty payload. */ }
+  event.waitUntil(self.registration.showNotification(payload.title || "Arevei follow-up", {
+    body: payload.body || "You have a follow-up reminder.",
+    icon: new URL("pwa-icon-192.png", self.registration.scope).href,
+    badge: new URL("pwa-icon-192.png", self.registration.scope).href,
+    tag: payload.tag || "arevei-follow-up",
+    data: { url: payload.url || "/app" },
+  }));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    const target = new URL(event.notification.data?.url || "/app", self.registration.scope);
+    if (target.origin !== self.location.origin) return;
+    const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const client of windows) {
+      if (new URL(client.url).origin === target.origin) {
+        await client.navigate(target.href);
+        await client.focus();
+        return;
+      }
+    }
+    await self.clients.openWindow(target.href);
+  })());
 });
 
 self.addEventListener("activate", (event) => {

@@ -91,8 +91,23 @@ def clean_inventory_setup(value):
 
 
 def unit_specs(property_doc):
-    rows = (property_doc.get("inventory_setup") or {}).get("unit_mix") or []
-    if not rows or not all(row.get("start_number") for row in rows):
+    setup = property_doc.get("inventory_setup") or {}
+    rows = setup.get("unit_mix") or []
+    if not rows:
+        count = setup.get("total_units") or 0
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise HTTPException(400, "Unit count must be a whole number")
+        if count > MAX_GENERATED_UNITS:
+            raise HTTPException(400, f"Generate at most {MAX_GENERATED_UNITS} units per property")
+        if count == 0:
+            return []
+        land = property_doc.get("category") == "land" or property_doc.get("container_kind") == "land"
+        price = money_minor(property_doc.get("price") or 0)
+        width = max(2, len(str(count)))
+        return [{"tower": "Site" if land else "Property", "unit_number": f"{'Block' if land else 'Unit'} {number:0{width}d}",
+                 "bhk": "Plot" if land else (property_doc.get("subtype") or "Unit"),
+                 "price_min_minor": price, "price_max_minor": price} for number in range(1, count + 1)]
+    if not all(row.get("start_number") for row in rows):
         return []  # Older aggregate records need numbering before generation.
     if sum(row["count"] for row in rows) > MAX_GENERATED_UNITS:
         raise HTTPException(400, f"Generate at most {MAX_GENERATED_UNITS} flats per project")
@@ -268,7 +283,7 @@ async def generate_property_units(ws_id: str, property_id: str, request: Request
     if not property_doc:
         raise HTTPException(404, "Property not found")
     if not unit_specs(property_doc):
-        raise HTTPException(409, "Set the first flat number for every tower and BHK row before generating flats")
+        raise HTTPException(409, "Set unit numbers or a unit count before generating inventory")
     await sync_property_units(db, ws_id, property_doc)
     count = await db.property_units.count_documents({"workspace_id": ws_id, "property_id": property_id})
     return {"generated_units": count}
@@ -292,6 +307,18 @@ async def list_property_units(ws_id: str, property_id: str, request: Request, to
     total = await db.property_units.count_documents(query)
     docs = await db.property_units.find(query).sort([("tower", 1), ("unit_number", 1)]).skip(offset).limit(limit).to_list(limit)
     return {"items": [output(doc) for doc in docs], "total": total, "currency": workspace_currency(workspace)}
+
+
+@router.get("/{property_id}/units/plan")
+async def property_units_plan(ws_id: str, property_id: str, request: Request):
+    db, workspace = await module_context(request, ws_id)
+    if not ObjectId.is_valid(property_id):
+        raise HTTPException(400, "Invalid property id")
+    property_doc = await db.properties.find_one({"_id": ObjectId(property_id), "workspace_id": ws_id})
+    if not property_doc:
+        raise HTTPException(404, "Property not found")
+    docs = await db.property_units.find({"workspace_id": ws_id, "property_id": property_id}).sort([("tower", 1), ("unit_number", 1)]).limit(MAX_GENERATED_UNITS).to_list(MAX_GENERATED_UNITS)
+    return {"items": [output(doc) for doc in docs], "currency": workspace_currency(workspace)}
 
 
 @router.patch("/{property_id}/units/{unit_id}")

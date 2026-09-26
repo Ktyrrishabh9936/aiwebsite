@@ -28,7 +28,7 @@ test("notifies once when a reminder becomes due and opens reminders on click", a
   try {
     await act(async () => root.render(<Harness navigate={navigate} />));
     expect(MockNotification).toHaveBeenCalledTimes(1);
-    expect(MockNotification.mock.calls[0][0]).toBe("Reminder: Call lead");
+    expect(MockNotification.mock.calls[0][0]).toBe("Follow-up: Call lead");
     await act(async () => window.dispatchEvent(new Event("focus")));
     expect(MockNotification).toHaveBeenCalledTimes(1);
     notification.onclick();

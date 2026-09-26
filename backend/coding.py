@@ -5,6 +5,7 @@ import logging
 import os
 import base64
 import importlib.util
+import re
 from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import APIRouter, Request, HTTPException, Body
@@ -36,6 +37,19 @@ def has_python_package(name):
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def normalize_github_repo_url(value):
+    url = (value or "").strip().rstrip("./")
+    if url.lower().startswith("github.com/"):
+        url = "https://" + url
+    elif url.lower().startswith("www.github.com/"):
+        url = "https://github.com/" + url[len("www.github.com/"):]
+    elif url.lower().startswith("https://www.github.com/"):
+        url = "https://github.com/" + url[len("https://www.github.com/"):]
+    if not re.fullmatch(r"(?:https://github\.com/|git@github\.com:)[^/?#]+/[^/?#]+", url, re.IGNORECASE):
+        raise ValueError("Enter a GitHub repository URL such as https://github.com/owner/repo")
+    return url
 
 
 def validate_chat_attachments(raw):
@@ -258,15 +272,21 @@ def build_coding_router(db):
         p["id"] = str(p.pop("_id"))
         return p
 
-    async def provision(pid, template):
+    async def provision(pid, template, repo_url=None, branch=None):
+        sb = None
         try:
             sb = await _daytona().create_sandbox(pid)
-            for path, content in SCAFFOLDS.get(template, SCAFFOLDS["blank"]).items():
-                await _daytona().write_file(sb, path, content)
+            if repo_url:
+                await _daytona().import_github_repo(sb, normalize_github_repo_url(repo_url), branch, os.environ.get("GITHUB_TOKEN"))
+            else:
+                for path, content in SCAFFOLDS.get(template, SCAFFOLDS["blank"]).items():
+                    await _daytona().write_file(sb, path, content)
             await db.code_projects.update_one({"_id": ObjectId(pid)},
-                                              {"$set": {"sandbox_id": sb.id, "sandbox_status": "ready"}})
+                                              {"$set": {"sandbox_id": sb.id, "sandbox_status": "ready", "error": None}})
         except Exception as e:
             logger.exception("provision failed")
+            if sb:
+                await _daytona().delete_sandbox(sb.id)
             await db.code_projects.update_one({"_id": ObjectId(pid)},
                                               {"$set": {"sandbox_status": "error", "error": str(e)[:300]}})
 
@@ -300,11 +320,11 @@ def build_coding_router(db):
             return {"configured": False, "reason": "Unknown provider"}
 
         coding_agent = _coding_agent()
-        visible_models = [m for m in coding_agent.CODING_MODELS if m.get("provider") != "bedrock"]
-        statuses = {provider: provider_status(provider) for provider in ("openai", "openrouter", "nvidia")}
-        models = [{**m, **provider_status(m.get("provider"))} for m in visible_models]
+        statuses = {provider: provider_status(provider) for provider in ("bedrock", "openai", "openrouter", "nvidia")}
+        models = [{**m, **provider_status(m.get("provider"))} for m in coding_agent.CODING_MODELS]
         return {"models": models, "default": coding_agent.DEFAULT_CODING_MODEL,
                 "providers": {
+                    "bedrock": {**statuses["bedrock"], "env": "AWS_BEARER_TOKEN_BEDROCK (or AWS_ACCESS_KEY_ID)"},
                     "openai": {**statuses["openai"], "env": "OPENAI_API_KEY"},
                     "openrouter": {**statuses["openrouter"], "env": "OPENROUTER_API_KEY"},
                     "nvidia": {**statuses["nvidia"], "env": "NVIDIA_NIM_API_KEY"},
@@ -346,9 +366,10 @@ def build_coding_router(db):
     @router.post("/projects/import/github")
     async def import_github(request: Request, body: dict = Body(...)):
         user = await user_of(request)
-        repo_url = (body.get("repo_url") or "").strip()
-        if not repo_url:
-            raise HTTPException(400, "repo_url required")
+        try:
+            repo_url = normalize_github_repo_url(body.get("repo_url"))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         doc = {
             "user_id": str(user["_id"]),
             "name": body.get("name") or repo_url.rstrip("/").split("/")[-1].replace(".git", "") or "GitHub project",
@@ -366,18 +387,7 @@ def build_coding_router(db):
         res = await db.code_projects.insert_one(doc)
         pid = str(res.inserted_id)
 
-        async def import_bg():
-            try:
-                sb = await _daytona().create_sandbox(pid)
-                await _daytona().import_github_repo(sb, repo_url, body.get("branch"), os.environ.get("GITHUB_TOKEN"))
-                await db.code_projects.update_one({"_id": ObjectId(pid)},
-                                                  {"$set": {"sandbox_id": sb.id, "sandbox_status": "ready"}})
-            except Exception as e:
-                logger.exception("github import failed")
-                await db.code_projects.update_one({"_id": ObjectId(pid)},
-                                                  {"$set": {"sandbox_status": "error", "error": str(e)[:300]}})
-
-        asyncio.create_task(import_bg())
+        asyncio.create_task(provision(pid, "github", repo_url, body.get("branch")))
         doc["_id"] = res.inserted_id
         return out(doc)
 
@@ -391,6 +401,31 @@ def build_coding_router(db):
     async def get_project(pid: str, request: Request):
         user = await user_of(request)
         proj = await owned(pid, user)
+        return out(proj)
+
+    @router.post("/projects/{pid}/retry")
+    async def retry_project(pid: str, request: Request, body: dict = Body(default={})):
+        user = await user_of(request)
+        proj = await owned(pid, user)
+        if proj.get("sandbox_status") != "error" or proj.get("sandbox_id"):
+            raise HTTPException(409, "Only failed projects without a sandbox can be retried")
+        repo_url = proj.get("repo_url")
+        branch = proj.get("branch")
+        if proj.get("template") == "github":
+            try:
+                repo_url = normalize_github_repo_url(body.get("repo_url", repo_url))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            branch = (body.get("branch", branch) or "").strip() or None
+        await db.code_projects.update_one(
+            {"_id": proj["_id"]},
+            {"$set": {"sandbox_status": "provisioning", "error": None, "repo_url": repo_url, "branch": branch}},
+        )
+        asyncio.create_task(provision(pid, proj.get("template") or "blank", repo_url, branch))
+        proj["sandbox_status"] = "provisioning"
+        proj["error"] = None
+        proj["repo_url"] = repo_url
+        proj["branch"] = branch
         return out(proj)
 
     @router.get("/projects/{pid}/blog-context")

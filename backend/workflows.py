@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
+from crm import require_workspace_access
 from models import Workflow, now_iso
 from bson import ObjectId
 
-router = APIRouter(prefix="/workspaces/{ws_id}/workflows")
+router = APIRouter(prefix="/workspaces/{ws_id}/workflows", dependencies=[Depends(require_workspace_access)])
 
 def doc_out(doc):
     if not doc:

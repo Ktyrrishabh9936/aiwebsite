@@ -11,6 +11,54 @@ from sales_modules import router as sales_router
 from tests.test_qualification_integration import isolated
 
 
+def test_land_blocks_have_individual_statuses_in_plan(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "property-flow-test-long-signing-secret")
+
+    async def run(db):
+        user_id, ws_id = ObjectId(), ObjectId()
+        await db.users.insert_one({"_id": user_id, "email": "builder@example.test"})
+        await db.workspaces.insert_one({"_id": ws_id, "user_id": str(user_id), "modules": {"real_estate": True}})
+        app = FastAPI()
+        app.state.db = db
+        app.include_router(properties_router)
+        app.include_router(sales_router)
+        app.include_router(crm_router)
+        base = f"/workspaces/{ws_id}/properties"
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            client.headers["Authorization"] = "Bearer " + create_access_token(str(user_id), "builder@example.test")
+            response = await client.post(base, json={"name": "Five Block Site", "category": "land", "container_kind": "land",
+                "attributes": {"area_sqft": "5000"}, "price": "1000000", "inventory_setup": {"mode": "manual", "total_units": 5}})
+            assert response.status_code == 200, response.text
+            property_id = response.json()["id"]
+            plan = (await client.get(base + f"/{property_id}/units/plan")).json()["items"]
+            assert len(plan) == 5
+            assert {unit["unit_number"] for unit in plan} == {f"Block {number:02d}" for number in range(1, 6)}
+            assert all(unit["status"] == "available" for unit in plan)
+            offerings = (await client.get(f"/workspaces/{ws_id}/crm/offerings")).json()["items"]
+            assert len(offerings) == 5
+            assert all(item["kind"] == "unit" and "Block" in item["name"] for item in offerings)
+            response = await client.patch(base + f"/{property_id}/units/{plan[0]['id']}", json={"status": "reserved", "expected_updated_at": plan[0]["updated_at"]})
+            assert response.status_code == 200, response.text
+            updated = (await client.get(base + f"/{property_id}/units/plan")).json()["items"]
+            assert [unit["status"] for unit in updated].count("reserved") == 1
+            assert [unit["status"] for unit in updated].count("available") == 4
+            settings = await ensure_crm_settings(db, str(ws_id))
+            lead = build_manual_lead(str(ws_id), {"field_values": {"phone": "+14155550123", "full_name": "Block buyer"}}, settings)
+            await db.crm_leads.insert_one(lead)
+            lead_id = str(lead["_id"])
+            response = await client.patch(f"/workspaces/{ws_id}/crm/leads/{lead_id}/opportunity", json={
+                "module": "real_estate", "item_id": plan[1]["id"], "quantity": 1, "amount": "1000000"})
+            assert response.status_code == 200, response.text
+            response = await client.post(f"/workspaces/{ws_id}/crm/leads/{lead_id}/convert", json={"conversion_type": "single_payment"})
+            assert response.status_code == 200, response.text
+            statuses = [unit["status"] for unit in (await client.get(base + f"/{property_id}/units/plan")).json()["items"]]
+            assert statuses.count("reserved") == 1
+            assert statuses.count("sold") == 1
+            assert statuses.count("available") == 3
+
+    asyncio.run(isolated(run))
+
+
 def test_saved_flat_count_can_generate_missing_inventory(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "property-flow-test-long-signing-secret")
 

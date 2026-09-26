@@ -100,7 +100,13 @@ def build_auth_router(db):
             )
         except TypeError:  # Lightweight test doubles may only accept a query.
             workspace = await workspaces.find_one({"user_id": str(user["_id"])})
-        return str(workspace["_id"]) if workspace else None
+        if workspace:
+            return str(workspace["_id"])
+        if getattr(db, "workspace_memberships", None) is None:
+            return None
+        from workspace_access import accessible_workspaces
+        available = await accessible_workspaces(db, user)
+        return available[0]["id"] if available else None
 
     async def _issue(user, response: Response):
         token = create_access_token(str(user["_id"]), user["email"])

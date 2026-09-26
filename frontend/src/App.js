@@ -1,6 +1,6 @@
 import "./App.css";
 import { lazy, Suspense } from "react";
-import { BrowserRouter, Routes, Route, Navigate, Outlet } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from "react-router-dom";
 import { Toaster } from "./components/ui/sonner";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -8,6 +8,7 @@ import { ThemeProvider } from "./context/ThemeContext";
 const Landing = lazy(() => import("./pages/Landing"));
 const CheckDemo = lazy(() => import("./pages/CheckDemo"));
 const Login = lazy(() => import("./pages/Login"));
+const JoinWorkspace = lazy(() => import("./pages/JoinWorkspace"));
 const Register = lazy(() => import("./pages/Register"));
 const ForgotPassword = lazy(() => import("./pages/ForgotPassword"));
 const ResetPassword = lazy(() => import("./pages/ResetPassword"));
@@ -35,9 +36,11 @@ const ProductsServices = lazy(() => import("./pages/sections/ProductsServices"))
 const Settings = lazy(() => import("./pages/sections/Settings"));
 
 function Protected() {
-  const { user, ready } = useAuth();
+  const location = useLocation();
+  const { user, ready, connectionError, retryAuth } = useAuth();
   if (!ready) return <div className="min-h-screen grid place-items-center text-muted-foreground">Loading…</div>;
-  if (!user) return <Navigate to="/login" replace />;
+  if (connectionError) return <div className="min-h-screen grid place-items-center p-6"><div role="alert" className="max-w-sm rounded-xl border bg-card p-6 text-center space-y-3"><h1 className="text-lg font-semibold">Cannot reach the server</h1><p className="text-sm text-muted-foreground">Your session is saved. Check the local backend, then try again.</p><button type="button" onClick={retryAuth} className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground">Try again</button></div></div>;
+  if (!user) return <Navigate to="/login" state={{ from: location.pathname + location.search }} replace />;
   return <Outlet />;
 }
 
@@ -52,6 +55,7 @@ function App() {
               <Route path="/" element={<Landing />} />
               <Route path="/check-demo" element={<CheckDemo />} />
               <Route path="/login" element={<Login />} />
+              <Route path="/join/:token" element={<JoinWorkspace />} />
               <Route path="/register" element={<Register />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route path="/reset-password" element={<ResetPassword />} />

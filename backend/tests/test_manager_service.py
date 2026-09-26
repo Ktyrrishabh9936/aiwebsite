@@ -66,7 +66,8 @@ def server_functions(*names, **globals_):
     functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names]
     for node in functions:
         node.decorator_list = []
-    scope = {"re": re, "oid": ObjectId, "HTTPException": HTTPException, **globals_}
+    from ai_usage import usage_scope
+    scope = {"re": re, "oid": ObjectId, "HTTPException": HTTPException, "usage_scope": usage_scope, **globals_}
     exec(compile(ast.Module(body=functions, type_ignores=[]), "server.py", "exec"), scope)
     return scope
 
@@ -162,7 +163,7 @@ def test_existing_crm_reader_preserves_workspace_scope_and_real_analytics(monkey
         assert summaries[0]["name"] == "Rahul"
         assert analytics == crm.build_crm_analytics(leads)
         assert db.crm_leads.queries[0]["workspace_id"] == str(WORKSPACE)
-        assert "$or" in db.crm_leads.queries[0]  # Existing trash exclusion.
+        assert db.crm_leads.queries[0]["deleted_at"] is None  # Excludes trash and includes legacy missing fields.
     asyncio.run(run())
 
 

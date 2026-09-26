@@ -20,6 +20,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import useReminderNotifications from "../hooks/useReminderNotifications";
+import SalesPortal from "./SalesPortal";
 
 const kindDot = { success: "bg-primary", approval: "bg-amber-500", error: "bg-destructive", info: "bg-muted-foreground" };
 const workspaceStatus = {
@@ -35,8 +36,8 @@ export default function WorkspaceLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  useReminderNotifications(wsId, navigate);
   const [ws, setWs] = useState(null);
+  useReminderNotifications(ws?.access_role === "owner" || ws && !ws.access_role ? wsId : null, navigate);
   const [notes, setNotes] = useState([]);
   const [workspaces, setWorkspaces] = useState([]);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
@@ -76,7 +77,7 @@ export default function WorkspaceLayout() {
   const loadBootstrap = useCallback(async () => {
     try {
       const data = await queryClient.fetchQuery({
-        queryKey: ["workspace-bootstrap", wsId],
+        queryKey: ["workspace-bootstrap", user?.id, wsId],
         queryFn: async () => (await api.get(`/workspaces/${wsId}/bootstrap`)).data,
         staleTime: 60_000,
       });
@@ -89,7 +90,7 @@ export default function WorkspaceLayout() {
       setNotFound(true);
       return null;
     }
-  }, [queryClient, wsId]);
+  }, [queryClient, user?.id, wsId]);
 
   const loadNotes = useCallback(() => {
     api.get(`/workspaces/${wsId}/notifications`).then((r) => setNotes(r.data)).catch(() => {});
@@ -116,7 +117,7 @@ export default function WorkspaceLayout() {
   const changeModel = async (modelId) => {
     const r = await api.patch(`/workspaces/${wsId}`, { model_id: modelId });
     setWs(r.data);
-    queryClient.setQueryData(["workspace-bootstrap", wsId], (current) => current ? { ...current, workspace: r.data } : current);
+    queryClient.setQueryData(["workspace-bootstrap", user?.id, wsId], (current) => current ? { ...current, workspace: r.data } : current);
     toast.success("Model updated");
   };
 
@@ -139,13 +140,15 @@ export default function WorkspaceLayout() {
   };
 
   const signOut = () => {
+    queryClient.clear();
     logout();
     navigate("/");
   };
   const isBlogEditor = /\/blogs\/[^/]+$/.test(location.pathname);
 
   if (notFound) return <div className="min-h-screen grid place-items-center text-muted-foreground">Workspace not found. <Link to="/app" className="text-primary ml-1">Back</Link></div>;
-  if (!ws) return <div className="min-h-screen grid place-items-center text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin" /></div>;
+  if (!ws || ws.id !== wsId) return <div className="min-h-screen grid place-items-center text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin" /></div>;
+  if (["sales_agent", "channel_partner"].includes(ws.access_role)) return <SalesPortal key={wsId} workspace={ws} workspaces={workspaces} />;
 
   return (
     <div className={`h-[100dvh] overflow-hidden ${agentMode ? "" : collapsed ? "md:pl-[76px]" : "md:pl-64"}`}>

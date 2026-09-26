@@ -24,6 +24,8 @@ export default function Projects() {
   const nav = useNavigate();
   const [projects, setProjects] = useState([]);
   const [models, setModels] = useState([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState(false);
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [projectOpen, setProjectOpen] = useState(false);
@@ -36,16 +38,27 @@ export default function Projects() {
   const [creatingProject, setCreatingProject] = useState(false);
 
   const load = () => api.get("/code/projects").then((r) => setProjects(r.data)).finally(() => setLoading(false));
+  const loadModels = () => {
+    setModelsLoading(true);
+    setModelsError(false);
+    return api.get("/code/models").then((r) => {
+      const nextModels = r.data.models || [];
+      setModels(nextModels);
+      setProjectModelId((current) => nextModels.some((m) => m.id === current) ? current : r.data.default || nextModels[0]?.id || "");
+      setTemplates(r.data.templates || []);
+    }).catch(() => setModelsError(true)).finally(() => setModelsLoading(false));
+  };
 
   useEffect(() => {
     load();
-    api.get("/code/models").then((r) => {
-      setModels(r.data.models || []);
-      setProjectModelId(r.data.default || "gpt-4o");
-      setTemplates(r.data.templates || []);
-    }).catch(() => {});
+    loadModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (projectOpen) loadModels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectOpen]);
 
   useEffect(() => {
     if (!projects.some((p) => p.sandbox_status === "provisioning")) return undefined;
@@ -88,7 +101,7 @@ export default function Projects() {
           <h1 className="font-display text-3xl font-black tracking-tight">Projects</h1>
           <p className="text-muted-foreground mt-1">Create and open coding projects for the AI development workspace.</p>
         </div>
-        <ProjectDialog open={projectOpen} setOpen={setProjectOpen} source={source} setSource={setSource} name={name} setName={setName} repoUrl={repoUrl} setRepoUrl={setRepoUrl} branch={branch} setBranch={setBranch} templates={templates} template={template} setTemplate={setTemplate} currentModel={currentModel} models={models} setModelId={setProjectModelId} creating={creatingProject} onSubmit={createProject} />
+        <ProjectDialog open={projectOpen} setOpen={setProjectOpen} source={source} setSource={setSource} name={name} setName={setName} repoUrl={repoUrl} setRepoUrl={setRepoUrl} branch={branch} setBranch={setBranch} templates={templates} template={template} setTemplate={setTemplate} currentModel={currentModel} models={models} modelsLoading={modelsLoading} modelsError={modelsError} refreshModels={loadModels} setModelId={setProjectModelId} creating={creatingProject} onSubmit={createProject} />
       </div>
 
       {loading ? (
@@ -129,7 +142,8 @@ export default function Projects() {
 function ProjectDialog(props) {
   const {
     open, setOpen, source, setSource, name, setName, repoUrl, setRepoUrl, branch,
-    setBranch, templates, template, setTemplate, currentModel, models, setModelId,
+    setBranch, templates, template, setTemplate, currentModel, models, modelsLoading,
+    modelsError, refreshModels, setModelId,
     creating, onSubmit
   } = props;
   return (
@@ -176,7 +190,7 @@ function ProjectDialog(props) {
           )}
           <div className="space-y-2">
             <Label>Coding model</Label>
-            <DropdownMenu>
+            <DropdownMenu onOpenChange={(isOpen) => { if (isOpen) refreshModels(); }}>
               <DropdownMenuTrigger asChild>
                 <button type="button" data-testid="code-model-picker" className="w-full inline-flex items-center justify-between px-4 h-11 rounded-md border border-border text-sm">
                   <span>{currentModel?.label || "Select"}</span>
@@ -184,6 +198,8 @@ function ProjectDialog(props) {
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent className="w-64">
+                {modelsLoading && <div className="px-2 py-1.5 text-xs text-muted-foreground">Refreshing models...</div>}
+                {modelsError && <div className="px-2 py-1.5 text-xs text-destructive">Could not refresh models. Reopen to retry.</div>}
                 {models.map((m) => (
                   <DropdownMenuItem key={m.id} disabled={!m.configured} onClick={() => setModelId(m.id)} title={m.reason || ""} className="flex justify-between cursor-pointer">
                     <span>{m.label}</span><span className={m.configured ? "text-[10px] uppercase text-primary" : "text-[10px] uppercase text-amber-500"}>{m.configured ? m.tier : "setup needed"}</span>

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Code2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import api, { API } from "../lib/api";
+import api, { API, formatError } from "../lib/api";
 import { useTheme } from "../context/ThemeContext";
 import { AgentChat, CenterBlock, FilesPanel, TopBar } from "../components/code/CodeParts";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
@@ -21,6 +21,9 @@ export default function CodeWorkspace() {
   const [showFiles, setShowFiles] = useState(true);
   const [previewUrl, setPreviewUrl] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [retryingSetup, setRetryingSetup] = useState(false);
+  const [retryRepoUrl, setRetryRepoUrl] = useState("");
+  const [retryBranch, setRetryBranch] = useState("");
   const [termLines, setTermLines] = useState(["Welcome to the sandbox terminal. Type a command below."]);
   const [termInput, setTermInput] = useState("");
   const [messages, setMessages] = useState([]);
@@ -86,6 +89,13 @@ export default function CodeWorkspace() {
   }, [pid]);
 
   useEffect(() => { chatRef.current?.scrollTo(0, chatRef.current.scrollHeight); }, [messages]);
+
+  useEffect(() => {
+    if (project?.sandbox_status === "error" && project.template === "github") {
+      setRetryRepoUrl(project.repo_url || "");
+      setRetryBranch(project.branch || "");
+    }
+  }, [project?.sandbox_status, project?.id, project?.repo_url, project?.branch, project?.template]);
 
   const saveFile = async () => {
     if (!activeFile) return;
@@ -213,9 +223,37 @@ export default function CodeWorkspace() {
     }
   };
 
+  const retrySetup = async () => {
+    setRetryingSetup(true);
+    try {
+      const payload = project.template === "github" ? { repo_url: retryRepoUrl, branch: retryBranch } : {};
+      const response = await api.post(`/code/projects/${pid}/retry`, payload);
+      setProject(response.data);
+      let status = response.data.sandbox_status;
+      while (status === "provisioning") {
+        await new Promise((resolve) => setTimeout(resolve, 3500));
+        const updated = await loadProject();
+        status = updated.sandbox_status;
+      }
+      if (status === "ready") {
+        const files = await loadFiles();
+        openFile(firstFile(files) || "src/App.jsx");
+        toast.success("Project ready");
+      } else {
+        toast.error("Project setup failed again. Check the error and retry.");
+      }
+    } catch (error) {
+      toast.error(formatError(error.response?.data?.detail));
+    } finally {
+      setRetryingSetup(false);
+    }
+  };
+
   if (!project) return <div className="min-h-screen grid place-items-center"><Loader2 className="w-6 h-6 animate-spin text-primary" /></div>;
   if (project.sandbox_status === "provisioning")
     return <div className="min-h-screen grid place-items-center text-center"><div><Loader2 className="w-8 h-8 animate-spin text-primary mx-auto mb-4" /><div className="font-display text-xl font-bold">Provisioning cloud sandbox…</div><p className="text-muted-foreground mt-1">Setting up your Daytona workspace.</p></div></div>;
+  if (project.sandbox_status === "error")
+    return <div className="min-h-screen grid place-items-center p-6"><div className="w-full max-w-lg space-y-4 rounded-xl border border-destructive/30 bg-card p-6"><h1 className="font-display text-xl font-bold">Project setup failed</h1><p className="text-sm text-muted-foreground break-words">{project.error || "The cloud sandbox could not be created."}</p>{project.template === "github" && <div className="space-y-3"><label className="block space-y-1 text-sm font-medium">GitHub repository URL<input value={retryRepoUrl} onChange={(event) => setRetryRepoUrl(event.target.value)} className="w-full rounded-md border bg-background px-3 py-2 font-normal" /></label><label className="block space-y-1 text-sm font-medium">Branch (optional)<input value={retryBranch} onChange={(event) => setRetryBranch(event.target.value)} className="w-full rounded-md border bg-background px-3 py-2 font-normal" /></label><p className="text-xs text-muted-foreground">Leave branch blank to use the repository default.</p></div>}<div className="flex justify-end gap-3"><button type="button" onClick={backToProjects} className="rounded-md border px-4 py-2 text-sm">Back to projects</button><button type="button" onClick={retrySetup} disabled={retryingSetup} className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-60">Retry setup</button></div></div></div>;
 
   const currentModel = models.find((m) => m.id === project.model_id);
   const turns = messages.filter((m) => m.role === "user").length;

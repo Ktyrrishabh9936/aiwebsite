@@ -21,24 +21,26 @@ async def offerings_for(db, ws_id, workspace):
     modules = workspace_modules(workspace)
     items = []
     if modules["real_estate"]:
+        unit_property_ids = set(await db.property_units.distinct("property_id", {"workspace_id": ws_id}))
         async for row in db.properties.find({"workspace_id": ws_id, "status": {"$in": ["available", "reserved"]}}).sort("name", 1):
-            # Apartment projects organize flats; the flat is the saleable item.
-            if row.get("subtype") == "Apartment" and row.get("container_kind") == "project":
+            # A property with generated inventory is sold through its individual units.
+            if str(row["_id"]) in unit_property_ids or row.get("subtype") == "Apartment" and row.get("container_kind") == "project":
                 continue
             items.append({"id": str(row["_id"]), "module": "real_estate", "kind": "property", "name": row.get("name", "Property"),
                           "description": row.get("location", ""), "price": row.get("price", "0"), "price_minor": safe_money_minor(row.get("price", "0")),
                           "available_quantity": 1})
-        projects = {str(row["_id"]): row async for row in db.properties.find({"workspace_id": ws_id}, {"name": 1, "status": 1})}
+        projects = {str(row["_id"]): row async for row in db.properties.find({"workspace_id": ws_id}, {"name": 1, "status": 1, "category": 1, "subtype": 1})}
         async for unit in db.property_units.find({"workspace_id": ws_id, "status": "available"}).sort([("tower", 1), ("unit_number", 1)]):
             project = projects.get(unit.get("property_id"))
             if not project or project.get("status") not in {"available", "reserved"}:
                 continue
+            unit_kind = "Block" if project.get("category") == "land" else "Flat" if project.get("subtype") == "Apartment" else "Unit"
             items.append({"id": str(unit["_id"]), "module": "real_estate", "kind": "unit",
                           "project_id": unit["property_id"], "project_name": project.get("name", "Apartment"),
                           "tower": unit["tower"], "unit_number": unit["unit_number"], "bhk": unit["bhk"],
                           "listing_type": unit.get("listing_type", "sale"),
                           "listing_version": unit.get("listing_version", 1),
-                          "name": f"{project.get('name', 'Apartment')} / {unit['tower']} / Flat {unit['unit_number']} / {unit['bhk']}",
+                          "name": f"{project.get('name', 'Property')} / {unit['unit_number']} / {unit_kind}",
                           "price_minor": unit.get("asking_price_minor", 0), "available_quantity": 1})
     if modules["agency"]:
         query = {"workspace_id": ws_id, "status": "active", "$or": [{"kind": "service"}, {"kind": "product", "stock_quantity": {"$gt": 0}}]}

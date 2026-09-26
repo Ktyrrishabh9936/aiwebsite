@@ -2,20 +2,21 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import CrmPipeline from "./CrmPipeline";
 import api from "../lib/api";
-jest.mock("../lib/api", () => ({ __esModule: true, formatError: (v) => v, default: { get: jest.fn(), patch: jest.fn() } }));
+jest.mock("../lib/api", () => ({ __esModule: true, formatError: (v) => v, default: { get: jest.fn(), post: jest.fn(), patch: jest.fn() } }));
 let container, root;
 beforeEach(() => { global.IS_REACT_ACT_ENVIRONMENT = true; container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container); });
 afterEach(() => { act(() => root.unmount()); container.remove(); jest.clearAllMocks(); });
 test("loads stages independently and saves a stage change", async () => {
   const lead = { id: "lead", full_name: "Diya", status: "new" };
-  api.get.mockImplementation(async (url, { params }) => url.endsWith("pipeline-value")
+  api.get.mockImplementation(async (url, { params }) => url.endsWith("follow-ups/snapshots") ? ({ data: { lead: { stage: "new", last_response: "Asked for pricing", next_action: null, follow_up_pending: true } } }) : url.endsWith("pipeline-value")
     ? ({ data: { value_minor: 250000, currency: "USD" } })
     : ({ data: { items: params.status === "new" ? [lead] : [], total: params.status === "new" ? 1 : 0 } }));
   api.patch.mockResolvedValue({ data: { ...lead, status: "won" } });
   const open = jest.fn(), changed = jest.fn();
   await act(async () => root.render(<CrmPipeline wsId="ws" states={[{ key: "new", label: "New" }, { key: "won", label: "Won" }]} search="" statusFilter="all" onSelect={open} onChanged={changed} revision={0} />));
-  expect(api.get).toHaveBeenCalledTimes(3);
+  expect(api.get).toHaveBeenCalledTimes(4);
   expect(container.textContent).toContain("$2,500");
+  expect(container.textContent).toContain("Asked for pricing");
   await act(async () => container.querySelector("article button").click());
   expect(open).toHaveBeenCalledWith("lead");
   await act(async () => { const select = container.querySelector("select"); select.value = "won"; select.dispatchEvent(new Event("change", { bubbles: true })); });

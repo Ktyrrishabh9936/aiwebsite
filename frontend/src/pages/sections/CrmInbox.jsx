@@ -1,6 +1,15 @@
+import AuthenticatedDocumentLink from "../../components/AuthenticatedDocumentLink";
+import LeadNotes from "../../components/LeadNotes";
+import QualificationSummary from "../../components/QualificationSummary";
 import MetaAttribution from "../../components/MetaAttribution";
 import CrmPipeline from "../../components/CrmPipeline";
 import CrmReminders from "../../components/CrmReminders";
+import FollowUpAction, { FollowUpSnapshot, useFollowUpSnapshots } from "../../components/FollowUpAction";
+import LeadWhatsAppCompose from "../../components/LeadWhatsAppCompose";
+import LeadSmsCompose from "../../components/LeadSmsCompose";
+import TwilioSmsSettings from "../../components/TwilioSmsSettings";
+import SalesTeam, { SalesAssignment, useSalesPeople } from "../../components/SalesTeam";
+import ShareLead from "../../components/ShareLead";
 import OpportunitySelector from "../../components/OpportunitySelector";
 import LeadQualificationPanel from "../../components/LeadQualificationPanel";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
@@ -21,7 +30,7 @@ const DEFAULT_STAGES = [];
 const PAYMENT_METHODS = ["Cash", "Bank Transfer", "UPI", "Cheque", "Card", "Other"];
 const PAYMENT_STATUSES = ["Paid", "Pending"];
 const ORG_FIELDS = ["company_name", "logo_url", "address", "phone", "email", "website", "tax_number", "bank_details", "authorized_signatory", "receipt_prefix", "invoice_prefix"];
-const DETAIL_TABS = ["Details", "Qualification", "Reminders", "Payments", "Receipts", "Invoice", "Notes"];
+const DETAIL_TABS = ["Details", "Qualification", "Follow-up", "Payments", "Receipts", "Invoice", "Notes"];
 const DEFAULT_AGENT_MAPPINGS_TEXT = JSON.stringify({
   workspace_id: "workspace_id",
   lead_id: "lead_id",
@@ -210,6 +219,8 @@ export default function CrmInbox() {
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [campaignQuery, setCampaignQuery] = useState("");
+  const [salesFilters, setSalesFilters] = useState({});
+  const salesPeople = useSalesPeople(wsId);
   const [createdFrom, setCreatedFrom] = useState("");
   const [createdBefore, setCreatedBefore] = useState("");
   const [debouncedLeadFilters, setDebouncedLeadFilters] = useState({});
@@ -230,11 +241,12 @@ export default function CrmInbox() {
 
   const activeFields = useMemo(() => (settings.fields || []).filter((field) => field.active !== false), [settings.fields]);
   const leadFilters = useMemo(() => ({
+    ...salesFilters,
     ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
     ...(campaignQuery.trim() ? { campaign: campaignQuery.trim() } : {}),
     ...(createdFrom ? { created_from: new Date(createdFrom).toISOString() } : {}),
     ...(createdBefore ? { created_before: new Date(new Date(createdBefore).getTime() + 60_000).toISOString() } : {}),
-  }), [debouncedSearch, campaignQuery, createdFrom, createdBefore]);
+  }), [debouncedSearch, campaignQuery, createdFrom, createdBefore, salesFilters]);
   const states = useMemo(() => {
     const base = settings.states?.length ? settings.states : [{ key: "new", label: "New", color: "blue" }];
     const hasAiQualified = base.some((state) => state.key === "ai_qualified");
@@ -266,6 +278,18 @@ export default function CrmInbox() {
       status: summary.status === "completed" ? "Paid" : "Pending",
     }));
   };
+
+  useEffect(() => {
+    const id = new URLSearchParams(location.search).get("lead");
+    if (!id || loading) return;
+    let active = true;
+    api.get(`/workspaces/${wsId}/crm/leads/${encodeURIComponent(id)}`).then(({ data }) => {
+      if (active) { selectLead(data); setActiveTab("records"); }
+    }).catch((error) => { if (active) toast.error(formatError(error.response?.data?.detail)); });
+    return () => { active = false; };
+    // Load the full lead once bootstrap fields are available, including leads on other pages.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search, wsId, loading]);
 
   const refreshSelectedLead = (lead, fields = activeFields) => {
     const previous = lastServerValues.current;
@@ -399,10 +423,10 @@ export default function CrmInbox() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wsId, selectedLead?.id, selectedLead?.qualification_call?.status]);
 
-  const createLead = async () => {
+  const createLead = async ({ triggerAiCall = true, salesAssignment = {} } = {}) => {
     try {
       setSaving(true);
-      const r = await api.post(`/workspaces/${wsId}/crm/leads`, { field_values: createValues });
+      const r = await api.post(`/workspaces/${wsId}/crm/leads`, { field_values: createValues, trigger_ai_call: triggerAiCall, sales_assignment: salesAssignment });
       const call = r.data?.qualification_call || {};
       if (call.status === "failed") {
         toast.error(`Lead created, but the call failed: ${call.last_error || "Check the lead's call status"}`);
@@ -415,7 +439,7 @@ export default function CrmInbox() {
       } else if (call.status === "started") {
         toast.success("Lead created. Qualification call started");
       } else {
-        toast.success("Lead created");
+        toast.success(triggerAiCall ? "Lead created" : "Lead created without an AI call");
       }
       setShowCreateLead(false);
       setRecordView("active");
@@ -553,8 +577,9 @@ export default function CrmInbox() {
     if (!selectedLead) return;
     try {
       setSaving(true);
-      const r = await api.post(`/workspaces/${wsId}/crm/leads/${selectedLead.id}/notes`, { body });
-      toast.success("Note added");
+      const note = typeof body === "string" ? { body } : body;
+      const r = await api.post(`/workspaces/${wsId}/crm/leads/${selectedLead.id}/notes`, note);
+      toast.success(note.source === "manual_whatsapp" ? "WhatsApp message marked sent" : "Note added");
       mergeLead(r.data);
       return r.data;
     } catch (e) {
@@ -755,14 +780,16 @@ export default function CrmInbox() {
         </div>
         <div className="flex rounded-lg border bg-card p-1 w-fit max-w-full overflow-x-auto" role="group" aria-label="CRM sections">
           <TabButton active={activeTab === "records"} onClick={() => setActiveTab("records")} icon={Users} label="Records" />
-          <TabButton active={activeTab === "reminders"} onClick={() => { setActiveTab("reminders"); setSelectedLead(null); }} icon={Calendar} label="Reminders" />
+          <TabButton active={activeTab === "reminders"} onClick={() => { setActiveTab("reminders"); setSelectedLead(null); }} icon={Calendar} label="Follow-up" />
           <TabButton active={activeTab === "settings"} onClick={() => setActiveTab("settings")} icon={Settings} label="Settings" />
+          <TabButton active={activeTab === "sales-team"} onClick={() => setActiveTab("sales-team")} icon={Users} label="Sales team" />
           <TabButton active={activeTab === "performance"} onClick={() => setActiveTab("performance")} icon={CheckCircle2} label="Performance" />
         </div>
       </div>
 
-      {activeTab === "reminders" ? <CrmReminders wsId={wsId} onOpenLead={async (id) => { await openLead(id); setActiveTab("records"); }} /> : activeTab === "performance" ? <Suspense fallback={<div className="rounded-xl border bg-card p-8 text-sm text-muted-foreground">Loading performance…</div>}><CrmPerformance wsId={wsId} states={states} /></Suspense> : activeTab === "settings" ? (
+      {activeTab === "sales-team" ? <SalesTeam wsId={wsId} /> : activeTab === "reminders" ? <CrmReminders wsId={wsId} onOpenLead={async (id) => { await openLead(id); setActiveTab("records"); }} /> : activeTab === "performance" ? <Suspense fallback={<div className="rounded-xl border bg-card p-8 text-sm text-muted-foreground">Loading performance…</div>}><CrmPerformance wsId={wsId} states={states} /></Suspense> : activeTab === "settings" ? (
         <SettingsPanel
+          wsId={wsId}
           fields={settings.fields || []}
           states={states}
           organization={settings.organization || {}}
@@ -813,9 +840,12 @@ export default function CrmInbox() {
             <label className="text-xs font-medium text-muted-foreground">Created through
               <input type="datetime-local" min={createdFrom || undefined} value={createdBefore} onChange={(e) => { setCreatedBefore(e.target.value); setPage(1); }} className="mt-1 w-full h-10 px-2 rounded-lg border bg-background text-sm text-foreground" />
             </label>
-            <button type="button" disabled={!searchQuery && !campaignQuery && !createdFrom && !createdBefore} onClick={() => { setSearchQuery(""); setCampaignQuery(""); setCreatedFrom(""); setCreatedBefore(""); setPage(1); }} className="h-10 px-3 rounded-lg border bg-background text-sm font-medium hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed">Clear filters</button>
+            <button type="button" disabled={!searchQuery && !campaignQuery && !createdFrom && !createdBefore && !Object.values(salesFilters).some(Boolean)} onClick={() => { setSearchQuery(""); setCampaignQuery(""); setCreatedFrom(""); setCreatedBefore(""); setSalesFilters({}); setPage(1); }} className="h-10 px-3 rounded-lg border bg-background text-sm font-medium hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed">Clear filters</button>
           </div>
 
+          <div className="grid sm:grid-cols-3 gap-3">
+            {[["sales_agent_id", "Sales agent", "sales_agent"], ["channel_partner_id", "Channel partner", "channel_partner"], ["introduced_by_id", "Lead brought by", null]].map(([key, label, role]) => <label key={key} className="text-xs font-medium text-muted-foreground">{label}<select value={salesFilters[key] || ""} onChange={(event) => { setSalesFilters({ ...salesFilters, [key]: event.target.value }); setPage(1); }} className="mt-1 h-10 w-full rounded-lg border bg-background px-3 text-sm text-foreground"><option value="">All</option>{salesPeople.filter((person) => !role || person.role === role).map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></label>)}
+          </div>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-1 rounded-lg bg-muted p-1" role="group" aria-label="Record views">{["list", "kanban"].map((view) => <button key={view} aria-pressed={recordsLayout === view} onClick={() => { setRecordsLayout(view); if (view === "kanban") setRecordView("active"); }} className={`min-h-9 px-4 rounded-md text-sm font-medium ${recordsLayout === view ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>{view === "list" ? "List" : "Pipeline"}</button>)}</div>
             <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-muted-foreground">
@@ -826,7 +856,7 @@ export default function CrmInbox() {
           <div className={`grid gap-6 items-start ${selectedLead ? "xl:grid-cols-[minmax(0,1fr)_560px]" : "grid-cols-1"}`}>
             <div className="space-y-3 min-w-0">
               {recordsLayout === "kanban" && recordView !== "trash" ? <CrmPipeline wsId={wsId} states={states} filters={debouncedLeadFilters} statusFilter={statusFilter} onSelect={openLead} revision={pipelineRevision} onChanged={(lead) => { setPipelineRevision((v) => v + 1); setSelectedLead((old) => old?.id === lead.id ? lead : old); loadAll(); }} /> : <>
-              <LeadTable leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} canCallWithAI={hasCallableAgent} onSelect={openLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
+              <LeadTable wsId={wsId} leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} canCallWithAI={hasCallableAgent} onSelect={openLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
               <Pagination page={page} totalPages={totalPages} total={pagination.total} onPage={setPage} />
               </>}
             </div>
@@ -868,6 +898,7 @@ export default function CrmInbox() {
           </div>
           {showCreateLead && (
             <CreateLeadDialog
+              people={salesPeople}
               fields={activeFields}
               values={createValues}
               setValues={setCreateValues}
@@ -922,52 +953,65 @@ function AgentCallSelector({ agents, selectedAgentId, setSelectedAgentId }) {
   );
 }
 
-function LeadTable({ leads, fields, states, selectedLead, loading, trashed, callingLeadId, canCallWithAI, onSelect, onStatus, onTrash, onRestore, onCall }) {
+function LeadTable({ wsId, leads, fields, states, selectedLead, loading, trashed, callingLeadId, canCallWithAI, onSelect, onStatus, onTrash, onRestore, onCall }) {
   const primaryFields = fields.slice(0, 4);
+  const snapshots = useFollowUpSnapshots(wsId, trashed ? [] : leads.map((lead) => lead.id));
   return (
     <div className={`rounded-xl border bg-card overflow-hidden ${loading ? "opacity-60" : ""}`}>
       <div className="overflow-x-auto">
         <table className="w-full text-left border-collapse text-sm">
-          <thead><tr className="border-b bg-muted/30"><th className="p-4 font-semibold text-muted-foreground">Lead Details</th><th className="p-4 font-semibold text-muted-foreground">Status</th><th className="p-4 font-semibold text-muted-foreground hidden lg:table-cell">{trashed ? "Trash Expiry" : "Created"}</th><th className="p-4 w-10"></th></tr></thead>
-          <tbody className="divide-y">
-            {leads.length === 0 ? <tr><td colSpan="4" className="p-8 text-center text-muted-foreground">{loading ? "Loading leads..." : "No leads found."}</td></tr> : leads.map((lead) => {
+          <thead><tr className="border-b bg-muted/30"><th className="p-4 font-semibold text-foreground/80">Lead Details</th><th className="p-4 font-semibold text-foreground/80">Stage</th><th className="p-4 font-semibold text-foreground/80 hidden lg:table-cell">{trashed ? "Trash Expiry" : "Created"}</th><th className="p-4 w-10"></th></tr></thead>
+          {leads.length === 0 ? <tbody><tr><td colSpan="4" className="p-8 text-center text-muted-foreground">{loading ? "Loading leads..." : "No leads found."}</td></tr></tbody> : leads.map((lead, index) => {
               const values = valuesFrom(lead, fields);
               const state = states.find((s) => s.key === lead.status) || states[0];
               const qualification = lead.qualification_call || {};
               const qualificationStatus = lead.qualification_status || qualification.qualification_status;
               const isJunk = qualification.qualification_category === "junk";
               const scheduledFor = qualification.status === "scheduled" && qualification.scheduled_for;
+              const leadName = values.full_name || values.phone || values.email || "Unnamed Lead";
+              const summaryFields = primaryFields.filter((field) => values[field.key] && String(values[field.key]) !== String(leadName));
               return (
-                <tr key={lead.id} onClick={() => onSelect(lead)} className={`hover:bg-accent/40 cursor-pointer transition-colors ${selectedLead?.id === lead.id ? "bg-accent/50" : ""}`}>
+                <tbody key={lead.id} className="group">
+                <tr onClick={() => onSelect(lead)} className={`group-hover:bg-accent/10 cursor-pointer transition-colors ${selectedLead?.id === lead.id ? "bg-accent/20" : "bg-card"}`}>
                   <td className="p-4">
-                    <div className="font-semibold text-foreground flex items-center gap-2">{values.full_name || values.phone || values.email || "Unnamed Lead"}{lead.customer_status === "customer" && <span className="text-[10px] uppercase px-1.5 py-0.5 rounded border border-emerald-500/30 text-emerald-500">Customer</span>}{isJunk && <span className="text-[10px] uppercase px-1.5 py-0.5 rounded border border-destructive/30 text-destructive">Junk</span>}{qualificationStatus && <span className={`text-[10px] uppercase px-1.5 py-0.5 rounded border ${qualificationStatus === "qualified" ? "border-emerald-500/30 text-emerald-500" : qualificationStatus === "not_qualified" ? "border-destructive/30 text-destructive" : "border-border text-muted-foreground"}`}>{qualificationStatus.replace("_", " ")}</span>}</div>
-                    <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground mt-2">{primaryFields.map((field) => values[field.key] ? <span key={field.key}>{field.label}: {String(values[field.key])}</span> : null)}</div>
-                    {scheduledFor && <div className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-primary"><PhoneCall className="w-3 h-3" /> Scheduled {new Date(scheduledFor).toLocaleString()}</div>}
+                    <div className="flex flex-wrap items-center gap-2"><button type="button" onClick={(e) => { e.stopPropagation(); onSelect(lead); }} className="text-left text-base font-semibold text-foreground underline-offset-4 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={`Open details for ${leadName}`}>{leadName}</button>{lead.customer_status === "customer" && <span className="text-[11px] uppercase px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-600 dark:text-emerald-400">Customer</span>}{isJunk && <span className="text-[11px] uppercase px-1.5 py-0.5 rounded border border-destructive/40 text-destructive">Junk</span>}{qualificationStatus && <span className={`text-[11px] uppercase px-1.5 py-0.5 rounded border ${qualificationStatus === "qualified" ? "border-emerald-500/40 text-emerald-600 dark:text-emerald-400" : qualificationStatus === "not_qualified" ? "border-destructive/40 text-destructive" : "border-border text-muted-foreground"}`}>{qualificationStatus.replace("_", " ")}</span>}</div>
+                    {summaryFields.length > 0 && <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5 text-sm text-foreground/70">{summaryFields.map((field) => <span key={field.key}><span className="text-muted-foreground">{field.label}:</span> {String(values[field.key])}</span>)}</div>}
+                    {(lead.sales_assignment?.sales_agent_name || lead.sales_assignment?.channel_partner_name) && <p className="mt-1.5 text-xs text-muted-foreground">{[lead.sales_assignment.sales_agent_name && `Agent: ${lead.sales_assignment.sales_agent_name}`, lead.sales_assignment.channel_partner_name && `Partner: ${lead.sales_assignment.channel_partner_name}`].filter(Boolean).join(" ? ")}</p>}
+                    {scheduledFor && <div className="mt-2 inline-flex items-center gap-1.5 text-sm text-primary"><PhoneCall className="w-4 h-4" /> Scheduled {new Date(scheduledFor).toLocaleString()}</div>}
                   </td>
                   <td className="p-4" onClick={(e) => e.stopPropagation()}>
                     {trashed ? (
                       <span className={`px-2.5 py-1 rounded-md border text-xs font-semibold ${stateClasses[state.color] || stateClasses.slate}`}>{state.label}</span>
                     ) : (
-                      <select value={lead.status} onChange={(e) => onStatus(lead, e.target.value)} className={`px-2.5 py-1 rounded-md border text-xs font-semibold focus:outline-none ${stateClasses[state.color] || stateClasses.slate}`}>{states.map((s) => <option key={s.key} value={s.key} className="bg-background text-foreground">{s.label}</option>)}</select>
+                      <select aria-label={`Stage for ${values.full_name || values.phone || "lead"}`} value={lead.status} onChange={(e) => onStatus(lead, e.target.value)} className={`min-h-9 px-2.5 py-1 rounded-md border text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${stateClasses[state.color] || stateClasses.slate}`}>{states.map((s) => <option key={s.key} value={s.key} className="bg-background text-foreground">{s.label}</option>)}</select>
                     )}
                   </td>
-                  <td className="p-4 text-xs text-muted-foreground hidden lg:table-cell">{new Date(trashed ? lead.delete_after : lead.created_at).toLocaleDateString()}</td>
+                  <td className="p-4 text-sm text-foreground/75 hidden lg:table-cell">{new Date(trashed ? lead.delete_after : lead.created_at).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}</td>
                   <td className="p-4 text-right" onClick={(e) => e.stopPropagation()}>
                     {trashed ? (
-                      <button onClick={() => onRestore(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
+                      <button onClick={() => onRestore(lead)} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title="Restore lead" aria-label="Restore lead"><RotateCcw className="w-4 h-4" /></button>
                     ) : (
                       <div className="flex items-center justify-end gap-2">
-                        <button onClick={() => onCall(lead)} disabled={!values.phone || callingLeadId === lead.id || isJunk || !canCallWithAI} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-40" title={isJunk ? "Junk leads cannot be called" : !canCallWithAI ? "Connect an AI agent first" : values.phone ? "Call with AI" : "Phone number required"}>
+                        <button onClick={() => onCall(lead)} disabled={!values.phone || callingLeadId === lead.id || isJunk || !canCallWithAI} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40" title={isJunk ? "Junk leads cannot be called" : !canCallWithAI ? "Connect an AI agent first" : values.phone ? "Call with AI" : "Phone number required"} aria-label={`Call ${values.full_name || values.phone || "lead"} with AI`}>
                           {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
                         </button>
-                        <button onClick={() => onTrash(lead)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
+                        <button onClick={() => onTrash(lead)} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-foreground/70 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title="Move lead to trash" aria-label={`Move ${values.full_name || values.phone || "lead"} to trash`}><Trash2 className="w-4 h-4" /></button>
                       </div>
                     )}
                   </td>
                 </tr>
+                {!trashed && <tr onClick={() => onSelect(lead)} className={`cursor-pointer transition-colors group-hover:bg-accent/20 ${selectedLead?.id === lead.id ? "bg-accent/25" : "bg-muted/20"}`}>
+                  <td colSpan="4" className="px-4 py-2.5">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1"><p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Follow-up</p><FollowUpSnapshot snapshot={snapshots[lead.id]} /></div>
+                      <FollowUpAction wsId={wsId} lead={lead} snapshot={snapshots[lead.id]} compact />
+                    </div>
+                  </td>
+                </tr>}
+                {index < leads.length - 1 && <tr aria-hidden="true"><td colSpan="4" className="h-3 p-0 bg-background" /></tr>}
+                </tbody>
               );
             })}
-          </tbody>
         </table>
       </div>
     </div>
@@ -978,7 +1022,8 @@ function LeadDetail(props) {
   const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, addLeadNote, deleteLeadNote, callingLeadId, canCallWithAI, cancellingCallId, callLead, cancelScheduledCall, trashLead, restoreLead, close, wsId, onOpportunityUpdated } = props;
   const [detailTab, setDetailTab] = useState("Details");
   const [activeStageId, setActiveStageId] = useState("");
-  const [noteDraft, setNoteDraft] = useState("");
+  const [whatsappOpen, setWhatsappOpen] = useState(false);
+  const [smsOpen, setSmsOpen] = useState(false);
   const isCustomer = lead.customer_status === "customer" || lead.status === "won";
   const isTrashed = Boolean(lead.deleted_at);
   useEffect(() => {
@@ -1067,12 +1112,7 @@ function LeadDetail(props) {
     const nextStage = updated?.payment_plan?.stages?.find((s) => numericAmount(s.due_amount) > 0);
     if (nextStage?.id) setActiveStageId(nextStage.id);
   };
-  const sendNote = async () => {
-    const body = noteDraft.trim();
-    if (!body) return;
-    const updated = await addLeadNote(body);
-    if (updated) setNoteDraft("");
-  };
+
 
   return (
     <aside aria-label="Lead details" className="fixed inset-0 z-50 overflow-y-auto overscroll-contain bg-background p-4 xl:sticky xl:top-4 xl:z-auto xl:max-h-[calc(100dvh-130px)] xl:bg-transparent xl:p-0">
@@ -1084,6 +1124,8 @@ function LeadDetail(props) {
               <button onClick={() => restoreLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
             ) : (
               <>
+                <button type="button" onClick={() => setWhatsappOpen(true)} className="inline-flex h-9 items-center gap-1.5 rounded-lg border bg-background px-2.5 text-xs font-semibold text-emerald-500 hover:bg-accent" title="Compose WhatsApp message" aria-label={`Message ${values.full_name || values.phone || "lead"} on WhatsApp`}><MessageSquare className="h-4 w-4" /><span className="hidden sm:inline">WhatsApp</span></button>
+                <button type="button" onClick={() => setSmsOpen(true)} className="inline-flex h-9 items-center gap-1.5 rounded-lg border bg-background px-2.5 text-xs font-semibold text-primary hover:bg-accent" title="Send SMS" aria-label={`Send SMS to ${values.full_name || values.phone || "lead"}`}><Send className="h-4 w-4" /><span className="hidden sm:inline">SMS</span></button>
                 <button onClick={() => callLead(lead)} disabled={saving || !values.phone || callingLeadId === lead.id || isJunkLead || !canCallWithAI} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title={isJunkLead ? "Junk leads cannot be called" : !canCallWithAI ? "Connect an AI agent first" : values.phone ? "Call with AI" : "Phone number required"}>
                   {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
                 </button>
@@ -1093,20 +1135,24 @@ function LeadDetail(props) {
             <button onClick={close} className="p-1 rounded-lg hover:bg-accent text-muted-foreground" title="Close details"><XCircle className="w-5 h-5" /></button>
           </div>
         </div>
+        <LeadWhatsAppCompose open={whatsappOpen} onOpenChange={setWhatsappOpen} phone={values.phone || lead.phone} leadName={values.full_name || lead.full_name} onMarkSent={addLeadNote} />
+        <LeadSmsCompose open={smsOpen} onOpenChange={setSmsOpen} wsId={wsId} lead={lead} />
         {isTrashed && <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs text-destructive">This lead is in trash and can be restored until {new Date(lead.delete_after).toLocaleDateString()}.</div>}
         <div className="sticky top-[76px] z-10 flex flex-wrap gap-1 rounded-lg border bg-card p-1" role="group" aria-label="Lead sections">
           {DETAIL_TABS.map((tab) => <button key={tab} aria-pressed={detailTab === tab} onClick={() => setDetailTab(tab)} className={`px-3 h-9 rounded-md text-xs font-semibold whitespace-nowrap ${detailTab === tab ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{tab}</button>)}
         </div>
-        {detailTab === "Qualification" && <><LeadQualificationPanel key={lead.id} lead={lead} /><QualificationSummary communication={communication} qualification={qualification} saving={saving || cancellingCallId === lead.id} onCancel={() => cancelScheduledCall(lead)} /></>}
-        {detailTab === "Reminders" && (isTrashed ? <p className="text-sm text-muted-foreground">Restore this lead to set reminders.</p> : <CrmReminders wsId={wsId} leadId={lead.id} />)}
+        {detailTab === "Qualification" && <>{lead.auto_qualification_enabled === false && <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">Automatic AI call was skipped when this lead was added. You can still use Call with AI when needed.</p>}<LeadQualificationPanel key={lead.id} lead={lead} /><QualificationSummary communication={communication} qualification={qualification} saving={saving || cancellingCallId === lead.id} onCancel={() => cancelScheduledCall(lead)} /></>}
+        {detailTab === "Follow-up" && (isTrashed ? <p className="text-sm text-muted-foreground">Restore this lead to plan follow-ups.</p> : <CrmReminders wsId={wsId} leadId={lead.id} />)}
         {detailTab === "Payments" && !isCustomer && <p className="text-sm text-muted-foreground">Convert this lead to a customer in Details to manage payments.</p>}
 
         {detailTab === "Details" && (
           <section className="space-y-4">
             <MetaAttribution lead={lead} wsId={wsId} onUpdate={setLead} />
+            {!isTrashed && <SalesAssignment wsId={wsId} lead={lead} onUpdated={setLead} />}
+            {!isTrashed && <ShareLead wsId={wsId} lead={lead} onUpdated={setLead} />}
             {!isTrashed && <OpportunitySelector wsId={wsId} lead={lead} onUpdated={onOpportunityUpdated} />}
             <div className="grid sm:grid-cols-2 gap-3">
-              {fields.map((field) => <DynamicField key={field.key} field={field} value={values[field.key] || ""} onChange={(v) => setField(field.key, v)} />)}
+              {fields.map((field) => field.key === "assigned_salesperson" && lead.sales_assignment && "sales_agent_id" in lead.sales_assignment ? <ReadOnlyValue key={field.key} label={field.label} value={lead.sales_assignment.sales_agent_id ? lead.sales_assignment.sales_agent_name || "Assigned agent" : "Unassigned"} /> : <DynamicField key={field.key} field={field} value={values[field.key] || ""} onChange={(v) => setField(field.key, v)} />)}
               <label className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground uppercase">State</span><select value={lead.status} onChange={(e) => setStatus(e.target.value)} className="w-full h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary">{states.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}</select></label>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -1161,8 +1207,8 @@ function LeadDetail(props) {
                     <textarea value={activeStage.description || ""} onChange={(e) => updateStage(activeStageIndex, "description", e.target.value)} placeholder="Transaction description" rows={2} className="w-full px-3 py-2 rounded-lg border bg-background text-sm" />
                     <div className="flex flex-wrap gap-2">
                       <button onClick={() => makeStageReceipt(activeStage)} disabled={saving || activeStage.status === "paid" || (activeStageIndex > 0 && paymentPlan.stages[activeStageIndex - 1]?.status !== "paid") || !numericAmount(activeStage.amount) || numericAmount(activeStage.amount) > activeBalance} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><ReceiptText className="w-4 h-4" /> Generate Receipt & Continue</button>
-                      {activeStageReceipt && <a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${activeStageReceipt.id}/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Receipt</a>}
-                      {activeStageReceipt && <a href={receiptDownloadUrl(wsId, lead.id, activeStageReceipt.id)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download Receipt</a>}
+                      {activeStageReceipt && <AuthenticatedDocumentLink href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${activeStageReceipt.id}/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Receipt</AuthenticatedDocumentLink>}
+                      {activeStageReceipt && <AuthenticatedDocumentLink href={receiptDownloadUrl(wsId, lead.id, activeStageReceipt.id)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download Receipt</AuthenticatedDocumentLink>}
                     </div>
                   </div>
                 )}
@@ -1189,8 +1235,8 @@ function LeadDetail(props) {
             <textarea value={receiptForm.description} onChange={(e) => setReceiptForm({ ...receiptForm, description: e.target.value })} placeholder="Payment description" rows={2} className="w-full px-3 py-2 rounded-lg border bg-background text-sm" />
             <div className="flex flex-wrap gap-2">
               <button onClick={() => createReceipt({ ...receiptForm, amount: receiptForm.paid_amount, payment_stage: "Single Payment" })} disabled={saving || !numericAmount(receiptForm.total_amount) || !numericAmount(receiptForm.paid_amount) || numericAmount(receiptForm.paid_amount) > numericAmount(receiptForm.total_amount) - numericAmount(receiptForm.existing_paid)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><ReceiptText className="w-4 h-4" /> Generate Receipt</button>
-              {singlePaymentReceipt && <a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${singlePaymentReceipt.id}/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Receipt</a>}
-              {singlePaymentReceipt && <a href={receiptDownloadUrl(wsId, lead.id, singlePaymentReceipt.id)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download Receipt</a>}
+              {singlePaymentReceipt && <AuthenticatedDocumentLink href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${singlePaymentReceipt.id}/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Receipt</AuthenticatedDocumentLink>}
+              {singlePaymentReceipt && <AuthenticatedDocumentLink href={receiptDownloadUrl(wsId, lead.id, singlePaymentReceipt.id)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download Receipt</AuthenticatedDocumentLink>}
             </div>
           </section>
         )}
@@ -1198,64 +1244,23 @@ function LeadDetail(props) {
         {detailTab === "Receipts" && isCustomer && (
           <section className="space-y-3">
             <h4 className="font-bold flex items-center gap-2"><ReceiptText className="w-4 h-4 text-primary" /> Receipt History</h4>
-            <div className="grid gap-2">{(lead.receipts || []).length === 0 ? <div className="text-xs text-muted-foreground p-3 rounded-lg border border-dashed">No payment transactions yet.</div> : (lead.receipts || []).map((receipt) => <div key={receipt.id} className="flex items-center justify-between gap-3 p-3 rounded-lg border bg-background hover:bg-accent text-sm"><a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${receipt.id}/html`} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate"><span>{receipt.receipt_number} - {receipt.transaction_id || "No transaction ID"} - {receipt.payment_stage}</span></a><div className="flex items-center gap-2"><a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${receipt.id}/html`} target="_blank" rel="noreferrer" className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Open receipt"><ExternalLink className="w-4 h-4" /></a><a href={receiptDownloadUrl(wsId, lead.id, receipt.id)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Download receipt"><Download className="w-4 h-4" /></a></div></div>)}</div>
+            <div className="grid gap-2">{(lead.receipts || []).length === 0 ? <div className="text-xs text-muted-foreground p-3 rounded-lg border border-dashed">No payment transactions yet.</div> : (lead.receipts || []).map((receipt) => <div key={receipt.id} className="flex items-center justify-between gap-3 p-3 rounded-lg border bg-background hover:bg-accent text-sm"><AuthenticatedDocumentLink href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${receipt.id}/html`} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate"><span>{receipt.receipt_number} - {receipt.transaction_id || "No transaction ID"} - {receipt.payment_stage}</span></AuthenticatedDocumentLink><div className="flex items-center gap-2"><AuthenticatedDocumentLink href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${receipt.id}/html`} target="_blank" rel="noreferrer" className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Open receipt"><ExternalLink className="w-4 h-4" /></AuthenticatedDocumentLink><AuthenticatedDocumentLink href={receiptDownloadUrl(wsId, lead.id, receipt.id)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Download receipt"><Download className="w-4 h-4" /></AuthenticatedDocumentLink></div></div>)}</div>
           </section>
         )}
 
-        {detailTab === "Notes" && (
-          <section className="space-y-3">
-            <h4 className="font-bold flex items-center gap-2"><MessageSquare className="w-4 h-4 text-primary" /> Lead Notes</h4>
-            <div className="h-[360px] overflow-y-auto rounded-lg border bg-background p-3 space-y-3">
-              {(lead.lead_notes || []).length === 0 ? (
-                <div className="h-full grid place-items-center text-center text-xs text-muted-foreground">No notes yet.</div>
-              ) : (lead.lead_notes || []).map((note) => (
-                <div key={note.id} className="flex justify-end">
-                  <div className="max-w-[86%] rounded-2xl rounded-br-md bg-primary text-primary-foreground px-3 py-2 shadow-sm">
-                    {note.source === "call_agent" && (
-                      <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[10px] font-semibold uppercase opacity-80">
-                        <PhoneCall className="w-3 h-3" />
-                        <span>{note.call_provider === "plivo" ? "AI call" : note.call_provider || "call"}</span>
-                        {note.call_direction && <span>{note.call_direction}</span>}
-                        {note.status && <span>{note.status}</span>}
-                        {note.duration && <span>{note.duration}s</span>}
-                      </div>
-                    )}
-                    {note.source === "lead_context_agent" && (
-                      <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[10px] font-semibold uppercase opacity-80">
-                        <Bot className="w-3 h-3" /><span>Lead Context Agent</span>
-                        {note.context_source && <span>{note.context_source.replaceAll("_", " ")}</span>}
-                      </div>
-                    )}
-                    <div className="text-sm whitespace-pre-wrap leading-relaxed">{note.body}</div>
-                    <StructuredCallDetails note={note} />
-                    {note.recording_url && <a href={note.recording_url} target="_blank" rel="noreferrer" className="mt-1 block text-[10px] underline underline-offset-2 opacity-90">Open recording</a>}
-                    <div className="mt-1 flex items-center justify-end gap-2 text-[10px] opacity-80">
-                      <span>{note.author}</span>
-                      <span>{new Date(note.created_at).toLocaleString()}</span>
-                      <button onClick={() => deleteLeadNote(note.id)} disabled={saving} className="opacity-80 hover:opacity-100 disabled:opacity-40" title="Remove note"><Trash2 className="w-3 h-3" /></button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div className="flex items-end gap-2">
-              <textarea value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} placeholder="Add an internal lead note" rows={3} className="flex-1 px-3 py-2 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
-              <button onClick={sendNote} disabled={saving || !noteDraft.trim()} className="grid place-items-center w-11 h-11 rounded-full bg-primary text-primary-foreground disabled:opacity-50" title="Send note"><Send className="w-4 h-4" /></button>
-            </div>
-          </section>
-        )}
+        {detailTab === "Notes" && <LeadNotes key={lead.id} notes={lead.lead_notes || []} saving={saving} onAdd={addLeadNote} onDelete={deleteLeadNote} />}
 
         {detailTab === "Invoice" && isCustomer && (
           <section className="space-y-3">
             <h4 className="font-bold flex items-center gap-2"><FileText className="w-4 h-4 text-primary" /> Final Invoice</h4>
             <div className="text-xs text-muted-foreground rounded-lg border bg-background p-3">{canInvoice ? "All payment stages are paid. Final invoice can be generated." : "Generate receipts and mark every payment stage paid to enable final invoice."}</div>
-            <div className="flex flex-wrap gap-2"><button onClick={createInvoice} disabled={saving || !canInvoice} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><FileText className="w-4 h-4" /> Generate Final Invoice</button>{lead.final_invoice?.id && <a href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/final-invoice/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Invoice</a>}{lead.final_invoice?.id && <a href={finalInvoiceDownloadUrl(wsId, lead.id)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download PDF</a>}</div>
+            <div className="flex flex-wrap gap-2"><button onClick={createInvoice} disabled={saving || !canInvoice} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><FileText className="w-4 h-4" /> Generate Final Invoice</button>{lead.final_invoice?.id && <AuthenticatedDocumentLink href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/final-invoice/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Invoice</AuthenticatedDocumentLink>}{lead.final_invoice?.id && <AuthenticatedDocumentLink href={finalInvoiceDownloadUrl(wsId, lead.id)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download PDF</AuthenticatedDocumentLink>}</div>
             {lead.final_invoice?.id && (
               <div className="grid gap-2">
                 {invoiceReceipts.map((receipt) => (
                   <div key={receipt.id} className="flex items-center justify-between gap-3 p-3 rounded-lg border bg-background text-sm">
                     <span className="min-w-0 flex-1 truncate">{receipt.receipt_number} - {receipt.payment_stage}</span>
-                    <a href={receiptDownloadUrl(wsId, lead.id, receipt.id)} className="inline-flex items-center gap-2 px-3 h-8 rounded-lg border bg-background hover:bg-accent text-xs font-semibold"><Download className="w-4 h-4" /> Download Receipt</a>
+                    <AuthenticatedDocumentLink href={receiptDownloadUrl(wsId, lead.id, receipt.id)} className="inline-flex items-center gap-2 px-3 h-8 rounded-lg border bg-background hover:bg-accent text-xs font-semibold"><Download className="w-4 h-4" /> Download Receipt</AuthenticatedDocumentLink>
                   </div>
                 ))}
               </div>
@@ -1269,80 +1274,10 @@ function LeadDetail(props) {
   );
 }
 
-function listItems(value) {
-  if (Array.isArray(value)) return value.filter(Boolean).map(String);
-  if (value && typeof value === "object") return Object.entries(value).filter(([, v]) => v != null && String(v).trim()).map(([k, v]) => `${k}: ${v}`);
-  if (typeof value === "string" && value.trim()) return value.split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
-  return [];
-}
 
-function QualificationSummary({ communication, qualification, saving, onCancel }) {
-  const hasSummary = communication.latest_summary || qualification.summary || qualification.status || qualification.scheduled_for;
-  if (!hasSummary) return null;
-  const status = communication.last_call_status || qualification.status || "updated";
-  const recording = communication.last_recording_url || qualification.recording_url;
-  const callTimestamp = qualification.call_timestamp;
-  const category = communication.qualification_category || qualification.qualification_category;
-  const qualificationStatus = communication.qualification_status || qualification.qualification_status;
-  const score = communication.qualification_score ?? qualification.qualification_score;
-  const scheduledFor = qualification.status === "scheduled" && qualification.scheduled_for;
-  const categoryClass = category === "hot" ? "border-red-500/30 text-red-500 bg-red-500/10" : category === "warm" ? "border-amber-500/30 text-amber-500 bg-amber-500/10" : category === "cold" ? "border-blue-500/30 text-blue-500 bg-blue-500/10" : category === "junk" ? "border-destructive/30 text-destructive bg-destructive/10" : "border-border text-muted-foreground bg-muted";
-  return (
-    <section className="rounded-lg border bg-background p-4 space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <h4 className="font-bold flex items-center gap-2"><PhoneCall className="w-4 h-4 text-primary" /> Qualification</h4>
-        <div className="flex flex-wrap justify-end gap-2">
-          {category && <span className={`px-2 py-1 rounded-md border text-[11px] font-semibold uppercase ${categoryClass}`}>{category}</span>}
-          {qualificationStatus && <span className={`px-2 py-1 rounded-md border text-[11px] font-semibold uppercase ${qualificationStatus === "qualified" ? "border-emerald-500/30 text-emerald-500 bg-emerald-500/10" : qualificationStatus === "not_qualified" ? "border-destructive/30 text-destructive bg-destructive/10" : "border-border text-muted-foreground bg-muted"}`}>{qualificationStatus.replace("_", " ")}</span>}
-          {score != null && score !== "" && <span className="px-2 py-1 rounded-md border bg-card text-[11px] font-semibold">{score}%</span>}
-          <span className="px-2 py-1 rounded-md border bg-muted text-[11px] font-semibold uppercase text-muted-foreground">{status}</span>
-        </div>
-      </div>
-      {scheduledFor && (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs">
-          <span className="font-semibold text-primary">Scheduled for {new Date(scheduledFor).toLocaleString()}</span>
-          <button onClick={onCancel} disabled={saving} className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border bg-background hover:bg-accent font-semibold disabled:opacity-50" title="Cancel scheduled call">
-            {saving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Ban className="w-3.5 h-3.5" />}
-            Cancel Call
-          </button>
-        </div>
-      )}
-      {(communication.latest_summary || qualification.summary) && <p className="text-sm leading-relaxed">{communication.latest_summary || qualification.summary}</p>}
-      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        {communication.total_call_count ? <span>{communication.total_call_count} call{communication.total_call_count === 1 ? "" : "s"} tracked</span> : null}
-        {(communication.disconnection_reason || qualification.disconnection_reason) && <span>Reason: {communication.disconnection_reason || qualification.disconnection_reason}</span>}
-        {(communication.last_duration || qualification.duration) && <span>{communication.last_duration || qualification.duration}s</span>}
-        {callTimestamp && <span>{new Date(callTimestamp).toLocaleString()}</span>}
-        {recording && <a href={recording} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border bg-card hover:bg-accent text-foreground font-semibold"><ExternalLink className="w-3.5 h-3.5" /> Open recording</a>}
-      </div>
-    </section>
-  );
-}
-
-function StructuredCallDetails({ note }) {
-  const answers = listItems(note.answers);
-  const collected = listItems(note.collected_information);
-  const pending = listItems(note.pending_discussion);
-  const steps = listItems(note.recommended_next_steps);
-  const hasDetails = answers.length || collected.length || pending.length || steps.length || note.transcript;
-  if (!hasDetails) return null;
-  return (
-    <div className="mt-2 space-y-2 rounded-lg bg-primary-foreground/10 p-2 text-[11px] leading-relaxed">
-      <InlineDetails label="Answers" items={answers} />
-      <InlineDetails label="Collected" items={collected} />
-      <InlineDetails label="Pending" items={pending} />
-      <InlineDetails label="Next" items={steps} />
-      {note.transcript && <details><summary className="cursor-pointer font-semibold">Transcript</summary><div className="mt-1 whitespace-pre-wrap opacity-90">{note.transcript}</div></details>}
-    </div>
-  );
-}
-
-function InlineDetails({ label, items }) {
-  if (!items.length) return null;
-  return <div><span className="font-semibold">{label}: </span>{items.slice(0, 6).join("; ")}</div>;
-}
-
-function CreateLeadDialog({ fields, values, setValues, saving, onCreate, onClose }) {
+function CreateLeadDialog({ fields, values, setValues, saving, onCreate, onClose, people = [] }) {
+  const [skipAiCall, setSkipAiCall] = useState(false);
+  const [salesAssignment, setSalesAssignment] = useState({ acquisition_channel: "direct" });
   const requiredMissing = fields.some((field) => field.required && !String(values[field.key] || "").trim());
   const setField = (key, value) => setValues({ ...values, [key]: value });
   return (
@@ -1357,10 +1292,16 @@ function CreateLeadDialog({ fields, values, setValues, saving, onCreate, onClose
         </div>
         <div className="p-5 grid sm:grid-cols-2 gap-3 max-h-[70vh] overflow-y-auto">
           {fields.map((field) => <DynamicField key={field.key} field={field} value={values[field.key] || ""} onChange={(v) => setField(field.key, v)} />)}
+          {[["sales_agent_id", "Sales agent", "sales_agent"], ["channel_partner_id", "Channel partner", "channel_partner"], ["introduced_by_id", "Lead brought by", null]].map(([key, label, role]) => <label key={key} className="text-sm">{label}<select value={salesAssignment[key] || ""} onChange={(event) => setSalesAssignment({ ...salesAssignment, [key]: event.target.value })} className="mt-1 h-10 w-full rounded-lg border bg-background px-2"><option value="">None</option>{people.filter((person) => person.active && (!role || person.role === role)).map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></label>)}
+          <label className="text-sm">Acquisition channel<select value={salesAssignment.acquisition_channel} onChange={(event) => setSalesAssignment({ ...salesAssignment, acquisition_channel: event.target.value })} className="mt-1 h-10 w-full rounded-lg border bg-background px-2"><option value="direct">Direct enquiry</option><option value="marketing">Marketing</option><option value="referral">Referral</option></select></label>
+          <label className="sm:col-span-2 flex items-start gap-3 rounded-lg border bg-muted/20 p-3 cursor-pointer">
+            <input type="checkbox" checked={skipAiCall} onChange={(event) => setSkipAiCall(event.target.checked)} className="mt-1 h-4 w-4 accent-primary" />
+            <span className="space-y-1"><span className="block text-sm font-semibold">Do not trigger an AI call</span><span className="block text-xs text-muted-foreground">Use for leads already contacted or added from another channel. You can still start a call manually later.</span></span>
+          </label>
         </div>
         <div className="p-5 border-t flex flex-wrap items-center justify-end gap-2">
           <button onClick={onClose} className="px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold">Cancel</button>
-          <button onClick={onCreate} disabled={saving || requiredMissing} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><Plus className="w-4 h-4" /> Add Lead</button>
+          <button onClick={() => onCreate({ triggerAiCall: !skipAiCall, salesAssignment })} disabled={saving || requiredMissing} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><Plus className="w-4 h-4" /> Add Lead</button>
         </div>
       </div>
     </div>
@@ -1520,7 +1461,7 @@ function PlivoAgentsPanel({ agents, selectedAgentId, onSave, onSelect, onToggle,
   );
 }
 
-function SettingsPanel({ fields, states, organization, templates, plivoAgents, selectedAgentId, newField, setNewField, newState, setNewState, templateDraft, setTemplateDraft, addField, updateField, removeField, addState, saveStates, saveOrganization, saveTemplate, savePlivoAgent, selectPlivoAgent, togglePlivoAgent, saving }) {
+function SettingsPanel({ wsId, fields, states, organization, templates, plivoAgents, selectedAgentId, newField, setNewField, newState, setNewState, templateDraft, setTemplateDraft, addField, updateField, removeField, addState, saveStates, saveOrganization, saveTemplate, savePlivoAgent, selectPlivoAgent, togglePlivoAgent, saving }) {
   const [org, setOrg] = useState(organization);
   const [fieldDrafts, setFieldDrafts] = useState({});
   const [stateDrafts, setStateDrafts] = useState({});
@@ -1613,6 +1554,7 @@ function SettingsPanel({ fields, states, organization, templates, plivoAgents, s
 
   return (
     <div className="grid gap-6 xl:grid-cols-2 items-start">
+      <TwilioSmsSettings wsId={wsId} />
       <QualificationSettingsLink />
 
       <section className="rounded-xl border bg-card p-5 space-y-4">

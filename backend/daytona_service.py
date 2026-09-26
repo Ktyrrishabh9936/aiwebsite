@@ -65,13 +65,17 @@ async def import_github_repo(sb, repo_url, branch=None, token=None):
         auth_url = safe_url.replace("https://", f"https://x-access-token:{token}@", 1)
 
     branch_arg = f"--branch {shlex.quote(branch.strip())}" if branch else ""
-    cmd = (
-        f"rm -rf {BASE}/* {BASE}/.[!.]* {BASE}/..?* 2>/dev/null || true; "
-        f"git clone --depth 1 {branch_arg} {shlex.quote(auth_url)} {shlex.quote(BASE)}"
-    )
+    cmd = f"git clone --depth 1 {branch_arg} {shlex.quote(auth_url)} {shlex.quote(BASE)}"
     r = await sb.process.exec(cmd, timeout=180)
     if r.exit_code != 0:
-        clean = (r.result or "").replace(token or "", "***")
+        clean = r.result or ""
+        if token:
+            clean = clean.replace(token, "***")
+        if "could not read Username for 'https://github.com'" in clean and not token:
+            raise RuntimeError(
+                "GitHub could not access this repository. If it is private, set GITHUB_TOKEN "
+                "in backend/.env and restart the backend, then retry setup. Also check the repository URL."
+            )
         raise RuntimeError(clean[:1000] or "GitHub clone failed.")
     return {"exit_code": r.exit_code, "output": (r.result or "Imported repository.")[:60000]}
 
@@ -142,7 +146,7 @@ async def start_dev_server(sb):
     from daytona import SessionExecuteRequest
     await sb.process.create_session(session_id)
     cmd = (
-        f"cd {BASE} && (pkill -f vite || true) && "
+        f"cd {BASE} && "
         f"if [ -f package.json ]; then ([ -d node_modules ] || npm install) && "
         f"(npm run dev -- --host 0.0.0.0 --port {PREVIEW_PORT} || npx --yes vite --host 0.0.0.0 --port {PREVIEW_PORT}); "
         f"else npx --yes serve -l {PREVIEW_PORT} .; fi"

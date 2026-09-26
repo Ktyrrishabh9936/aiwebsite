@@ -1815,6 +1815,8 @@ async def schedule_first_qualification_call(db, ws_id, lead_id, delay_minutes=No
     lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)})
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
+    if lead.get("auto_qualification_enabled") is False:
+        return {"status": "skipped", "reason": "Automatic AI call disabled for this lead"}
     if lead.get("do_not_call") or lead.get("lead_status") == "JUNK":
         return {"status": "skipped", "reason": "DND or junk"}
     if is_junk_lead(lead):
@@ -2284,6 +2286,8 @@ async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=F
     lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)})
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
+    if auto and lead.get("auto_qualification_enabled") is False:
+        return {"status": "skipped", "reason": "Automatic AI call disabled for this lead"}
     if lead.get("do_not_call") or lead.get("lead_status") == "JUNK":
         if raise_on_error:
             raise HTTPException(409, "Calling is blocked for this lead (DND or junk)")

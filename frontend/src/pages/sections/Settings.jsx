@@ -1,4 +1,5 @@
 import VoiceProviders from "../../components/VoiceProviders";
+import PushNotificationSettings from "../../components/PushNotificationSettings";
 import AIUsageDashboard from "../../components/AIUsageDashboard";
 import { useEffect, useState } from "react";
 import { Link, useOutletContext } from "react-router-dom";
@@ -177,6 +178,7 @@ export default function Settings() {
         <p className="text-xs leading-5 text-muted-foreground">This first preview tests installation and an offline test page. Your workspace still needs an internet connection. Use the deployed HTTPS site on your phone; installation may be unavailable in private browsing or inside another app’s browser.</p>
       </section>
 
+      <PushNotificationSettings wsId={ws.id} />
       <AIUsageDashboard wsId={ws.id} />
 
       <section className="border border-border rounded-md bg-card p-6 space-y-5">

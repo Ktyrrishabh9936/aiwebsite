@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useLocation } from "react-router-dom";
 import { toast } from "sonner";
 import { Logo } from "../components/Logo";
 import { ThemeToggle } from "../components/ThemeToggle";
@@ -11,6 +11,7 @@ import { Label } from "../components/ui/label";
 export default function Login() {
   const { login } = useAuth();
   const nav = useNavigate();
+  const location = useLocation();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -21,8 +22,10 @@ export default function Login() {
     try {
       const session = await login(email, password);
       toast.success("Welcome back");
-      if (!localStorage.getItem("arevei_onboarded")) nav("/welcome");
+      const returnTo = location.state?.from;
+      if (typeof returnTo === "string" && returnTo.startsWith("/app/") && !returnTo.startsWith("//")) nav(returnTo, { replace: true });
       else if (session?.default_workspace_id) nav(`/app/w/${session.default_workspace_id}`);
+      else if (!localStorage.getItem("arevei_onboarded")) nav("/welcome");
       else nav("/app");
     } catch (err) {
       toast.error(formatError(err.response?.data?.detail) || "Login failed");

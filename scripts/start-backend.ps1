@@ -1,3 +1,5 @@
+param([switch]$Reload)
+
 $ErrorActionPreference = "Stop"
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -15,7 +17,11 @@ if ($LASTEXITCODE -ne 0) {
 
 Push-Location $backend
 try {
-  & $python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
+  if ($Reload) {
+    & $python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
+  } else {
+    & $python -m uvicorn server:app --host 127.0.0.1 --port 8000
+  }
 } finally {
   Pop-Location
 }

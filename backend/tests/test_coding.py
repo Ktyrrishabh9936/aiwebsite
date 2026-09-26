@@ -76,10 +76,9 @@ class TestCodeModels:
         assert isinstance(data.get("models"), list) and len(data["models"]) > 0
         assert data.get("default")
         model_ids = {m["id"] for m in data["models"]}
-        assert "bedrock" not in data.get("providers", {})
-        assert "bedrock-claude-sonnet" not in model_ids
-        assert "bedrock-vision" not in model_ids
-        assert not any(m.get("provider") == "bedrock" for m in data["models"])
+        assert "bedrock" in data.get("providers", {})
+        assert {"bedrock-claude-sonnet", "bedrock-vision"}.issubset(model_ids)
+        assert all("configured" in m for m in data["models"] if m.get("provider") == "bedrock")
 
 
 # -------- 2. react-vite scaffold ----------
