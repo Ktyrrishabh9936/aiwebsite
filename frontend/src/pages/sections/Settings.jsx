@@ -2,7 +2,7 @@ import VoiceProviders from "../../components/VoiceProviders";
 import AIUsageDashboard from "../../components/AIUsageDashboard";
 import { useEffect, useState } from "react";
 import { Link, useOutletContext } from "react-router-dom";
-import { Building2, Check, Copy, KeyRound, Loader2, PackageOpen, Phone, PhoneOff, RotateCw, Save, ShieldCheck } from "lucide-react";
+import { Building2, Check, Copy, KeyRound, Loader2, PackageOpen, Phone, PhoneOff, RotateCw, Save, ShieldCheck, Smartphone } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../../context/AuthContext";
 import api from "../../lib/api";
@@ -145,6 +145,36 @@ export default function Settings() {
         <label className="block max-w-xs space-y-2"><span className="text-sm font-semibold">Workspace currency</span><select value={currency} onChange={(event) => setCurrency(event.target.value)} className="w-full h-10 rounded-md border bg-background px-3 text-sm">{["INR", "USD", "EUR", "GBP", "AED", "CAD", "AUD", "SGD", "JPY"].map((code) => <option key={code} value={code}>{code}</option>)}</select></label>
         <p className="text-xs text-muted-foreground">This currency is used across property, catalog, opportunity, and pipeline values. Changing it updates the currency label; it does not convert existing amounts.</p>
         <button onClick={saveWorkspaceCurrency} disabled={savingModules} className="inline-flex h-10 items-center gap-2 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground disabled:opacity-60">{savingModules ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save currency</button>
+      </section>
+
+      <section aria-labelledby="mobile-app-heading" className="border border-border rounded-md bg-card p-6 space-y-5">
+        <div className="flex items-start gap-3">
+          <div className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-primary/10 text-primary"><Smartphone className="h-5 w-5" /></div>
+          <div>
+            <h2 id="mobile-app-heading" className="font-display text-xl font-bold">Install on your phone</h2>
+            <p className="text-sm text-muted-foreground mt-1">Try the Arevei mobile app preview from your home screen.</p>
+          </div>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div className="rounded-md border border-border bg-background p-4 space-y-2">
+            <h3 className="font-semibold">Android · Chrome</h3>
+            <ol className="list-decimal pl-5 text-sm text-muted-foreground space-y-2">
+              <li>Open this site in Chrome on your phone and tap Open mobile app preview below.</li>
+              <li>Tap Install test app, or open Chrome’s menu and choose Add to Home screen → Install.</li>
+              <li>Launch Arevei Test from your home screen.</li>
+            </ol>
+          </div>
+          <div className="rounded-md border border-border bg-background p-4 space-y-2">
+            <h3 className="font-semibold">iPhone · Safari</h3>
+            <ol className="list-decimal pl-5 text-sm text-muted-foreground space-y-2">
+              <li>Open this site in Safari on your iPhone and tap Open mobile app preview below.</li>
+              <li>Tap Share, then Add to Home Screen. Enable Open as Web App if shown, and tap Add.</li>
+              <li>Launch Arevei Test from your home screen.</li>
+            </ol>
+          </div>
+        </div>
+        <a href={`${process.env.PUBLIC_URL || ""}/pwa-test.html`} className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"><Smartphone className="h-4 w-4" /> Open mobile app preview</a>
+        <p className="text-xs leading-5 text-muted-foreground">This first preview tests installation and an offline test page. Your workspace still needs an internet connection. Use the deployed HTTPS site on your phone; installation may be unavailable in private browsing or inside another app’s browser.</p>
       </section>
 
       <AIUsageDashboard wsId={ws.id} />

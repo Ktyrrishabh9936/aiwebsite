@@ -1,0 +1,15 @@
+{
+  "id": "./pwa-test.html",
+  "name": "Arevei PWA Test",
+  "short_name": "Arevei Test",
+  "description": "A small Arevei installation and offline test.",
+  "start_url": "./pwa-test.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#030908",
+  "theme_color": "#030908",
+  "icons": [
+    { "src": "pwa-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "pwa-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

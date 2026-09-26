@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#030908"><title>Arevei PWA Test</title>
+  <link rel="manifest" href="./manifest.json"><link rel="apple-touch-icon" href="./pwa-icon-192.png">
+  <style>
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#030908;color:#edf9f5;font:16px system-ui;padding:20px}main{width:100%;max-width:420px;border:1px solid #294139;border-radius:24px;padding:28px;background:#0d1915}img{width:64px;height:64px;border-radius:14px}h1{font-size:26px}p{color:#afc4bc;line-height:1.6}dl{margin:24px 0}dl div{display:flex;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid #294139}dd{margin:0;text-align:right}button,a{display:block;width:100%;border-radius:12px;padding:14px;font:inherit;font-weight:600;text-align:center;text-decoration:none;cursor:pointer}button{border:0;background:#66f09d;color:#030908}button:disabled{opacity:.5;cursor:default}a{color:#edf9f5;border:1px solid #294139;margin-top:12px}#hint{font-size:14px}
+  </style>
+</head>
+<body><main>
+  <img src="./pwa-icon-192.png" alt="Arevei"><h1>Arevei PWA test</h1>
+  <p>A small test for installing Arevei and opening it without a connection.</p>
+  <dl aria-live="polite"><div><dt>Connection</dt><dd id="connection">Checking…</dd></div><div><dt>App mode</dt><dd id="mode">Checking…</dd></div><div><dt>Offline setup</dt><dd id="worker">Starting…</dd></div></dl>
+  <button id="install" disabled>Install test app</button>
+  <p id="hint">Use your browser’s Install app option, or on iPhone use Safari → Share → Add to Home Screen.</p>
+  <a href="./app">Open workspace</a>
+  <p>Once offline setup is ready, turn off your connection and reload this page. The workspace needs an internet connection.</p>
+</main><script src="./pwa-test.js"></script></body>
+</html>
