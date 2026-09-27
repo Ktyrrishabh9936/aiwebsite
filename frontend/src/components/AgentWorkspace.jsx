@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, Boxes, Brain, Building2, Code2, FileText, LayoutDashboard, ListChecks, Loader2, Mic, MicOff, Send, Sparkles, Users, Workflow } from "lucide-react";
+import { Bot, Boxes, Brain, Building2, Code2, FileText, LayoutDashboard, ListChecks, Loader2, Mic, MicOff, Send, Sparkles, Users, Workflow, CheckCircle2, AlertCircle, Clock3, ArrowUpRight } from "lucide-react";
 import { useAiStatus, aiErrorMessage } from "./AiStatus";
 import { ChatText } from "./ChatText";
+import { conversationId, loadManagerConversation, getManagerRun, newManagerId } from "../lib/managerAgent";
 import "./AgentWorkspace.css";
 
 const sections = [
@@ -25,11 +26,61 @@ export function AgentWorkspace({ ws, active }) {
   const [busy, setBusy] = useState(false);
   const [listening, setListening] = useState(false);
   const [voiceError, setVoiceError] = useState("");
+  const [conversation] = useState(() => conversationId(ws.id));
+  const [activity, setActivity] = useState([]);
+  const [lastRun, setLastRun] = useState(null);
+  const [activityError, setActivityError] = useState("");
   const recognitionRef = useRef(null);
   const inputRef = useRef(null);
   const scrollRef = useRef(null);
   const pendingRef = useRef(false);
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  useEffect(() => {
+    let live = true;
+    loadManagerConversation(ws.id, conversation).then((data) => {
+      if (!live || pendingRef.current) return;
+      setMessages(data.messages || []);
+      setActivity((data.runs || []).flatMap((run) => run.events || []));
+      setLastRun(data.runs?.at(-1) || null);
+    }).catch(() => { if (live) setActivityError("Saved work could not be loaded. New work will still appear here."); });
+    return () => { live = false; };
+  }, [ws.id, conversation]);
+
+  const monitoredRuns = [...new Set([lastRun?.run_id, ...activity.filter((event) => event.status === "delegated").map((event) => event.run_id)].filter(Boolean))].join(",");
+  useEffect(() => {
+    if (!active || !monitoredRuns || busy) return;
+    let live = true;
+    const refresh = async () => {
+      try {
+        const runs = await Promise.all(monitoredRuns.split(",").map((id) => getManagerRun(ws.id, id)));
+        if (!live) return;
+        setActivity((current) => [...current.filter((event) => !runs.some((run) => run.run_id === event.run_id)), ...runs.flatMap((run) => run.events || [])].sort((a, b) => (a.at || "").localeCompare(b.at || "")));
+        setLastRun((current) => runs.find((run) => run.run_id === current?.run_id) || current);
+        setActivityError("");
+      } catch { if (live) setActivityError("Work status could not refresh. Showing the last confirmed activity."); }
+    };
+    const timer = setInterval(refresh, 5000);
+    refresh();
+    return () => { live = false; clearInterval(timer); };
+  }, [active, busy, ws.id, monitoredRuns]);
+
+  function receiveActivity(event) {
+    setActivity((current) => [...current.filter((item) => item.event_id !== event.event_id), event]);
+    setLastRun((current) => ({ ...current, run_id: event.run_id, status: event.type === "run_finished" ? event.status : "running" }));
+    if (event.type === "run_finished" && event.status !== "completed") setActivityError(event.label);
+  }
+
+  const finishedRuns = new Map(activity.filter((event) => event.type === "run_finished").map((event) => [event.run_id, event.status]));
+  const operations = [...activity.reduce((map, event) => {
+    if (event.operation_id) map.set(`${event.run_id}:${event.operation_id}`, event);
+    return map;
+  }, new Map()).values()].map((operation) => operation.status === "running" && finishedRuns.has(operation.run_id)
+    ? { ...operation, status: "failed", summary: "Execution stopped; this action's outcome is not confirmed." } : operation);
+  const runningOperation = [...operations].reverse().find((operation) => operation.status === "running");
+  const currentSection = runningOperation?.section;
+  const completedWrites = operations.filter((operation) => operation.writes && operation.status === "completed" && !operation.reused).length;
+  const delegated = operations.filter((operation) => operation.status === "delegated" && !["completed", "failed", "cancelled", "no_answer", "busy"].includes(operation.job_status));
 
   useEffect(() => { scrollRef.current?.scrollTo?.(0, scrollRef.current.scrollHeight); }, [messages, active]);
   useEffect(() => {
@@ -76,12 +127,15 @@ export function AgentWorkspace({ ws, active }) {
     setInput("");
     setBusy(true);
     const update = (content) => setMessages((current) => [...current.slice(0, -1), { role: "assistant", content }]);
-    try { await status.run(message, history, update); }
+    setActivityError("");
+    try { await status.run(message, history, update, {
+      agentMode: true, conversationId: conversation, requestId: newManagerId(), onEvent: receiveActivity,
+    }); }
     catch (error) { update(aiErrorMessage(error)); }
     finally { setBusy(false); pendingRef.current = false; }
   }
 
-  const statusLabel = busy ? "Thinking through your request" : ({ loading: "Loading AI configuration", checking: "Connecting", working: "Last request succeeded", failed: "Connection needs attention", missing: "Provider setup needed", untested: "Ready for your first message" }[status.state]);
+  const statusLabel = busy ? (runningOperation?.label || "Manager is choosing the next action") : ({ loading: "Loading AI configuration", checking: "Connecting", working: "Last request succeeded", failed: "Connection needs attention", missing: "Provider setup needed", untested: "Ready for your first message" }[status.state]);
 
   return (
     <div className="agent-space">
@@ -93,7 +147,7 @@ export function AgentWorkspace({ ws, active }) {
             <ellipse cx="400" cy="300" rx="205" ry="160" />
             {sections.map((section, i) => {
               const angle = (i * 36 - 90) * Math.PI / 180;
-              return <line key={section.name} x1="400" y1="300" x2={400 + 295 * Math.cos(angle)} y2={300 + 230 * Math.sin(angle)} className={selected?.name === section.name ? "is-selected" : ""} />;
+              return <line key={section.name} x1="400" y1="300" x2={400 + 295 * Math.cos(angle)} y2={300 + 230 * Math.sin(angle)} className={currentSection === section.name ? "is-working" : selected?.name === section.name ? "is-selected" : ""} />;
             })}
           </svg>
           <button type="button" className={`agent-core ${busy ? "is-thinking" : ""}`} onClick={() => selectSection(null)} aria-label="Focus AI manager on the whole workspace" aria-pressed={!selected}>
@@ -101,12 +155,30 @@ export function AgentWorkspace({ ws, active }) {
           </button>
           {sections.map((section, i) => {
             const angle = (i * 36 - 90) * Math.PI / 180;
-            return <button type="button" key={section.name} className={`agent-node ${selected?.name === section.name ? "is-selected" : ""}`} style={{ left: `${50 + 36.875 * Math.cos(angle)}%`, top: `${50 + 38.333 * Math.sin(angle)}%`, "--node-color": section.color }} onClick={() => selectSection(section)} aria-pressed={selected?.name === section.name}>
-              <span className="agent-node-icon"><section.icon size={20} /></span><strong>{section.name}</strong><small>{section.description}</small>
+            const working = currentSection === section.name;
+            const waiting = delegated.some((operation) => operation.section === section.name);
+            return <button type="button" key={section.name} className={`agent-node ${selected?.name === section.name ? "is-selected" : ""} ${working ? "is-working" : ""} ${waiting ? "is-waiting" : ""}`} style={{ left: `${50 + 36.875 * Math.cos(angle)}%`, top: `${50 + 38.333 * Math.sin(angle)}%`, "--node-color": section.color }} onClick={() => selectSection(section)} aria-pressed={selected?.name === section.name} aria-label={`${section.name}${working ? " — working" : waiting ? " — waiting for outcome" : ""}`}>
+              <span className="agent-node-icon">{working ? <Loader2 size={20} className="animate-spin" /> : <section.icon size={20} />}</span><strong>{section.name}</strong><small>{working ? runningOperation.agent : waiting ? "Waiting for outcome" : section.description}</small>
             </button>;
           })}
         </div>
-        <div className="agent-map-footer"><span><i /> {sections.length} connected sections</span><span>Select a node to focus your conversation</span></div>
+        <div className="agent-map-footer"><span><i /> {completedWrites} saved changes · {delegated.length} pending delegations</span><span>Activity reflects actual application work</span></div>
+        <section className="agent-work-panel" aria-label="Agent work activity">
+          <header><div><h2>Team activity</h2><p>Confirmed actions and specialist handovers</p></div><span>{busy ? "Working" : lastRun?.status === "completed" ? "Request finished" : "Work history"}</span></header>
+          {activityError && <p className="agent-error" role="alert">{activityError}</p>}
+          {!operations.length ? <p className="agent-work-empty">Ask your manager to read information, update a lead, or coordinate a follow-up. Each action will appear here.</p> :
+            <ol aria-live="polite">{operations.slice(-24).reverse().map((operation) => {
+              const waiting = operation.status === "delegated";
+              const failed = operation.status === "failed" || waiting && ["failed", "cancelled", "no_answer", "busy"].includes(operation.job_status);
+              const done = operation.status === "completed" || waiting && operation.job_status === "completed";
+              const Icon = failed ? AlertCircle : done ? CheckCircle2 : operation.status === "running" ? Loader2 : Clock3;
+              return <li key={`${operation.run_id}:${operation.operation_id}`} data-status={failed ? "failed" : done ? "completed" : operation.status}>
+                <Icon size={16} className={operation.status === "running" ? "animate-spin" : ""} />
+                <div><strong>{operation.label}</strong><small>{operation.agent} · {operation.section}</small><p>{waiting ? `Qualification: ${operation.job_status || operation.job?.state || "pending"}` : operation.summary || "Working…"}</p></div>
+                {operation.link && <a href={operation.link} aria-label={`Open result: ${operation.label}`} title="Open saved record"><ArrowUpRight size={16} /></a>}
+              </li>;
+            })}</ol>}
+        </section>
       </section>
 
       <section className="agent-conversation" aria-label="AI manager conversation">

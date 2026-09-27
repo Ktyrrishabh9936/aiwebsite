@@ -18,6 +18,7 @@ PROCESS_LABELS = {
     "roadmap_strategy": "Roadmap strategy",
     "roadmap_tasks": "Roadmap task planning",
     "manager_chat": "AI Manager chat",
+    "manager_agent": "AI Manager Agent Mode",
     "blog_generation": "Blog generation",
     "seo_audit": "SEO audit",
     "creative_content": "Creative content",

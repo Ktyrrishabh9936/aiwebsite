@@ -24,6 +24,7 @@ from bson import ObjectId
 from models import Workspace, Task, Blog, Notification, BLOG_IMAGE_POOL, now_iso
 from auth import build_auth_router, get_current_user, get_current_user_and_workspace
 from push_notifications import router as push_router, push_scheduler
+from manager_agent import router as manager_agent_router
 from coding import build_coding_router
 import agents
 import llm_service
@@ -1327,6 +1328,7 @@ api.include_router(catalog_router)
 api.include_router(sales_modules_router)
 api.include_router(ai_usage_router)
 api.include_router(push_router)
+api.include_router(manager_agent_router)
 api.include_router(build_voice_router(db, manager_service, owned_workspace, require_user))
 
 app.include_router(build_auth_router(db))

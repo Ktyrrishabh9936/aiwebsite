@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Loader2, Radio } from "lucide-react";
 import api, { API } from "../lib/api";
+import { streamManagerAgent } from "../lib/managerAgent";
 
 export const providerName = (provider) => ({ bedrock_mantle: "Amazon Bedrock", bedrock: "Amazon Bedrock", openrouter: "OpenRouter", openai: "OpenAI", nvidia: "NVIDIA" }[provider] || provider || "Unknown provider");
 
 export function aiErrorMessage(error) {
+  if (error?.managerMessage) return String(error.message);
   const text = String(error?.message || error || "");
   if (/402|payment required|credits/i.test(text)) return "Provider credits exhausted. Choose another model or add provider credits.";
   if (/401|403|unauthoriz|forbidden/i.test(text)) return "Access denied. Check your sign-in and provider credentials.";
@@ -76,7 +78,7 @@ export function useAiStatus(ws) {
     return () => { cancelled = true; };
   }, [load, ws.model_id]);
 
-  const run = async (message, history, onText) => {
+  const run = async (message, history, onText, options) => {
     const current = version.current;
     requestVersion.current++;
     active.current = true;
@@ -84,7 +86,9 @@ export function useAiStatus(ws) {
     try {
       const selected = await load();
       if (current === version.current) setModel(selected);
-      const text = await streamManager(ws.id, message, history, onText);
+      const text = options?.agentMode
+        ? await streamManagerAgent(ws.id, message, options, onText)
+        : await streamManager(ws.id, message, history, onText);
       if (current === version.current) { setState("working"); setCheckedAt(new Date()); }
       return text;
     } catch (error) {

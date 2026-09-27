@@ -383,7 +383,11 @@ export default function CrmInbox() {
   useEffect(() => {
     const refreshImportedLeads = () => refreshLeadList();
     window.addEventListener("arevei:sheet-synced", refreshImportedLeads);
-    return () => window.removeEventListener("arevei:sheet-synced", refreshImportedLeads);
+    window.addEventListener("arevei:manager-changed", refreshImportedLeads);
+    return () => {
+      window.removeEventListener("arevei:sheet-synced", refreshImportedLeads);
+      window.removeEventListener("arevei:manager-changed", refreshImportedLeads);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wsId, statusFilter, page, debouncedLeadFilters, recordView]);
 

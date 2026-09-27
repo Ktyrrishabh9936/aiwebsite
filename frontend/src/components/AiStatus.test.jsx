@@ -5,6 +5,11 @@ jest.mock("../lib/api", () => ({ __esModule: true, API: "/api", default: {} }));
 const originalFetch = global.fetch;
 const originalDecoder = global.TextDecoder;
 
+test("manager failures explain partial progress and a busy conversation", () => {
+  expect(aiErrorMessage({ managerMessage: true, message: "Action limit reached; saved changes remain available." })).toContain("saved changes remain available");
+  expect(aiErrorMessage({ managerMessage: true, message: "This conversation already has work running." })).toContain("already has work running");
+});
+
 afterEach(() => {
   jest.useRealTimers();
   global.fetch = originalFetch;
