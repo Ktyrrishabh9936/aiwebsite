@@ -1,4 +1,4 @@
-const CACHE = "arevei-pwa-test-v2";
+const CACHE = "arevei-pwa-v3";
 const testPage = new URL("pwa-test.html", self.registration.scope).href;
 const offlinePage = new URL("offline.html", self.registration.scope).href;
 const assets = [testPage, offlinePage, "pwa-icon-192.png", "pwa-icon-512.png", "manifest.json"]

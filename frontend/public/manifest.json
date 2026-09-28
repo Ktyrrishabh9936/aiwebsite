@@ -1,8 +1,8 @@
 {
   "id": "./pwa-test.html",
-  "name": "Arevei PWA Test",
-  "short_name": "Arevei Test",
-  "description": "A small Arevei installation and offline test.",
+  "name": "Arevei",
+  "short_name": "Arevei",
+  "description": "Your AI-native sales manager.",
   "start_url": "./pwa-test.html",
   "scope": "./",
   "display": "standalone",

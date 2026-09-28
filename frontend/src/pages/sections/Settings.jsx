@@ -161,8 +161,8 @@ export default function Settings() {
             <h3 className="font-semibold">Android · Chrome</h3>
             <ol className="list-decimal pl-5 text-sm text-muted-foreground space-y-2">
               <li>Open this site in Chrome on your phone and tap Open mobile app preview below.</li>
-              <li>Tap Install test app, or open Chrome’s menu and choose Add to Home screen → Install.</li>
-              <li>Launch Arevei Test from your home screen.</li>
+              <li>Tap Install Arevei, or open Chrome’s menu and choose Add to Home screen → Install.</li>
+              <li>Launch Arevei from your home screen.</li>
             </ol>
           </div>
           <div className="rounded-md border border-border bg-background p-4 space-y-2">
@@ -170,7 +170,7 @@ export default function Settings() {
             <ol className="list-decimal pl-5 text-sm text-muted-foreground space-y-2">
               <li>Open this site in Safari on your iPhone and tap Open mobile app preview below.</li>
               <li>Tap Share, then Add to Home Screen. Enable Open as Web App if shown, and tap Add.</li>
-              <li>Launch Arevei Test from your home screen.</li>
+              <li>Launch Arevei from your home screen.</li>
             </ol>
           </div>
         </div>

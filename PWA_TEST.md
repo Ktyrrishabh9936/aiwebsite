@@ -5,7 +5,7 @@ Open `/pwa-test.html` on the frontend (for example `http://localhost:3000/pwa-te
 For phone testing after deployment, open the HTTPS site and go to **Settings → Install on your phone → Open mobile app preview**. Settings includes separate Android Chrome and iPhone Safari installation steps. No ngrok change is needed.
 
 1. Wait for **Offline setup: Ready**, then reload once.
-2. Install using **Install test app** when enabled or the browser install menu. On iPhone, open in Safari and use **Share → Add to Home Screen**.
+2. Install using **Install Arevei** when enabled or the browser install menu. On iPhone, open in Safari and use **Share → Add to Home Screen**.
 3. Launch the installed app. **App mode** should show **Installed app**.
 4. Turn off the connection and reload. The small test page should still open.
 5. Open the workspace offline: a reconnect page appears. Reconnect and select **Try again**.
