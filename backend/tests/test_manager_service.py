@@ -40,6 +40,9 @@ def test_same_context_and_provider_for_web_and_voice(monkeypatch):
         seen.append((model, brain, roadmap, history, prompt, kwargs))
         yield "Four hot leads."
     monkeypatch.setattr(agents, "manager_chat_stream", llm)
+    import manager_voice_grounding
+    grounded = AsyncMock(return_value="Four hot leads.")
+    monkeypatch.setattr(manager_voice_grounding, "grounded_voice_answer", grounded)
     db = SimpleNamespace(tasks=ReadCollection([{"title": "Follow up"}]), properties=ReadCollection([{"name": "Test property"}]))
     context = AsyncMock(return_value=({}, [], {"total_leads": 4}, [{"name": "Rahul", "status": "hot"}]))
     action = AsyncMock(return_value=None)
@@ -50,12 +53,12 @@ def test_same_context_and_provider_for_web_and_voice(monkeypatch):
             result = [x async for x in service.stream(ws, "How many?", [], voice=voice)]
             assert result == ["Four hot leads."]
     asyncio.run(run())
-    assert seen[0][:5] == seen[1][:5]
-    assert seen[1][5]["reply_instructions"] == VOICE_STYLE
+    assert len(seen) == 1
+    grounded.assert_awaited_once_with(db, ws, "How many?", [], [])
     assert seen[0][0] == "saved-model"
     assert seen[0][1] == ws["brain"]
     assert "Rahul" in seen[0][4] and "Test property" in seen[0][4] and "Follow up" in seen[0][4]
-    assert db.tasks.queries == [{"workspace_id": str(WORKSPACE)}] * 2
+    assert db.tasks.queries == [{"workspace_id": str(WORKSPACE)}]
     assert db.properties.queries == db.tasks.queries
 
 

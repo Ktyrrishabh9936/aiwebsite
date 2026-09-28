@@ -34,8 +34,8 @@ PHONE = re.compile(r"^\+[1-9]\d{7,14}$")
 class VoiceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
     message: str = Field(min_length=1, max_length=2000)
-    session_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
-    caller_phone: str = Field(pattern=r"^\+[1-9]\d{7,14}$")
+    session_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_./:-]+$")
+    caller_phone: str = Field(pattern=r"^(?:\+[1-9]\d{7,14}|\d{10,15})$")
     # Map Call Transcript with the picker; preserve its actual JSON type.
     transcript: JsonValue = None
     # Optional AREVEI per-turn key. NEVER use Interaction ID here (it is per-call).
@@ -168,8 +168,19 @@ def build_voice_router(db, manager, owned_workspace, require_user):
 
     async def process(body, config):
         connection = await db.ai_manager_voice_connections.find_one({"caller_phone": body.caller_phone, "enabled": True})
+        if not connection and not body.caller_phone.startswith("+"):
+            # Sarvam User Identifier may omit '+' or include a national trunk
+            # prefix. Resolve against existing connections, never guess a country.
+            connection = await db.ai_manager_voice_connections.find_one({"caller_phone": "+" + body.caller_phone, "enabled": True})
+            national = body.caller_phone[1:] if body.caller_phone.startswith("0") else body.caller_phone
+            if not connection and len(national) == 10:
+                matches = await db.ai_manager_voice_connections.find({
+                    "caller_phone": {"$regex": r"^\+[1-9]\d{0,2}" + re.escape(national) + "$"}, "enabled": True,
+                }).limit(2).to_list(2)
+                if len(matches) == 1: connection = matches[0]
         if not connection:
             raise HTTPException(403, "Caller is not connected to an AREVEI workspace")
+        body = body.model_copy(update={"caller_phone": connection["caller_phone"]})
         # A workspace change affects new calls. An existing call stays with the
         # workspace it started in, as long as the same user's phone remains connected.
         existing_session = await db.ai_manager_voice_sessions.find_one({
@@ -303,9 +314,20 @@ def build_voice_router(db, manager, owned_workspace, require_user):
                     raise HTTPException(413, "Voice request is too large")
             try:
                 return VoiceRequest.model_validate_json(raw)
-            except (ValidationError, ValueError):
-                # Pydantic's default errors include input values. Do not echo transcripts.
-                raise HTTPException(422, "Invalid voice request; check the documented contract") from None
+            except ValidationError as error:
+                # Report only known field names and error categories. Never echo
+                # input values, caller identity, transcripts or arbitrary extra keys.
+                known = set(VoiceRequest.model_fields)
+                issues = sorted({
+                    f"{item['loc'][0] if item.get('loc') and item['loc'][0] in known else 'body'}: {item['type']}"
+                    for item in error.errors(include_input=False, include_url=False)
+                })
+                event("voice_contract_rejected", issues=issues)
+                raise HTTPException(422, "Invalid voice request (" + "; ".join(issues) +
+                    "). Map message to the latest caller utterance, session_id to Interaction ID, "
+                    "caller_phone to User Identifier in E.164 format, and transcript to Call Transcript.") from None
+            except ValueError:
+                raise HTTPException(422, "Invalid JSON voice request") from None
 
         try:
             body = await asyncio.wait_for(parse_body(), timeout=5)

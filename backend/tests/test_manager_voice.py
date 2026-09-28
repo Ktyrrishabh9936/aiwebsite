@@ -139,6 +139,43 @@ def test_caller_and_workspace_authorization(setup):
     asyncio.run(run())
 
 
+def test_contract_error_identifies_field_without_echoing_private_values(setup):
+    async def run():
+        async with client(setup) as c:
+            r = await c.post("/api/ai-manager/voice", json={**BODY, "caller_phone": "private-invalid-phone", "transcript": "private transcript", "private-extra-field": "secret value"}, headers=HEADERS)
+            assert r.status_code == 422
+            assert "caller_phone: string_pattern_mismatch" in r.text
+            assert "body: extra_forbidden" in r.text
+            for private in ("private-invalid-phone", "private transcript", "private-extra-field", "secret value"):
+                assert private not in r.text
+            assert not setup.calls
+    asyncio.run(run())
+
+
+def test_sarvam_slash_session_id_and_country_number_without_plus(setup):
+    async def run():
+        async with client(setup) as c:
+            r = await c.post("/api/ai-manager/voice", json={**BODY, "session_id": "interaction/call-123", "caller_phone": PHONE[1:]}, headers=HEADERS)
+            assert r.status_code == 200 and r.json()["ok"] is True
+            assert len(setup.calls) == 1
+            session = next(iter(setup.db.ai_manager_voice_sessions.docs.values()))
+            assert session["caller_phone"] == PHONE
+    asyncio.run(run())
+
+
+def test_national_caller_number_requires_unique_existing_connection(setup):
+    async def run():
+        collection = setup.db.ai_manager_voice_connections
+        collection.find = lambda query: SimpleNamespace(limit=lambda count: SimpleNamespace(to_list=AsyncMock(return_value=[next(iter(collection.docs.values()))])))
+        async with client(setup) as c:
+            r = await c.post("/api/ai-manager/voice", json={**BODY, "caller_phone": "04155550123"}, headers=HEADERS)
+            assert r.status_code == 200 and r.json()["ok"] is True
+            collection.find = lambda query: SimpleNamespace(limit=lambda count: SimpleNamespace(to_list=AsyncMock(return_value=[{}, {}])))
+            r = await c.post("/api/ai-manager/voice", json={**BODY, "caller_phone": "04155550124"}, headers=HEADERS)
+            assert r.status_code == 403
+    asyncio.run(run())
+
+
 def test_continuity_replay_and_mapping(setup):
     async def run():
         async with client(setup) as c:

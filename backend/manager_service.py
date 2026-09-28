@@ -44,6 +44,11 @@ class ManagerService:
             yield action
             return
 
+        if voice:
+            from manager_voice_grounding import grounded_voice_answer
+            yield await grounded_voice_answer(self.db, ws, message, history, audit if audit is not None else [])
+            return
+
         # Read only, scoped to this workspace. These are context, not new action tools.
         tasks = await self.db.tasks.find({"workspace_id": ws_id}, {
             "_id": 0, "title": 1, "objective": 1, "status": 1, "scheduled_time": 1,

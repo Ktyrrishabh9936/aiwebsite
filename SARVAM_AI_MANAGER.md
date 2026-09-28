@@ -24,6 +24,20 @@ existing CRM context/actions and `agents.manager_chat_stream`. Web keeps streami
 voice collects the same stream and normalizes it for speech. Web and voice retain
 separate conversations; switching channels does not automatically merge transcripts.
 
+Voice information questions now use `manager_voice_grounding.py`: native read-only
+tools search and read actual records in the connected workspace. Saved requirements,
+qualification answers and notes are included; company industry and earlier assistant
+replies are not evidence of a lead's requirements. Empty searches return a fixed
+not-found reply. Unverified model answers are not spoken by the backend.
+
+The Sarvam speaking agent must also be configured to call this API for every business
+or lead information question and relay the returned `reply`. Suggested instruction:
+
+> For account, CRM and lead questions, always call the AREVEI manager tool. Speak its
+> reply faithfully. Never fill missing lead details from your persona, industry,
+> examples, or previous replies. If the tool says not found, say not found. If it
+> fails, say you could not verify the information. Do not invent requirements.
+
 The manager's CRM write helper now checks Mongo's matched record count before reporting
 success. Phone-created notes use `source=ai_manager_voice`. This does not change any
 Plivo callback, call UUID matching, qualification category, recording or outbound flow.
@@ -43,6 +57,13 @@ The documented timeout maximum is 30 seconds.
 | `session_id` | **Interaction ID** from call context. |
 | `caller_phone` | **User Identifier** from call context, in E.164 format. |
 | `transcript` | **Call Transcript** from call context, preserving the actual JSON value. |
+
+The adapter accepts `/` in opaque Interaction IDs. User Identifier can also be
+an international number without `+`, or a ten-digit national number with an
+optional leading `0`. National numbers must uniquely match an already connected
+E.164 number; ambiguous or unknown numbers are rejected. Saved connections and
+sessions retain canonical E.164 numbers. Invalid requests report field names and
+validation categories without including their values.
 
 Sarvam describes its [agent variables](https://docs.sarvam.ai/conversations/build/variables-personalization)
 as readable/writable by tools during a call. Output-variable extraction runs after the call;
