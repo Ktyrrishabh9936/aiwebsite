@@ -36,7 +36,7 @@ class VoiceLookup:
         if name not in SCHEMAS: raise ValueError("Unavailable voice tool")
         validate(args, SCHEMAS[name]["function"]["parameters"])
         query = lead_query(self.ws_id)
-        if name == "voice_lead_count": return {"active_leads": await self.db.crm_leads.count_documents(query)}
+        if name == "voice_lead_count": return {"active_leads": await self.db.crm_leads.count_documents(lead_query(self.ws_id, exclude_test=True))}
         if name == "search_voice_leads":
             from crm import paginated_leads, ensure_crm_settings
             settings = await ensure_crm_settings(self.db, self.ws_id)

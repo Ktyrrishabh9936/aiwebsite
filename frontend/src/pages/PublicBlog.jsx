@@ -1,3 +1,4 @@
+import { formatDate } from "../lib/timezone";
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { motion } from "framer-motion";
@@ -28,7 +29,7 @@ export default function PublicBlog() {
 
   if (!blog) return <div className="min-h-screen grid place-items-center"><Loader2 className="w-6 h-6 animate-spin text-primary" /></div>;
 
-  const date = blog.published_at ? new Date(blog.published_at).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : "";
+  const date = blog.published_at ? formatDate(blog.published_at, { year: "numeric", month: "long", day: "numeric" }) : "";
 
   return (
     <div className="min-h-screen grain">

@@ -48,7 +48,11 @@ def normalize_usage(value):
     input_tokens = int(value.get("inputTokens") or value.get("input_tokens") or value.get("prompt_tokens") or 0)
     output_tokens = int(value.get("outputTokens") or value.get("output_tokens") or value.get("completion_tokens") or 0)
     total_tokens = int(value.get("totalTokens") or value.get("total_tokens") or input_tokens + output_tokens)
-    return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens}
+    prompt_details = value.get("prompt_tokens_details") or {}
+    cache_read = int(value.get("cacheReadInputTokens") or value.get("cache_read_input_tokens") or prompt_details.get("cached_tokens") or 0)
+    cache_write = int(value.get("cacheWriteInputTokens") or value.get("cache_write_input_tokens") or prompt_details.get("cache_write_tokens") or 0)
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens,
+            "cache_read_input_tokens": cache_read, "cache_write_input_tokens": cache_write}
 
 
 async def record_usage(provider, model, usage, latency_ms, status="success", error_type=""):
@@ -60,7 +64,7 @@ async def record_usage(provider, model, usage, latency_ms, status="success", err
     doc = {
         "_id": ObjectId(), "workspace_id": context["workspace_id"], "process": context.get("process") or "other",
         "provider": str(provider or "unknown"), "model": str(model or "unknown"), **tokens,
-        "metered": bool(tokens["total_tokens"]), "latency_ms": max(0, int(latency_ms or 0)),
+        "metered": bool(tokens["total_tokens"] or tokens["cache_read_input_tokens"] or tokens["cache_write_input_tokens"]), "latency_ms": max(0, int(latency_ms or 0)),
         "status": status, "error_type": str(error_type or "")[:120], "metadata": context.get("metadata") or {},
         "created_at": now.isoformat(), "day": now.date().isoformat(),
     }

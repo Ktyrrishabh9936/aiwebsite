@@ -1,3 +1,4 @@
+import { formatDateTime } from "../lib/timezone";
 import { PhoneCall, ExternalLink, RefreshCw, Ban } from "lucide-react";
 
 export default function QualificationSummary({ communication, qualification, saving, onCancel }) {
@@ -24,7 +25,7 @@ export default function QualificationSummary({ communication, qualification, sav
       </div>
       {scheduledFor && (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs">
-          <span className="font-semibold text-primary">Scheduled for {new Date(scheduledFor).toLocaleString([], { dateStyle: "medium", timeStyle: "short", hour12: true })}</span>
+          <span className="font-semibold text-primary">Scheduled for {formatDateTime(scheduledFor, { dateStyle: "medium", timeStyle: "short", hour12: true })}</span>
           {onCancel && <button onClick={onCancel} disabled={saving} className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border bg-background hover:bg-accent font-semibold disabled:opacity-50" title="Cancel scheduled call">
             {saving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Ban className="w-3.5 h-3.5" />}
             Cancel Call
@@ -36,7 +37,7 @@ export default function QualificationSummary({ communication, qualification, sav
         {communication.total_call_count ? <span>{communication.total_call_count} call{communication.total_call_count === 1 ? "" : "s"} tracked</span> : null}
         {(communication.disconnection_reason || qualification.disconnection_reason) && <span>Reason: {communication.disconnection_reason || qualification.disconnection_reason}</span>}
         {(communication.last_duration || qualification.duration) && <span>{communication.last_duration || qualification.duration}s</span>}
-        {callTimestamp && <span>{new Date(callTimestamp).toLocaleString([], { dateStyle: "medium", timeStyle: "short", hour12: true })}</span>}
+        {callTimestamp && <span>{formatDateTime(callTimestamp, { dateStyle: "medium", timeStyle: "short", hour12: true })}</span>}
         {recording && <a href={recording} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border bg-card hover:bg-accent text-foreground font-semibold"><ExternalLink className="w-3.5 h-3.5" /> Open recording</a>}
       </div>
     </section>

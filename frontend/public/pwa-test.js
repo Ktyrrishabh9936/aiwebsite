@@ -9,6 +9,10 @@ function updateStatus() {
   if (installed) {
     installButton.textContent = "App installed";
     installButton.disabled = true;
+    document.getElementById("hint").textContent = "Arevei is on your home screen. Tap Open workspace above to sign in and get started.";
+  } else {
+    installButton.textContent = "Install Arevei";
+    installButton.disabled = !installPrompt;
   }
 }
 window.addEventListener("online", updateStatus);
@@ -44,7 +48,7 @@ async function setupOffline() {
     status.textContent = "Ready";
   } catch (error) {
     status.textContent = "Setup failed — reload to retry";
-    console.error("PWA test setup failed", error);
+    console.error("Offline guide setup failed", error);
   }
 }
 setupOffline();

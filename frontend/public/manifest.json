@@ -1,7 +1,7 @@
 {
   "id": "./pwa-test.html",
-  "name": "Arevei",
-  "short_name": "Arevei",
+  "name": "Arevei AI Manager",
+  "short_name": "AI Manager",
   "description": "Your AI-native sales manager.",
   "start_url": "./pwa-test.html",
   "scope": "./",

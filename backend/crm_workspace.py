@@ -49,8 +49,8 @@ async def pipeline(ws_id: str, request: Request, status: str = Query(max_length=
     query["status"] = status
     db = db_from(request)
     total = await db.crm_leads.count_documents(query)
-    docs = await db.crm_leads.find(query, {"field_values.full_name": 1, "field_values.phone": 1, "field_values.email": 1, "full_name": 1, "phone": 1, "email": 1, "status": 1, "created_at": 1, "lead_status": 1, "opportunity": 1}).sort([("created_at", -1), ("_id", -1)]).skip(offset).limit(limit).to_list(limit)
-    value = await db.crm_leads.aggregate([{"$match": query}, {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$opportunity.total_minor", 0]}}}}]).to_list(1)
+    docs = await db.crm_leads.find(query, {"field_values.full_name": 1, "field_values.phone": 1, "field_values.email": 1, "full_name": 1, "phone": 1, "email": 1, "status": 1, "created_at": 1, "lead_status": 1, "opportunity": 1, "tags": 1, "customer_status": 1}).sort([("created_at", -1), ("_id", -1)]).skip(offset).limit(limit).to_list(limit)
+    value = await db.crm_leads.aggregate([{"$match": {**query, "is_test_lead": {"$ne": True}}}, {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$opportunity.total_minor", 0]}}}}]).to_list(1)
     return {"items": [doc_out(doc) for doc in docs], "total": total,
             "value_minor": value[0]["total"] if value else 0, "currency": workspace_currency(workspace)}
 
@@ -59,6 +59,7 @@ async def pipeline(ws_id: str, request: Request, status: str = Query(max_length=
 async def pipeline_value(ws_id: str, request: Request, search: str = Query(default="", max_length=200), campaign: str = Query(default="", max_length=200), created_from: datetime = Query(None), created_before: datetime = Query(None), status: str = Query(default="all", max_length=100)):
     _, workspace = await access(request, ws_id)
     query = apply_lead_filters(lead_query(ws_id), search, campaign, created_from, created_before, **{key: request.query_params.get(key, "") for key in ("sales_agent_id", "channel_partner_id", "introduced_by_id")})
+    query["is_test_lead"] = {"$ne": True}
     if status != "all":
         query["status"] = status
     values = await db_from(request).crm_leads.aggregate([{"$match": query}, {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$opportunity.total_minor", 0]}}}}]).to_list(1)

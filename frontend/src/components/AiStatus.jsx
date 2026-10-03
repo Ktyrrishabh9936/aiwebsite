@@ -1,3 +1,4 @@
+import { formatTime } from "../lib/timezone";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Loader2, Radio } from "lucide-react";
 import api, { API } from "../lib/api";
@@ -125,7 +126,7 @@ export function AiStatus({ status, busy = false }) {
         <Icon className={`h-3.5 w-3.5 shrink-0 ${checking ? "animate-spin" : ""}`} /> {busy ? "Waiting for AI response (up to 60 seconds)" : label}
       </div>
       {detail && <p className="text-xs text-amber-600" role="alert">{detail}</p>}
-      {checkedAt && <p className="text-[10px] text-muted-foreground">Checked at {checkedAt.toLocaleTimeString()}</p>}
+      {checkedAt && <p className="text-[10px] text-muted-foreground">Checked at {formatTime(checkedAt)}</p>}
     </div>
   );
 }

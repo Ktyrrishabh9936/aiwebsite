@@ -230,7 +230,8 @@ async def personal_performance(ws_id: str, request: Request):
         raise HTTPException(403, "Use the owner performance dashboard")
     person = await db.crm_sales_people.find_one({"workspace_id": ws_id, "_id": ObjectId(person_id)})
     query = {"workspace_id": ws_id, "deleted_at": None, "$or": [{f"sales_assignment.{key}": person_id} for key in ("sales_agent_id", "channel_partner_id", "introduced_by_id")] + [{f"sales_credit.{key}": person_id} for key in ("sales_agent_id", "channel_partner_id")]}
-    leads = await db.crm_leads.find(query, {"sales_assignment": 1, "sales_credit": 1, "opportunity": 1, "referral_property": 1, "status": 1}).to_list(None)
+    query["is_test_lead"] = {"$ne": True}
+    leads = await db.crm_leads.find(query, {"sales_assignment": 1, "sales_credit": 1, "opportunity": 1, "referral_property": 1, "status": 1, "is_test_lead": 1}).to_list(None)
     return {"item": performance_rows([person], leads)[0], "currency": workspace_currency(workspace)}
 
 

@@ -1,3 +1,4 @@
+import { formatDateTime } from "../../lib/timezone";
 import { useCallback, useEffect, useState } from "react";
 import { useOutletContext, useNavigate } from "react-router-dom";
 import { motion, useReducedMotion } from "framer-motion";
@@ -202,7 +203,7 @@ export default function Overview() {
             <div key={call.lead_id} className="grid sm:grid-cols-[1fr_auto] gap-3 rounded-md border bg-background p-3 text-sm">
               <div className="min-w-0">
                 <div className="font-medium truncate">{call.lead_name || call.phone || "Unnamed Lead"}</div>
-                <div className="text-xs text-muted-foreground">{call.phone || "No phone"} - {call.scheduled_for ? new Date(call.scheduled_for).toLocaleString() : "No time"}</div>
+                <div className="text-xs text-muted-foreground">{call.phone || "No phone"} - {call.scheduled_for ? formatDateTime(call.scheduled_for) : "No time"}</div>
               </div>
               <button onClick={() => cancelScheduledCall(call.lead_id)} disabled={cancellingCallId === call.lead_id} className="inline-flex items-center justify-center gap-1.5 px-3 h-9 rounded-md border bg-card hover:bg-accent text-xs font-semibold disabled:opacity-50">
                 {cancellingCallId === call.lead_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Ban className="w-3.5 h-3.5" />}

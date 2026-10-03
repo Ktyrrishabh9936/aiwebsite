@@ -1,3 +1,4 @@
+import { getAppTimezone } from "./timezone";
 import api, { API } from "./api";
 
 export function newManagerId() {
@@ -53,7 +54,7 @@ export async function streamManagerAgent(wsId, message, options, onText) {
       method: "POST", signal: controller.signal,
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("arevei_token")}` },
       body: JSON.stringify({ message, conversation_id: options.conversationId,
-        request_id: options.requestId, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" }),
+        request_id: options.requestId, timezone: getAppTimezone() }),
     });
     if (!response.ok) {
       const failure = await response.json().catch(() => ({}));

@@ -1,10 +1,12 @@
+import { appDate } from "../../lib/timezone";
 import { useEffect, useState } from "react";
+import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import api, { formatError } from "../../lib/api";
 
 export function recentPeriod() {
   const end = new Date();
   const start = new Date(end); start.setUTCDate(start.getUTCDate() - 29);
-  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10), profile_id: "", status: "" };
+  return { start: appDate(start), end: appDate(end), profile_id: "", status: "" };
 }
 
 const percent = (value) => value == null ? "—" : `${value}%`;
@@ -51,6 +53,7 @@ function ReviewChart({ reviews }) {
 }
 
 export default function CrmPerformance({ wsId, states = [] }) {
+  const [view, setView] = useState("calling");
   const [filters, setFilters] = useState(recentPeriod);
   const [profiles, setProfiles] = useState([]);
   const [data, setData] = useState(null);
@@ -58,6 +61,11 @@ export default function CrmPerformance({ wsId, states = [] }) {
   const [profileError, setProfileError] = useState("");
   const [loading, setLoading] = useState(true);
   const [refresh, setRefresh] = useState(0);
+  useEffect(() => {
+    const reload = (event) => { if (event.detail?.wsId === wsId) setRefresh((value) => value + 1); };
+    window.addEventListener("arevei:lead-metrics-changed", reload);
+    return () => window.removeEventListener("arevei:lead-metrics-changed", reload);
+  }, [wsId]);
   useEffect(() => {
     let live = true;
     setProfiles([]); setProfileError("");
@@ -76,9 +84,10 @@ export default function CrmPerformance({ wsId, states = [] }) {
     return () => { live = false; };
   }, [wsId, filters, refresh]);
   const change = (key, value) => setFilters((old) => ({ ...old, [key]: value }));
-  const f = data?.funnel || {}, c = data?.calling || {}, q = data?.qualification || {}, r = data?.reviews || {};
+  const f = data?.funnel || {}, c = data?.calling || {}, q = data?.qualification || {}, r = data?.reviews || {}, sales = data?.sales || {};
+  const stageLabel = (key) => states.find((state) => state.key === key)?.label || key.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
   return <div className="space-y-6" aria-label="CRM Performance">
-    <div><h2 className="text-xl font-bold">CRM Performance</h2><p className="text-sm text-muted-foreground mt-1">Leads created in the selected UTC date range, with their current qualification and human review. Calls shown were attempted in this range for those leads. Trashed leads are excluded.</p></div>
+    <div><h2 className="text-xl font-bold">CRM Performance</h2><p className="text-sm text-muted-foreground mt-1">Leads created in the selected application timezone date range, with their current qualification and human review. Calls shown were attempted in this range for those leads. Test and trashed leads are excluded.</p></div>
     <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-4">
       {["start", "end"].map((key) => <label key={key} className="text-xs">{key === "start" ? "Start date" : "End date"}<input type="date" value={filters[key]} onChange={(e) => change(key, e.target.value)} className="block border rounded-md bg-background p-2 mt-1 text-sm" /></label>)}
       <label className="text-xs">Qualification profile<select value={filters.profile_id} onChange={(e) => change("profile_id", e.target.value)} className="block border rounded-md bg-background p-2 mt-1 text-sm"><option value="">All profiles</option>{profiles.map((p) => <option key={p.id} value={p.id}>{p.product_name}</option>)}</select></label>
@@ -88,8 +97,13 @@ export default function CrmPerformance({ wsId, states = [] }) {
     {profileError && <p role="alert" className="text-sm text-destructive">{profileError}</p>}
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     {loading && <p role="status">Loading performance…</p>}
+    <div role="tablist" aria-label="Performance reports" className="flex flex-wrap gap-2 border-b pb-3">
+      {[["calling", "Calling & qualification"], ["sales", "Leads & sales"]].map(([key, label]) =>
+        <button key={key} type="button" role="tab" aria-selected={view === key} onClick={() => setView(key)} className={`rounded-md px-4 py-2 text-sm font-medium ${view === key ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:text-foreground"}`}>{label}</button>)}
+    </div>
     {data && <>
       {f.total_leads === 0 && <p className="rounded-lg border border-dashed p-6 text-muted-foreground">No leads match these filters. Change the date range or filters to see performance.</p>}
+      {view === "calling" ? <>
       <Metrics title="Performance at a glance" items={[["Total leads", f.total_leads], ["Connection rate", percent(c.connection_rate)], ["Qualification completion", percent(q.completion_rate)], ["Average call duration", c.average_duration_seconds == null ? "—" : `${c.average_duration_seconds}s`]]} />
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
         <BarChart title="Lead reach" description="Lead counts. Eligibility reflects current phone, DND and junk restrictions; calling windows, retry limits and provider readiness still apply." items={[["Total leads", f.total_leads], ["Leads eligible for calling", f.eligible_leads, "bg-sky-500"], ["Leads attempted", f.leads_attempted, "bg-indigo-500"]]} />
@@ -98,6 +112,24 @@ export default function CrmPerformance({ wsId, states = [] }) {
         <ReviewChart reviews={r} />
       </div>
       <details className="rounded-lg border p-4 text-xs text-muted-foreground leading-relaxed"><summary className="cursor-pointer font-medium text-foreground">How these metrics are calculated</summary><div className="mt-3 space-y-2"><p>Connection rate = connected calls ÷ calls attempted. Average duration uses completed conversations with a recorded duration.</p><p>Qualification completion = qualified or disqualified results ÷ all saved AI results. With a profile filter, calls use their recorded profile and qualifications use the latest result’s profile.</p><p>Each bar chart uses its own count scale. Unknown rates and durations appear as —.</p></div></details>
+      </> : <>
+        <Metrics title="Lead and sales overview" items={[["Total leads", sales.total_leads], ["Junk", `${sales.junk ?? 0} · ${percent(sales.junk_rate)}`], ["Not qualified", `${sales.not_qualified ?? 0} · ${percent(sales.not_qualified_rate)}`], ["Converted", `${sales.converted ?? 0} · ${percent(sales.conversion_rate)}`], ["Demo / meeting", sales.demo_meeting], ["Proposal", sales.proposal], ["Payment issues", sales.payment_issues]]} />
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+          <section className="rounded-xl border bg-card p-5 sm:p-6 space-y-4">
+            <div><h3 className="font-semibold">Lead trend</h3><p className="text-xs text-muted-foreground mt-1">Created leads by UTC day. Converted shows how many from each day are customers now.</p></div>
+            {(sales.trend || []).length ? <div className="h-64" role="img" aria-label="Daily leads created and currently converted">
+              <ResponsiveContainer width="100%" height="100%"><AreaChart data={sales.trend} margin={{ top: 10, right: 10, left: -25, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" opacity={0.3} /><XAxis dataKey="date" tickFormatter={(value) => value.slice(5)} minTickGap={25} fontSize={11} /><YAxis allowDecimals={false} fontSize={11} /><Tooltip />
+                <Area type="monotone" dataKey="leads" name="Total leads" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.18} />
+                <Area type="monotone" dataKey="converted" name="Converted" stroke="#10b981" fill="#10b981" fillOpacity={0.25} />
+              </AreaChart></ResponsiveContainer>
+            </div> : <p className="text-sm text-muted-foreground">No leads to chart for this selection.</p>}
+          </section>
+          <BarChart title="Sales stages" description="Current lead stage counts. These are separate from AI qualification results." items={[["Demo / meeting", sales.demo_meeting, "bg-sky-500"], ["Proposal", sales.proposal, "bg-violet-500"], ["Payment issues", sales.payment_issues, "bg-amber-500"], ["Converted", sales.converted, "bg-emerald-500"]]} />
+        </div>
+        <section className="rounded-xl border bg-card p-5 sm:p-6 space-y-3"><h3 className="font-semibold">Current CRM stages</h3><p className="text-xs text-muted-foreground">Every lead appears in one current stage.</p><div className="flex flex-wrap gap-2">{(sales.stages || []).map(({ key, count }) => <span key={key} className="rounded-full border bg-muted/40 px-3 py-1.5 text-sm">{stageLabel(key)} <strong className="ml-1 tabular-nums">{count}</strong></span>)}</div></section>
+        <p className="text-xs text-muted-foreground leading-relaxed">Percentages use total leads in this selection. Junk and not qualified are separate, based on the latest saved qualification. Converted means Won, customer, or a recorded conversion. Demo, proposal and payment issues count leads in matching CRM stages; add those stages in CRM Settings if your pipeline uses them. Trashed leads are excluded.</p>
+      </>}
     </>}
   </div>;
 }

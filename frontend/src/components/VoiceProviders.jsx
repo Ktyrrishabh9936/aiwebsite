@@ -1,3 +1,4 @@
+import { formatDateTime } from "../lib/timezone";
 import { useEffect, useState } from "react";
 import api, { formatError } from "../lib/api";
 
@@ -138,9 +139,9 @@ export default function VoiceProviders({ workspaceId }) {
       </details>
       <div className="flex gap-3"><button type="button" className="border rounded px-3 py-2 text-sm" onClick={() => run()}>Save</button><button type="button" className="border rounded px-3 py-2 text-sm" onClick={() => run(true)}>Save & Test Connection</button></div>
     </fieldset>
-    <p className="text-sm">Status: {(selected?.status || "missing_configuration").replaceAll("_", " ")}{selected?.is_default && " · Workspace default"}{selected?.last_verified_at && ` · Checked ${new Date(selected.last_verified_at).toLocaleString()}`}</p>
+    <p className="text-sm">Status: {(selected?.status || "missing_configuration").replaceAll("_", " ")}{selected?.is_default && " · Workspace default"}{selected?.last_verified_at && ` · Checked ${formatDateTime(selected.last_verified_at)}`}</p>
     {message && <p role="status" className="text-sm">{message}</p>}
-    <div className="space-y-2"><h3 className="font-semibold text-sm">Webhooks</h3><p className="text-xs text-muted-foreground">{selected?.last_callback_at ? `Last verified callback: ${new Date(selected.last_callback_at).toLocaleString()}` : "No verified callback received yet"}</p>
+    <div className="space-y-2"><h3 className="font-semibold text-sm">Webhooks</h3><p className="text-xs text-muted-foreground">{selected?.last_callback_at ? `Last verified callback: ${formatDateTime(selected.last_callback_at)}` : "No verified callback received yet"}</p>
       {selected?.webhooks?.message && <p className="text-sm">{selected.webhooks.message}</p>}
       {selected?.webhooks?.endpoints?.map((endpoint) => <div key={endpoint.event} className="text-xs border rounded p-2 space-y-1"><p>{endpoint.method} · {endpoint.event}</p><code className="break-all">{endpoint.url}</code><button type="button" className="block underline" onClick={() => copy(endpoint.url, "Webhook URL copied")}>Copy</button></div>)}
       <p className="text-xs text-muted-foreground">{provider === "plivo" ? "Use Plivo signatures, or send your saved callback token in the X-Arevei-Webhook-Token header for qualification results." : "Callback URLs and authentication metadata are attached automatically to each outbound call."}</p>

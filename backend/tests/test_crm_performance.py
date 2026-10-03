@@ -96,6 +96,26 @@ def test_eligibility_qualification_completion_and_followup():
     assert data["qualification"]["completion_rate"] == 50
 
 
+def test_sales_report_counts_current_stages_and_separate_junk_from_unqualified():
+    junk, unqualified, converted, demo, proposal, payment = [lead() for _ in range(6)]
+    junk["lead_status"] = "JUNK"
+    unqualified["lead_status"] = "UNQUALIFIED"
+    converted.update(status="won", customer_status="customer")
+    demo["status"] = "demo_meeting"
+    proposal["status"] = "proposal_sent"
+    payment["status"] = "payment_issue"
+    sales = report(junk, unqualified, converted, demo, proposal, payment)["sales"]
+    assert {key: sales[key] for key in ("total_leads", "junk", "not_qualified", "converted", "demo_meeting", "proposal", "payment_issues")} == {
+        "total_leads": 6, "junk": 1, "not_qualified": 1, "converted": 1,
+        "demo_meeting": 1, "proposal": 1, "payment_issues": 1,
+    }
+    assert sales["junk_rate"] == sales["not_qualified_rate"] == sales["conversion_rate"] == 16.7
+    assert sales["trend"] == [{"date": "2026-09-20", "leads": 6, "converted": 1}]
+    assert {stage["key"]: stage["count"] for stage in sales["stages"]} == {
+        "new": 2, "won": 1, "demo_meeting": 1, "proposal_sent": 1, "payment_issue": 1,
+    }
+
+
 def test_profile_filter_does_not_assign_current_profile_to_old_calls():
     doc = lead()
     doc["crm_call_logs"] = [log()]

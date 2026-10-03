@@ -106,7 +106,7 @@ class ManagerTools:
             from crm import crm_analytics_overview
             from crm import lead_query
             result = await crm_analytics_overview(self.ws_id, self.request)
-            total = await self.db.crm_leads.count_documents(lead_query(self.ws_id))
+            total = await self.db.crm_leads.count_documents(lead_query(self.ws_id, exclude_test=True))
             return {**result, "active_lead_total": total, "analytics_limit": 5000, "analytics_capped": total > 5000}
         if name == "list_followups":
             from crm_workspace import reminders

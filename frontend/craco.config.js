@@ -145,7 +145,16 @@ if (isDevServer) {
 }
 
 const configureDevServer = webpackConfig.devServer;
-webpackConfig.devServer = (devServerConfig) =>
-  makeDevServerV5Compatible(configureDevServer(devServerConfig));
+webpackConfig.devServer = (devServerConfig) => {
+  const config = makeDevServerV5Compatible(configureDevServer(devServerConfig));
+  if (process.env.DEV_API_PROXY_TARGET) {
+    config.proxy = [{
+      context: ["/api"],
+      target: process.env.DEV_API_PROXY_TARGET,
+      changeOrigin: true,
+    }];
+  }
+  return config;
+};
 
 module.exports = webpackConfig;

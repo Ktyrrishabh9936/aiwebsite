@@ -175,7 +175,7 @@ export default function WorkspaceLayout() {
           <div className="min-h-16 px-3 sm:px-5 py-2 flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0 flex items-center gap-3">
               <button type="button" onClick={() => setMobileNavigation(true)} aria-label="Open navigation" className={`${agentMode ? "" : "md:hidden"} p-2 rounded-lg border hover:bg-accent`}><Menu size={18} /></button>
-              <div className="min-w-0"><p className="text-[11px] text-muted-foreground truncate max-w-48">{ws.name}</p><h2 className="font-semibold truncate">{agentMode ? "Agent workspace" : pageTitle}</h2></div>
+              <div className="min-w-0"><p className="text-[11px] text-muted-foreground truncate max-w-48">{ws.name}</p><h2 className="font-semibold truncate">{agentMode ? "AI Manager" : pageTitle}</h2></div>
             </div>
             <div className="flex rounded-full border border-border p-1 gap-1" role="group" aria-label="Workspace mode">
               <button type="button" aria-pressed={!agentMode} onClick={() => setAgentMode(false)} className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-xs font-semibold ${!agentMode ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}><Users size={14} /> Human Mode</button>

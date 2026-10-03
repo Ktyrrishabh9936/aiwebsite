@@ -1,3 +1,4 @@
+import { formatDate } from "../lib/timezone";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import api, { formatError } from "../lib/api";
@@ -118,7 +119,7 @@ function UnitCard({ wsId, propertyId, unit, unitLabel, currency, onSaved }) {
         {!occupied && <label className="text-xs font-semibold">Availability<select value={status} onChange={(event) => setStatus(event.target.value)} className="mt-1 block w-full h-9 rounded-lg border bg-background px-2 text-sm font-normal"><option value="available">Available</option><option value="reserved">Reserved / locked</option><option value="inactive">Inactive</option></select></label>}
       </div>
       <div className="flex flex-wrap gap-2"><button disabled={saving || !price} onClick={save} className="rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-50">{occupied ? `Relist ${unitLabel}` : `Save ${unitLabel}`}</button><button onClick={() => setEditing(false)} className="rounded-lg border px-3 py-2 text-sm">Cancel</button></div>
-      {!!unit.transactions?.length && <details className="text-xs"><summary className="cursor-pointer text-muted-foreground">Sale and rental history ({unit.transactions.length})</summary><ul className="mt-2 space-y-1">{unit.transactions.map((entry, index) => <li key={index}>{entry.type === "rent" ? "Rented" : "Sold"} ? {formatMoneyMinor(entry.value_minor, entry.currency || currency)} ? {new Date(entry.at).toLocaleDateString()}</li>)}</ul></details>}
+      {!!unit.transactions?.length && <details className="text-xs"><summary className="cursor-pointer text-muted-foreground">Sale and rental history ({unit.transactions.length})</summary><ul className="mt-2 space-y-1">{unit.transactions.map((entry, index) => <li key={index}>{entry.type === "rent" ? "Rented" : "Sold"} ? {formatMoneyMinor(entry.value_minor, entry.currency || currency)} ? {formatDate(entry.at)}</li>)}</ul></details>}
     </div>}
   </article>;
 }

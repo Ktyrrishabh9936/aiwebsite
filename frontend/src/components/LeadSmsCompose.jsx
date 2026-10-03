@@ -1,3 +1,4 @@
+import { formatDateTime } from "../lib/timezone";
 import { useEffect, useState } from "react";
 import { MessageSquare, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
@@ -85,7 +86,7 @@ export default function LeadSmsCompose({ open, onOpenChange, wsId, lead, apiBase
             {history.map((message) => <div key={message.id} className="rounded-lg border bg-muted/20 p-3 text-sm">
               <div className="flex items-center justify-between gap-2"><span className="font-semibold capitalize">{message.status || "Unknown"}{message.error_code ? ` · Error ${message.error_code}` : ""}</span><button type="button" onClick={() => refresh(message)} disabled={refreshing === message.id} className="inline-flex items-center gap-1 text-xs text-primary disabled:opacity-50"><RefreshCw className={`h-3.5 w-3.5 ${refreshing === message.id ? "animate-spin" : ""}`} /> Refresh</button></div>
               <p className="mt-1 whitespace-pre-wrap break-words">{message.body}</p>
-              <p className="mt-2 text-xs text-muted-foreground">{message.to} · {new Date(message.created_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</p>
+              <p className="mt-2 text-xs text-muted-foreground">{message.to} · {formatDateTime(message.created_at, { dateStyle: "medium", timeStyle: "short" })}</p>
             </div>)}
           </div>
         </div>

@@ -3,6 +3,7 @@ import hashlib
 import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -107,24 +108,28 @@ async def save_review(ws_id: str, lead_id: str, request: Request, body: ReviewIn
     return review_state({**lead, "qualification_review": review})
 
 
-def date_bounds(start, end):
-    end = end or datetime.now(timezone.utc).date()
+def date_bounds(start, end, zone_name="UTC"):
+    try:
+        zone = ZoneInfo(zone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise HTTPException(422, "Choose a valid application timezone")
+    end = end or datetime.now(zone).date()
     start = start or end - timedelta(days=29)
     if start > end:
         raise HTTPException(422, "Start date must be on or before end date")
     if end == date.max:
         raise HTTPException(422, "End date is out of range")
-    return (datetime.combine(start, datetime.min.time(), timezone.utc),
-            datetime.combine(end + timedelta(days=1), datetime.min.time(), timezone.utc))
+    return (datetime.combine(start, datetime.min.time(), zone).astimezone(timezone.utc),
+            datetime.combine(end + timedelta(days=1), datetime.min.time(), zone).astimezone(timezone.utc))
 
 
 def performance_pipeline(ws_id, start, end, status=None):
-    match = lead_query(ws_id)
+    match = lead_query(ws_id, exclude_test=True)
     match["created_at"] = {"$gte": start.isoformat(), "$lt": end.isoformat()}
     if status:
         match["status"] = status
     pipeline = [{"$match": match}, {"$project": {key: 1 for key in (
-        "created_at", "status", "lead_status", "do_not_call", "phone", "field_values.phone",
+        "created_at", "status", "lead_status", "customer_status", "converted_at", "do_not_call", "phone", "field_values.phone", "is_test_lead",
         "qualification_call.call_uuid", "qualification_call.session_id", "qualification_call.engine_result",
         "qualification_call.structured_qualification", "qualification_call.qualification_status",
         "qualification_call.qualification_category", "qualification_call.qualification_profile_id",
@@ -191,16 +196,28 @@ def rate(numerator, denominator):
     return round(100 * numerator / denominator, 1) if denominator else None
 
 
+SALES_STAGE_KEYS = {
+    "demo_meeting": {"demo", "demo_meeting", "demo_scheduled", "meeting", "meeting_scheduled", "site_visit", "visit_scheduled"},
+    "proposal": {"proposal", "proposal_sent", "quote", "quote_sent", "quotation", "quotation_sent"},
+    "payment_issues": {"payment_issue", "payment_issues", "payment_pending", "payment_failed", "payment_overdue", "payment_problem"},
+}
+
+
 class PerformanceTotals:
     def __init__(self):
         self.funnel = {k: 0 for k in ("total_leads", "eligible_leads", "leads_attempted")}
         self.calling = {k: 0 for k in ("calls_attempted", "connected", "no_answer", "busy", "failed", "completed_conversations")}
         self.qualification = {k: 0 for k in ("qualified", "disqualified", "follow_up_required", "completed", "ai_results")}
         self.reviews = {k: 0 for k in ("reviewed", "correct", "incorrect", "not_reviewed")}
+        self.sales = {k: 0 for k in ("total_leads", "junk", "not_qualified", "converted", "demo_meeting", "proposal", "payment_issues")}
+        self.sales_trend = {}
+        self.sales_stages = {}
         self.duration_sum = 0
         self.duration_count = 0
 
-    def add(self, lead, start, end, profile_id=None):
+    def add(self, lead, start, end, profile_id=None, zone_name="UTC"):
+        if lead.get("is_test_lead") is True:
+            return
         q = lead.get("qualification_call") or {}
         calls = [call for call in canonical_calls(lead) if in_period(call.get("created_at"), start, end)]
         current_profile = q.get("qualification_profile_id") or lead.get("qualification_profile_id")
@@ -208,6 +225,27 @@ class PerformanceTotals:
             return
         calls = [c for c in calls if not profile_id or c.get("profile_id") == profile_id]
         self.funnel["total_leads"] += 1
+        self.sales["total_leads"] += 1
+        lead_status = str(lead.get("lead_status") or "").upper()
+        qualification = q.get("engine_result") or {}
+        junk = lead_status == "JUNK" or qualification.get("lead_status") == "JUNK" or is_junk_lead(lead)
+        self.sales["junk"] += junk
+        self.sales["not_qualified"] += not junk and (
+            lead_status == "UNQUALIFIED" or qualification.get("lead_status") == "UNQUALIFIED"
+            or q.get("qualification_status") == "not_qualified"
+        )
+        converted = lead.get("status") == "won" or lead.get("customer_status") == "customer" or bool(lead.get("converted_at"))
+        self.sales["converted"] += converted
+        stage = str(lead.get("status") or "new")
+        self.sales_stages[stage] = self.sales_stages.get(stage, 0) + 1
+        for metric, keys in SALES_STAGE_KEYS.items():
+            self.sales[metric] += stage in keys
+        created = parse_iso_datetime(lead.get("created_at"))
+        day = created.astimezone(ZoneInfo(zone_name)).date().isoformat() if created else ""
+        if day:
+            bucket = self.sales_trend.setdefault(day, {"date": day, "leads": 0, "converted": 0})
+            bucket["leads"] += 1
+            bucket["converted"] += converted
         if lead_phone_from_doc(lead) and not lead.get("do_not_call") and lead.get("lead_status") != "JUNK" and not is_junk_lead(lead):
             self.funnel["eligible_leads"] += 1
         self.funnel["leads_attempted"] += bool(calls)
@@ -254,7 +292,12 @@ class PerformanceTotals:
         self.calling["connection_rate"] = rate(self.calling["connected"], self.calling["calls_attempted"])
         self.calling["average_duration_seconds"] = round(self.duration_sum / self.duration_count, 1) if self.duration_count else None
         self.qualification["completion_rate"] = rate(self.qualification["completed"], self.qualification["ai_results"])
-        return {"funnel": self.funnel, "calling": self.calling, "qualification": self.qualification, "reviews": self.reviews}
+        self.sales["junk_rate"] = rate(self.sales["junk"], self.sales["total_leads"])
+        self.sales["not_qualified_rate"] = rate(self.sales["not_qualified"], self.sales["total_leads"])
+        self.sales["conversion_rate"] = rate(self.sales["converted"], self.sales["total_leads"])
+        self.sales["trend"] = [self.sales_trend[day] for day in sorted(self.sales_trend)]
+        self.sales["stages"] = [{"key": key, "count": count} for key, count in sorted(self.sales_stages.items())]
+        return {"funnel": self.funnel, "calling": self.calling, "qualification": self.qualification, "reviews": self.reviews, "sales": self.sales}
 
 
 @router.get("/performance")
@@ -265,9 +308,11 @@ async def performance(ws_id: str, request: Request, start: date | None = None, e
     db = db_from(request)
     if profile_id and not await db.qualification_profiles.find_one({"workspace_id": ws_id, "_id": oid(profile_id)}):
         raise HTTPException(404, "Qualification profile not found")
-    lower, upper = date_bounds(start, end)
+    zone_name = request.headers.get("X-App-Timezone", "UTC")
+    lower, upper = date_bounds(start, end, zone_name)
     totals = PerformanceTotals()
     async for lead in db.crm_leads.aggregate(performance_pipeline(ws_id, lower, upper, status)):
-        totals.add(lead, lower, upper, profile_id)
-    return {**totals.output(), "filters": {"start": lower.date().isoformat(), "end": (upper - timedelta(days=1)).date().isoformat(),
-            "profile_id": profile_id, "status": status}, "date_basis": "lead_cohort_utc"}
+        totals.add(lead, lower, upper, profile_id, zone_name)
+    zone = ZoneInfo(zone_name)
+    return {**totals.output(), "filters": {"start": lower.astimezone(zone).date().isoformat(), "end": (upper.astimezone(zone) - timedelta(days=1)).date().isoformat(),
+            "profile_id": profile_id, "status": status}, "timezone": zone_name, "date_basis": "lead_cohort_utc" if zone_name == "UTC" else "lead_cohort_application_timezone"}

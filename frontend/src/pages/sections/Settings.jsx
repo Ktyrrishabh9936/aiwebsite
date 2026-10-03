@@ -1,12 +1,14 @@
 import VoiceProviders from "../../components/VoiceProviders";
 import PushNotificationSettings from "../../components/PushNotificationSettings";
 import AIUsageDashboard from "../../components/AIUsageDashboard";
+import BillingDashboard from "../../components/BillingDashboard";
 import { useEffect, useState } from "react";
 import { Link, useOutletContext } from "react-router-dom";
 import { Building2, Check, Copy, KeyRound, Loader2, PackageOpen, Phone, PhoneOff, RotateCw, Save, ShieldCheck, Smartphone } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../../context/AuthContext";
 import api from "../../lib/api";
+import TimezoneSettings from "../../components/TimezoneSettings";
 
 export default function Settings() {
   const { user } = useAuth();
@@ -134,6 +136,7 @@ export default function Settings() {
         <p className="text-muted-foreground mt-1">Manage your account and workspace preferences.</p>
       </div>
 
+      <TimezoneSettings />
       <section className="border border-border rounded-md bg-card p-6 space-y-5">
         <div>
           <h2 className="font-display text-xl font-bold">Workspace modules</h2>
@@ -179,6 +182,7 @@ export default function Settings() {
       </section>
 
       <PushNotificationSettings wsId={ws.id} />
+      {(ws.access_role === "owner" || user?.role === "admin") && <BillingDashboard wsId={ws.id} />}
       <AIUsageDashboard wsId={ws.id} />
 
       <section className="border border-border rounded-md bg-card p-6 space-y-5">

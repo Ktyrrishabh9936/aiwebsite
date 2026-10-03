@@ -1,4 +1,5 @@
 import axios from "axios";
+import { getAppTimezone } from "./timezone";
 
 const backendUrl = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/+$/, "");
 const API = `${backendUrl}/api`;
@@ -8,6 +9,7 @@ const api = axios.create({ baseURL: API });
 api.interceptors.request.use((cfg) => {
   const token = localStorage.getItem("arevei_token");
   if (token) cfg.headers.Authorization = `Bearer ${token}`;
+  cfg.headers["X-App-Timezone"] = getAppTimezone();
   return cfg;
 });
 

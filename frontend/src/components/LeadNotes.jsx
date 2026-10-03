@@ -1,3 +1,4 @@
+import { formatDateTime } from "../lib/timezone";
 import { useState } from "react";
 import { MessageSquare, PhoneCall, Bot, Trash2, Send } from "lucide-react";
 
@@ -34,7 +35,7 @@ export default function LeadNotes({ notes = [], saving, onAdd, onDelete }) {
                     {note.recording_url && <a href={note.recording_url} target="_blank" rel="noreferrer" className="mt-1 block text-[10px] underline underline-offset-2 opacity-90">Open recording</a>}
                     <div className="mt-1 flex items-center justify-end gap-2 text-[10px] opacity-80">
                       <span>{note.author}</span>
-                      <span>{new Date(note.created_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short", hour12: true })}</span>
+                      <span>{formatDateTime(note.created_at, { dateStyle: "medium", timeStyle: "short", hour12: true })}</span>
                       {onDelete && <button onClick={() => onDelete(note.id)} disabled={saving} className="opacity-80 hover:opacity-100 disabled:opacity-40" title="Remove note"><Trash2 className="w-3 h-3" /></button>}
                     </div>
                   </div>

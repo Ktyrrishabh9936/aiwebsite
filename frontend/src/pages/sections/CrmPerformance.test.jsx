@@ -5,7 +5,7 @@ import CrmInbox from "./CrmInbox";
 import api from "../../lib/api";
 
 jest.mock("react-router-dom", () => ({ useParams: () => ({ wsId: "workspace" }), useLocation: () => ({ search: "" }), Link: ({ children, to, ...props }) => <a href={to} {...props}>{children}</a> }), { virtual: true });
-jest.mock("../../lib/api", () => ({ __esModule: true, API: "/api", formatError: (v) => v, default: { get: jest.fn() } }));
+jest.mock("../../lib/api", () => ({ __esModule: true, API: "/api", formatError: (v) => v, default: { get: jest.fn(), patch: jest.fn() } }));
 jest.mock("../../components/LeadQualificationPanel", () => () => null);
 let container, root, response;
 beforeEach(() => {
@@ -31,6 +31,22 @@ test("empty and no-review states do not invent zero accuracy", async () => {
   await act(async () => root.render(<CrmPerformance wsId="workspace" />));
   expect(container.textContent).toContain("No leads match these filters");
   expect(container.textContent).toContain("Not enough reviewed data");
+});
+
+test("Leads & sales tab shows cohort rates and recorded sales stages", async () => {
+  response.sales = {
+    total_leads: 102, junk: 12, junk_rate: 11.8, not_qualified: 20, not_qualified_rate: 19.6,
+    converted: 8, conversion_rate: 7.8, demo_meeting: 6, proposal: 4, payment_issues: 2,
+    trend: [{ date: "2026-09-20", leads: 102, converted: 8 }], stages: [{ key: "proposal", count: 4 }],
+  };
+  await act(async () => root.render(<CrmPerformance wsId="workspace" states={[{ key: "proposal", label: "Proposal sent" }]} />));
+  await act(async () => container.querySelector('[role="tab"][aria-selected="false"]').click());
+  expect(container.textContent).toContain("Lead and sales overview");
+  expect(container.textContent).toContain("12 · 11.8%");
+  expect(container.textContent).toContain("20 · 19.6%");
+  expect(container.textContent).toContain("8 · 7.8%");
+  expect(container.textContent).toContain("Payment issues");
+  expect(container.textContent).toContain("Proposal sent");
 });
 
 test("profile and status filters are sent to the scoped API", async () => {
@@ -85,4 +101,57 @@ test("a Sheet sync event refreshes only the paginated lead list", async () => {
     expect.objectContaining({ signal: undefined }),
   );
   expect(api.get.mock.calls.some(([url]) => url.includes("/crm/bootstrap"))).toBe(false);
+});
+
+test("selecting Test lead immediately saves and unmarks without Save CRM", async () => {
+  const summary = { id: "test-lead", status: "new", field_values: { full_name: "Test customer" }, created_at: "2026-09-25T00:00:00Z" };
+  api.get.mockImplementation(async (url) => ({ data: url.includes("/crm/bootstrap?")
+    ? { settings: { fields: [{ key: "full_name", label: "Name", active: true }], states: [{ key: "new", label: "New", color: "blue" }], templates: [], organization: {} }, agents: { agents: [] }, leads: { items: [summary], total: 1, page: 1, limit: 10 } }
+    : url.endsWith("/crm/leads/test-lead") ? summary : {} }));
+  api.patch.mockImplementation(async (url, body) => ({ data: { ...summary, ...body } }));
+  await act(async () => root.render(<CrmInbox />));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+  await act(async () => container.querySelector("tbody tr").click());
+  const checkbox = () => [...container.querySelectorAll('input[type="checkbox"]')].find((input) => input.closest("label")?.textContent.includes("Test lead"));
+  expect(checkbox().checked).toBe(false);
+  for (const expected of [true, false]) {
+    await act(async () => checkbox().click());
+    expect(api.patch).toHaveBeenLastCalledWith("/workspaces/workspace/crm/leads/test-lead/test-lead", { is_test_lead: expected });
+    expect(checkbox().checked).toBe(expected);
+    expect(container.querySelector("tbody").textContent.includes("Test lead")).toBe(expected);
+  }
+});
+
+test("performance reloads after test lead changes in the current workspace", async () => {
+  await act(async () => root.render(<CrmPerformance wsId="workspace" />));
+  api.get.mockClear();
+  await act(async () => window.dispatchEvent(new CustomEvent("arevei:lead-metrics-changed", { detail: { wsId: "other" } })));
+  expect(api.get).not.toHaveBeenCalled();
+  await act(async () => window.dispatchEvent(new CustomEvent("arevei:lead-metrics-changed", { detail: { wsId: "workspace" } })));
+  expect(api.get).toHaveBeenCalledWith("/workspaces/workspace/crm/performance", expect.any(Object));
+});
+
+test("core details save on blur, stage saves immediately, and attribution starts closed", async () => {
+  let lead = { id: "autosave", status: "new", customer_status: "lead", field_values: { full_name: "Original" }, tags: [], created_at: "2026-09-25T00:00:00Z" };
+  api.get.mockImplementation(async (url) => ({ data: url.includes("/crm/bootstrap?")
+    ? { settings: { fields: [{ key: "full_name", label: "Name", active: true }], states: [{ key: "new", label: "New", color: "blue" }, { key: "contacted", label: "Contacted", color: "amber" }], templates: [], organization: {} }, agents: { agents: [] }, leads: { items: [lead], total: 1, page: 1, limit: 10 } }
+    : url.endsWith("/crm/leads/autosave") ? lead : {} }));
+  api.patch.mockImplementation(async (url, body) => { lead = { ...lead, ...body, field_values: { ...lead.field_values, ...body.field_values } }; return { data: lead }; });
+  await act(async () => root.render(<CrmInbox />));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+  await act(async () => container.querySelector("tbody tr").click());
+  const detail = container.querySelector('[aria-label="Lead details"]');
+  expect([...detail.querySelectorAll("button")].some((button) => button.textContent === "Save CRM")).toBe(false);
+  expect([...detail.querySelectorAll("details")].find((element) => element.textContent.includes("Meta Attribution")).open).toBe(false);
+  const name = detail.querySelector('[aria-label="Name"]');
+  const tags = detail.querySelector('[aria-label="Lead tags and customer relationship"]');
+  expect(name.compareDocumentPosition(tags) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(detail.querySelector('[aria-label="Payment mode"]').compareDocumentPosition(name) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(name, "Updated"); name.dispatchEvent(new Event("input", { bubbles: true })); });
+  expect(api.patch).not.toHaveBeenCalled();
+  await act(async () => name.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+  expect(api.patch).toHaveBeenLastCalledWith("/workspaces/workspace/crm/leads/autosave", { field_values: { full_name: "Updated" } });
+  const stage = detail.querySelector('[aria-label="Lead state"]');
+  await act(async () => { stage.value = "contacted"; stage.dispatchEvent(new Event("change", { bubbles: true })); });
+  expect(api.patch).toHaveBeenLastCalledWith("/workspaces/workspace/crm/leads/autosave", { status: "contacted" });
 });

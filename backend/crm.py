@@ -3,6 +3,7 @@ import re
 import asyncio
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bson import ObjectId
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
@@ -46,6 +47,17 @@ DEFAULT_STATES = [
     {"key": "ai_qualified", "label": "AI Qualified", "color": "emerald", "order": 3},
     {"key": "won", "label": "Won", "color": "emerald", "order": 4},
     {"key": "lost", "label": "Lost", "color": "red", "order": 5},
+]
+TAG_COLORS = {"emerald", "amber", "blue", "violet", "rose", "slate", "cyan", "orange"}
+DEFAULT_TAG_LIBRARY = [
+    {"label": "Qualified", "color": "emerald"},
+    {"label": "Manual Review", "color": "amber"},
+    {"label": "Pending", "color": "slate"},
+    {"label": "VIP", "color": "violet"},
+    {"label": "Hot Lead", "color": "orange"},
+    {"label": "Follow-up", "color": "blue"},
+    {"label": "Repeat Enquiry", "color": "cyan"},
+    {"label": "Not Interested", "color": "rose"},
 ]
 DEFAULT_PAYMENT_STAGES = []
 DEFAULT_TEMPLATE = {
@@ -237,11 +249,13 @@ async def ensure_crm_settings(db, ws_id):
         # persists the normalized representation outside request handling.
         settings["fields"] = fields
         settings["states"] = states
+        settings["tag_library"] = settings.get("tag_library") or deepcopy(DEFAULT_TAG_LIBRARY)
         return settings
     settings = {
         "workspace_id": ws_id,
         "fields": deepcopy(DEFAULT_FIELDS),
         "states": deepcopy(DEFAULT_STATES),
+        "tag_library": deepcopy(DEFAULT_TAG_LIBRARY),
         "templates": [deepcopy(DEFAULT_TEMPLATE)],
         "organization": deepcopy(DEFAULT_ORGANIZATION),
         "created_at": now_iso(),
@@ -308,8 +322,10 @@ def validate_field_values(values, settings):
     return clean
 
 
-def lead_query(ws_id, include_trashed=False, only_trashed=False):
+def lead_query(ws_id, include_trashed=False, only_trashed=False, exclude_test=False):
     q = {"workspace_id": ws_id}
+    if exclude_test:
+        q["is_test_lead"] = {"$ne": True}
     if only_trashed:
         q["deleted_at"] = {"$ne": None}
     elif not include_trashed:
@@ -320,6 +336,8 @@ def lead_query(ws_id, include_trashed=False, only_trashed=False):
 
 
 LEAD_SUMMARY_FIELDS = {
+    "tags": 1,
+    "is_test_lead": 1,
     "sales_assignment": 1,
     "workspace_id": 1, "field_values": 1, "status": 1,
     "customer_status": 1, "conversion_type": 1,
@@ -333,7 +351,7 @@ LEAD_SUMMARY_FIELDS = {
 
 LEAD_SEARCH_FIELDS = (
     "field_values.full_name", "full_name", "field_values.phone", "phone",
-    "field_values.email", "email", "meta_campaign_name", "campaign_name",
+    "field_values.email", "email", "tags", "meta_campaign_name", "campaign_name",
     "field_values.campaign_name", "fields.campaign_name",
 )
 LEAD_CAMPAIGN_FIELDS = ("meta_campaign_name", "campaign_name", "field_values.campaign_name", "fields.campaign_name")
@@ -440,6 +458,7 @@ def build_manual_lead(ws_id, body, settings):
         "field_values": values,
         "status": status,
         "customer_status": "lead",
+        "tags": normalize_lead_tags(body.get("tags", [])),
         "conversion_type": None,
         "converted_at": None,
         "payment_plan": {},
@@ -642,8 +661,18 @@ def zero_crm_analytics(now=None):
     }
 
 
-def build_crm_analytics(leads, now=None, day_limit=30, month_limit=12):
-    now = now or datetime.now(timezone.utc)
+def build_crm_analytics(leads, now=None, day_limit=30, month_limit=12, zone_name="UTC"):
+    try:
+        zone = ZoneInfo(zone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise HTTPException(422, "Choose a valid application timezone")
+    now = (now or datetime.now(timezone.utc)).astimezone(zone)
+    def day_key(value):
+        # Payment date-only values represent a calendar day, not a UTC instant.
+        if isinstance(value, str) and len(value) == 10:
+            return value
+        parsed = parse_date(value)
+        return parsed.astimezone(zone).date().isoformat() if parsed else ""
     analytics = zero_crm_analytics(now)
     today = analytics["today"]
     this_month = analytics["this_month"]
@@ -659,8 +688,10 @@ def build_crm_analytics(leads, now=None, day_limit=30, month_limit=12):
     today_receipts = 0
 
     for lead in leads or []:
-        created_day = date_key(lead.get("created_at"))
-        created_month = month_key(lead.get("created_at"))
+        if lead.get("is_test_lead") is True:
+            continue
+        created_day = day_key(lead.get("created_at"))
+        created_month = created_day[:7]
         status = str(lead.get("status") or "unknown").strip() or "unknown"
         customer_status = str(lead.get("customer_status") or "lead").strip() or "lead"
         analytics["totals"]["leads"] += 1
@@ -702,8 +733,8 @@ def build_crm_analytics(leads, now=None, day_limit=30, month_limit=12):
             if not receipt_is_collected(receipt):
                 continue
             amount = money_value(receipt.get("amount"))
-            payment_day = date_key(receipt.get("payment_date") or receipt.get("created_at"))
-            payment_month = month_key(receipt.get("payment_date") or receipt.get("created_at"))
+            payment_day = day_key(receipt.get("payment_date") or receipt.get("created_at"))
+            payment_month = payment_day[:7]
             total_collected += amount
             receipt_count += 1
             if payment_month == this_month:
@@ -1394,9 +1425,9 @@ async def update_organization(ws_id: str, request: Request, body: dict = Body(..
 async def crm_analytics_overview(ws_id: str, request: Request):
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
-    docs = await db.crm_leads.find(lead_query(ws_id)).sort("created_at", -1).to_list(5000)
+    docs = await db.crm_leads.find(lead_query(ws_id, exclude_test=True)).sort("created_at", -1).to_list(5000)
     leads = [decorate_lead(doc, settings) for doc in docs]
-    return build_crm_analytics(leads)
+    return build_crm_analytics(leads, zone_name=request.headers.get("X-App-Timezone", "UTC"))
 
 
 @router.get("/leads")
@@ -1592,6 +1623,82 @@ async def delete_lead_note(ws_id: str, lead_id: str, note_id: str, request: Requ
     return decorate_lead(await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)}), settings)
 
 
+@router.put("/tag-library")
+async def save_tag_library(ws_id: str, request: Request, body: dict = Body(...)):
+    names = normalize_lead_tags(body.get("names"))
+    color = body.get("color", "blue")
+    if not isinstance(color, str) or color not in TAG_COLORS:
+        raise HTTPException(422, "Choose a supported tag color")
+    if not names:
+        raise HTTPException(422, "Provide at least one tag name")
+    db = db_from(request)
+    settings = await ensure_crm_settings(db, ws_id)
+    library = deepcopy(settings.get("tag_library") or DEFAULT_TAG_LIBRARY)
+    for name in names:
+        existing = next((tag for tag in library if tag["label"].casefold() == name.casefold()), None)
+        if existing:
+            existing["color"] = color
+        else:
+            library.append({"label": name, "color": color})
+    if len(library) > 200:
+        raise HTTPException(422, "A workspace can have up to 200 reusable tags")
+    await db.crm_settings.update_one({"workspace_id": ws_id}, {"$set": {"tag_library": library, "updated_at": now_iso()}})
+    return {"tags": library}
+
+
+def normalize_lead_tags(tags):
+    if not isinstance(tags, list) or len(tags) > 50:
+        raise HTTPException(422, "Provide up to 50 tags")
+    clean, seen = [], set()
+    for tag in tags:
+        if not isinstance(tag, str) or not tag.strip() or len(tag.strip()) > 50:
+            raise HTTPException(422, "Each tag must contain 1 to 50 characters")
+        label = tag.strip()
+        if label.casefold() not in seen:
+            clean.append(label)
+            seen.add(label.casefold())
+    return clean
+
+
+@router.patch("/leads/{lead_id}/labels")
+async def set_lead_labels(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
+    updates = {}
+    if "tags" in body:
+        updates["tags"] = normalize_lead_tags(body["tags"])
+    if "customer_status" in body:
+        if not isinstance(body["customer_status"], str) or body["customer_status"] not in {"lead", "customer"}:
+            raise HTTPException(422, "Customer status must be lead or customer")
+        updates["customer_status"] = body["customer_status"]
+    if not updates:
+        raise HTTPException(422, "Provide tags or customer status")
+    db = db_from(request)
+    query = {"workspace_id": ws_id, "_id": oid(lead_id), "deleted_at": None}
+    doc = await db.crm_leads.find_one(query)
+    if not doc:
+        raise HTTPException(404, "Active lead not found")
+    # Customer relationship and tags are independent of pipeline and qualification.
+    if updates.get("customer_status") == "customer" and not doc.get("conversion_type"):
+        updates["conversion_type"] = "single_payment"
+    updates["updated_at"] = now_iso()
+    await db.crm_leads.update_one(query, {"$set": updates})
+    return decorate_lead(await db.crm_leads.find_one(query), await ensure_crm_settings(db, ws_id))
+
+
+@router.patch("/leads/{lead_id}/test-lead")
+async def set_test_lead(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
+    if type(body.get("is_test_lead")) is not bool:
+        raise HTTPException(status_code=422, detail="Test lead must be true or false")
+    db = db_from(request)
+    query = {"workspace_id": ws_id, "_id": oid(lead_id), "deleted_at": None}
+    result = await db.crm_leads.update_one(query, {"$set": {
+        "is_test_lead": body["is_test_lead"], "updated_at": now_iso(),
+    }})
+    if not result.matched_count:
+        raise HTTPException(status_code=404, detail="Active lead not found")
+    settings = await ensure_crm_settings(db, ws_id)
+    return decorate_lead(await db.crm_leads.find_one(query), settings)
+
+
 @router.patch("/leads/{lead_id}")
 async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
     db = db_from(request)
@@ -1599,6 +1706,8 @@ async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = B
     doc = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": oid(lead_id)})
     if not doc:
         raise HTTPException(status_code=404, detail="Lead not found")
+    if "is_test_lead" in body and type(body["is_test_lead"]) is not bool:
+        raise HTTPException(status_code=422, detail="Test lead must be true or false")
     states = {s["key"] for s in settings.get("states", [])}
     status = body.get("status", doc.get("status", "new"))
     if status not in states:
@@ -1623,6 +1732,8 @@ async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = B
         "updated_at": now_iso(),
     }
     updates.update(pending_sheet_sync(doc, status))
+    if "is_test_lead" in body:
+        updates["is_test_lead"] = body["is_test_lead"]
     if status == "won" and (doc.get("opportunity") or {}).get("module") == "real_estate":
         _, workspace = await require_workspace_access(request, ws_id)
         from sales_modules import finalize_opportunity

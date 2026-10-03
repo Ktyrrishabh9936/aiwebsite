@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { CalendarPlus, Sparkles } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "./ui/dialog";
 import api, { formatError } from "../lib/api";
+import { formatDate, formatTime, zonedInput, inputToUtc, getAppTimezone } from "../lib/timezone";
 
 const nextHour = () => {
   const date = new Date(Date.now() + 60 * 60 * 1000);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return zonedInput(date);
 };
 
 function FollowUpDateTime({ value }) {
@@ -13,8 +14,8 @@ function FollowUpDateTime({ value }) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
   return <time dateTime={date.toISOString()} className="mt-1 inline-flex flex-wrap items-baseline gap-x-1.5 text-foreground/80">
-    <span className="font-medium">{date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}</span>
-    <span className="text-muted-foreground">{date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}</span>
+    <span className="font-medium">{formatDate(date, { day: "numeric", month: "short", year: "numeric" })}</span>
+    <span className="text-muted-foreground">{formatTime(date, { hour: "numeric", minute: "2-digit", hour12: true })}</span>
   </time>;
 }
 
@@ -70,7 +71,7 @@ export default function FollowUpAction({ wsId, lead, snapshot, compact = false }
   const save = async (event) => {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      await api.post(`${base}/leads/${lead.id}/reminders`, { title: title.trim(), note: note.trim(), due_at: new Date(dueAt).toISOString() });
+      await api.post(`${base}/leads/${lead.id}/reminders`, { title: title.trim(), note: note.trim(), due_at: inputToUtc(dueAt) });
       changed(); setOpen(false); setTitle(""); setNote(""); setReason(""); setDueAt(nextHour());
     } catch (e) { setError(formatError(e.response?.data?.detail || e.message)); }
     finally { setBusy(false); }
@@ -93,7 +94,7 @@ export default function FollowUpAction({ wsId, lead, snapshot, compact = false }
       <form onSubmit={save} className="space-y-3"><div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">Plan the next action</h3><button type="button" onClick={suggest} disabled={busy} className="inline-flex items-center gap-1 rounded-lg border px-3 py-2 text-xs font-medium disabled:opacity-50"><Sparkles size={14} /> Suggest with AI</button></div>
         {reason && <p className="text-xs text-muted-foreground">{reason}</p>}
         <label className="block text-xs">Action<input required maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} className="mt-1 w-full rounded-lg border bg-background p-2 text-sm" placeholder="Call to confirm the site visit" /></label>
-        <label className="block text-xs">When<input required type="datetime-local" value={dueAt} onChange={(event) => setDueAt(event.target.value)} className="mt-1 w-full rounded-lg border bg-background p-2 text-sm" /></label>
+        <label className="block text-xs">When ({getAppTimezone()})<input required type="datetime-local" value={dueAt} onChange={(event) => setDueAt(event.target.value)} className="mt-1 w-full rounded-lg border bg-background p-2 text-sm" /></label>
         <label className="block text-xs">Context (optional)<textarea maxLength={4000} rows={2} value={note} onChange={(event) => setNote(event.target.value)} className="mt-1 w-full rounded-lg border bg-background p-2 text-sm" placeholder="What to discuss or share" /></label>
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         <button type="submit" disabled={busy || !title.trim() || !dueAt} className="min-h-10 rounded-lg bg-primary px-4 text-sm font-semibold text-primary-foreground disabled:opacity-50">{busy ? "Working…" : "Save follow-up"}</button>

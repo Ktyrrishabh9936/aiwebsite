@@ -1,14 +1,18 @@
+import { formatDate, formatTime, appDate, zonedInput, inputToUtc, dayBounds, getAppTimezone } from "../lib/timezone";
 import { useCallback, useEffect, useState } from "react";
 import api, { formatError } from "../lib/api";
 
 export function localDate(value = new Date()) {
+  return appDate(value);
+}
+function calendarDate(value) {
   return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
 }
-const localTime = (value) => { const date = new Date(value); return `${localDate(date)}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`; };
+const localTime = (value) => zonedInput(value);
 const blank = () => ({ title: "", note: "", due_at: localTime(Date.now() + 3600000) });
 const inputClass = "w-full rounded-lg border bg-background p-2 text-sm";
-const dateLabel = (value) => new Date(value).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
-const timeLabel = (value) => new Date(value).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+const dateLabel = (value) => formatDate(value instanceof Date ? inputToUtc(`${calendarDate(value)}T12:00`) : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(value) ? inputToUtc(value.slice(0, 16)) : value, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+const timeLabel = (value) => formatTime(value, { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
 const calendarDays = (month) => {
   const start = new Date(month.getFullYear(), month.getMonth(), 1);
   start.setDate(start.getDate() - start.getDay());
@@ -17,7 +21,7 @@ const calendarDays = (month) => {
 
 export default function CrmReminders({ wsId, leadId, onOpenLead }) {
   const [day, setDay] = useState(localDate);
-  const [month, setMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
+  const [month, setMonth] = useState(() => new Date(`${appDate().slice(0, 7)}-01T12:00:00`));
   const [view, setView] = useState(leadId ? "all" : "day");
   const [status, setStatus] = useState(leadId ? "all" : "pending");
   const [items, setItems] = useState([]);
@@ -54,8 +58,7 @@ export default function CrmReminders({ wsId, leadId, onOpenLead }) {
     if (view === "overdue") params.overdue = true;
     if (view === "day") {
       if (!day) { setError("Choose a date"); setLoading(false); return; }
-      const start = new Date(`${day}T00:00:00`), end = new Date(start); end.setDate(end.getDate() + 1);
-      params.start = start.toISOString(); params.end = end.toISOString();
+      Object.assign(params, dayBounds(day));
     }
     setLoading(true); setError("");
     api.get(`${base}/reminders`, { params }).then(({ data }) => { if (live) { setItems(data.items); setTotal(data.total); } }).catch((e) => { if (live) setError(formatError(e.response?.data?.detail || e.message)); }).finally(() => { if (live) setLoading(false); });
@@ -69,7 +72,9 @@ export default function CrmReminders({ wsId, leadId, onOpenLead }) {
   }, [base]);
   const save = async (event) => {
     event.preventDefault();
-    const payload = { ...draft, due_at: new Date(draft.due_at).toISOString() };
+    let payload;
+    try { payload = { ...draft, due_at: inputToUtc(draft.due_at) }; }
+    catch (error) { setError(error.message); return; }
     if (editing) { if (await update(editing, payload)) { if (!leadId) chooseDay(localDate(new Date(payload.due_at))); setEditing(null); setDraft(blank()); } return; }
     setBusy(true); setError("");
     try { await api.post(`${base}/leads/${leadId}/reminders`, payload); if (!leadId) chooseDay(localDate(new Date(payload.due_at))); setDraft(blank()); setRevision((v) => v + 1); window.dispatchEvent(new Event("arevei:follow-up-changed")); }
@@ -77,11 +82,11 @@ export default function CrmReminders({ wsId, leadId, onOpenLead }) {
     finally { setBusy(false); }
   };
   return <section className="space-y-4" aria-label="Lead follow-ups">
-    <div><h3 className="font-semibold">{leadId ? "Lead follow-ups" : "Follow-up planner"}</h3><p className="text-xs text-muted-foreground mt-1">Plan who to contact and record the result. Due times use your local timezone. No automatic calls or messages are sent.</p></div>
+    <div><h3 className="font-semibold">{leadId ? "Lead follow-ups" : "Follow-up planner"}</h3><p className="text-xs text-muted-foreground mt-1">Plan who to contact and record the result. Due times use {getAppTimezone()}. No automatic calls or messages are sent.</p></div>
     <div className="rounded-xl border bg-card p-4" aria-label="Follow-up calendar">
       <div className="flex items-center justify-between gap-2 mb-3"><div><h4 className="font-semibold">{month.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</h4><p className="text-xs text-muted-foreground">Selected: {dateLabel(`${day}T12:00:00`)}</p></div><div className="flex gap-2"><button type="button" aria-label="Previous month" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} className="rounded-lg border px-3 py-1.5 text-sm">‹</button><button type="button" onClick={() => chooseDay(localDate())} className="rounded-lg border px-3 py-1.5 text-sm">Today</button><button type="button" aria-label="Next month" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} className="rounded-lg border px-3 py-1.5 text-sm">›</button></div></div>
       <div className="grid grid-cols-7 gap-1 text-center text-xs text-muted-foreground mb-1">{["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((name) => <span key={name}>{name}</span>)}</div>
-      <div className="grid grid-cols-7 gap-1">{calendarDays(month).map((date) => { const key = localDate(date); const selected = key === day; const isToday = key === today; return <button key={key} type="button" aria-label={dateLabel(date)} aria-current={isToday ? "date" : undefined} aria-pressed={selected} onClick={() => chooseDay(key)} className={`h-9 rounded-lg text-sm transition ${selected ? "bg-primary text-primary-foreground font-semibold" : isToday ? "border-2 border-primary text-primary font-semibold" : date.getMonth() === month.getMonth() ? "hover:bg-accent" : "text-muted-foreground/50 hover:bg-accent"}`}>{date.getDate()}</button>; })}</div>
+      <div className="grid grid-cols-7 gap-1">{calendarDays(month).map((date) => { const key = calendarDate(date); const selected = key === day; const isToday = key === today; return <button key={key} type="button" aria-label={dateLabel(date)} aria-current={isToday ? "date" : undefined} aria-pressed={selected} onClick={() => chooseDay(key)} className={`h-9 rounded-lg text-sm transition ${selected ? "bg-primary text-primary-foreground font-semibold" : isToday ? "border-2 border-primary text-primary font-semibold" : date.getMonth() === month.getMonth() ? "hover:bg-accent" : "text-muted-foreground/50 hover:bg-accent"}`}>{date.getDate()}</button>; })}</div>
     </div>
     <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3 text-sm">
       <span className="font-medium">Browser alerts</span>

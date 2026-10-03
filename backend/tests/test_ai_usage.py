@@ -31,6 +31,13 @@ def test_usage_summary_groups_days_processes_and_models():
     assert report["processes"][0]["label"] == "Blog generation"
 
 
+def test_normalize_usage_keeps_bedrock_cache_tokens():
+    usage = ai_usage.normalize_usage({"inputTokens": 12, "outputTokens": 4,
+                                      "cacheReadInputTokens": 20, "cacheWriteInputTokens": 5})
+    assert usage["cache_read_input_tokens"] == 20
+    assert usage["cache_write_input_tokens"] == 5
+
+
 def test_llm_provider_usage_is_persisted_without_prompt_content(monkeypatch):
     database = Db()
     ai_usage.configure_usage(database)

@@ -1,3 +1,4 @@
+import { formatDateTime } from "../lib/timezone";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, CheckCircle2, Loader2, PhoneCall } from "lucide-react";
@@ -88,7 +89,7 @@ function DemoResult({ result }) {
           </div>
           <div className="grid gap-3 text-sm">
             <Detail label="Call status" value={result.call_status} />
-            <Detail label="Call time" value={result.call_timestamp ? new Date(result.call_timestamp).toLocaleString() : "Not available"} />
+            <Detail label="Call time" value={result.call_timestamp ? formatDateTime(result.call_timestamp) : "Not available"} />
             <Detail label="Duration" value={result.duration ? `${result.duration}s` : "Not available"} />
             <Detail label="AI summary" value={result.summary || "Not available"} />
           </div>

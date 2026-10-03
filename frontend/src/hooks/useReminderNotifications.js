@@ -1,3 +1,4 @@
+import { formatTime } from "../lib/timezone";
 import { useEffect } from "react";
 import api from "../lib/api";
 import { currentDevice, pushSupported } from "../lib/pushNotifications";
@@ -37,7 +38,7 @@ export default function useReminderNotifications(wsId, navigate) {
             const dueAt = new Date(item.scheduled_time);
             if (Number.isNaN(dueAt.getTime()) || dueAt.getTime() > checkedAt) continue;
             const notification = new Notification(`Follow-up: ${item.title}`, {
-              body: `${item.lead_name || "Lead"} · Due ${dueAt.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`,
+              body: `${item.lead_name || "Lead"} · Due ${formatTime(dueAt, { hour: "numeric", minute: "2-digit" })}`,
               tag: `crm-reminder-${wsId}-${item.id}`,
             });
             notification.onclick = () => { window.focus(); navigate(`/app/w/${wsId}/crm?tab=reminders`); notification.close(); };

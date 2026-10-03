@@ -1,3 +1,4 @@
+import { formatDateTime } from "../lib/timezone";
 import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, Circle, XCircle, ClipboardCheck, ChevronDown } from "lucide-react";
 import api, { formatError } from "../lib/api";
@@ -106,7 +107,7 @@ export default function QualificationReview({ lead, wsId }) {
       </div>
       <label className="block text-xs font-medium border-t pt-4">Salesperson note <span className="font-normal text-muted-foreground">(optional)</span><textarea value={note} maxLength={4000} disabled={busy} placeholder={status === "incorrect" ? "What needs correcting?" : "Add context from your conversation…"} onChange={(e) => { setNote(e.target.value); setSaved(false); }} className="block w-full rounded-lg border bg-background px-3 py-2.5 mt-2 text-sm font-normal resize-y focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50" rows={2} /></label>
       <div className="flex items-center justify-between gap-3"><span role="status" className="text-xs text-muted-foreground">{saved ? "Review saved" : "Your review helps measure AI accuracy."}</span><button type="button" disabled={busy} onClick={save} className="shrink-0 rounded-lg bg-primary text-primary-foreground px-4 py-2.5 text-xs font-semibold hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50">{busy ? "Saving…" : "Save Review"}</button></div>
-      {state.review.reviewed_at && <p className="text-[11px] text-muted-foreground border-t pt-3 leading-relaxed">Reviewed by: {state.review.reviewed_by_name || state.review.reviewed_by} · Reviewed on: {new Date(state.review.reviewed_at).toLocaleString()} · Status: {labels[state.review.status]}</p>}
+      {state.review.reviewed_at && <p className="text-[11px] text-muted-foreground border-t pt-3 leading-relaxed">Reviewed by: {state.review.reviewed_by_name || state.review.reviewed_by} · Reviewed on: {formatDateTime(state.review.reviewed_at)} · Status: {labels[state.review.status]}</p>}
     </>}
     </div>
   </section>;

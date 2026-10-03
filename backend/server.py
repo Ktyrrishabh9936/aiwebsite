@@ -1307,6 +1307,7 @@ from properties import router as properties_router
 from catalog import router as catalog_router
 from sales_modules import router as sales_modules_router
 from ai_usage import router as ai_usage_router
+from billing import router as billing_router
 
 api.include_router(google_sheets_router)
 api.include_router(workflows_router)
@@ -1327,6 +1328,7 @@ api.include_router(properties_router)
 api.include_router(catalog_router)
 api.include_router(sales_modules_router)
 api.include_router(ai_usage_router)
+api.include_router(billing_router)
 api.include_router(push_router)
 api.include_router(manager_agent_router)
 api.include_router(build_voice_router(db, manager_service, owned_workspace, require_user))

@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from "rea
 import { Toaster } from "./components/ui/sonner";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { ThemeProvider } from "./context/ThemeContext";
+import TimezoneBoundary from "./components/TimezoneBoundary";
 
 const Landing = lazy(() => import("./pages/Landing"));
 const CheckDemo = lazy(() => import("./pages/CheckDemo"));
@@ -46,7 +47,7 @@ function Protected() {
 
 function App() {
   return (
-    <div className="App">
+    <TimezoneBoundary><div className="App">
       <ThemeProvider>
         <AuthProvider>
           <BrowserRouter>
@@ -90,7 +91,7 @@ function App() {
           <Toaster position="top-right" richColors />
         </AuthProvider>
       </ThemeProvider>
-    </div>
+    </div></TimezoneBoundary>
   );
 }
 

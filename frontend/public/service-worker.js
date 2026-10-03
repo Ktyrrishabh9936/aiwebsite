@@ -1,7 +1,7 @@
-const CACHE = "arevei-pwa-v3";
+const CACHE = "arevei-pwa-v4";
 const testPage = new URL("pwa-test.html", self.registration.scope).href;
 const offlinePage = new URL("offline.html", self.registration.scope).href;
-const assets = [testPage, offlinePage, "pwa-icon-192.png", "pwa-icon-512.png", "manifest.json"]
+const assets = [testPage, offlinePage, "pwa-test.js", "pwa-icon-192.png", "pwa-icon-512.png", "manifest.json"]
   .map((path) => new URL(path, self.registration.scope).href);
 
 self.addEventListener("install", (event) => {
@@ -40,7 +40,7 @@ self.addEventListener("notificationclick", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
     for (const name of await caches.keys()) {
-      if (name.startsWith("arevei-pwa-test-") && name !== CACHE) await caches.delete(name);
+      if (name.startsWith("arevei-pwa-") && name !== CACHE) await caches.delete(name);
     }
     await self.clients.claim();
   })());

@@ -1,8 +1,11 @@
+import { formatDate, formatDateTime, appDate, inputToUtc } from "../../lib/timezone";
 import AuthenticatedDocumentLink from "../../components/AuthenticatedDocumentLink";
 import LeadNotes from "../../components/LeadNotes";
 import QualificationSummary from "../../components/QualificationSummary";
 import MetaAttribution from "../../components/MetaAttribution";
 import CrmPipeline from "../../components/CrmPipeline";
+import LeadLabels, { LeadTagBadges } from "../../components/LeadLabels";
+import { moveLeadStateToPosition } from "../../lib/leadStates";
 import CrmReminders from "../../components/CrmReminders";
 import FollowUpAction, { FollowUpSnapshot, useFollowUpSnapshots } from "../../components/FollowUpAction";
 import LeadWhatsAppCompose from "../../components/LeadWhatsAppCompose";
@@ -74,7 +77,7 @@ function nextSelectedAgentId(current, agentState) {
   return ids[0] || "";
 }
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => appDate();
 const stateClasses = {
   blue: "bg-blue-500/10 text-blue-500 border-blue-500/20",
   amber: "bg-amber-500/10 text-amber-500 border-amber-500/20",
@@ -229,6 +232,14 @@ export default function CrmInbox() {
   const [selectedLead, setSelectedLead] = useState(null);
   const [fieldValues, setFieldValues] = useState({});
   const lastServerValues = useRef({});
+  const lastServerTestLead = useRef(false);
+  const leadSaveQueue = useRef(Promise.resolve());
+  const pendingLeadSaves = useRef(0);
+  const leadSaveRevision = useRef(0);
+  const failedLeadPatches = useRef({});
+  const activeLeadId = useRef(null);
+  activeLeadId.current = selectedLead?.id;
+  const [leadSaveError, setLeadSaveError] = useState("");
   const [showCreateLead, setShowCreateLead] = useState(false);
   const [createValues, setCreateValues] = useState({});
   const [paymentPlan, setPaymentPlan] = useState(planFrom(null));
@@ -240,13 +251,20 @@ export default function CrmInbox() {
   const listRefreshInFlight = useRef(false);
 
   const activeFields = useMemo(() => (settings.fields || []).filter((field) => field.active !== false), [settings.fields]);
+  const dateFilters = useMemo(() => {
+    try {
+      return { values: {
+        ...(createdFrom ? { created_from: inputToUtc(createdFrom) } : {}),
+        ...(createdBefore ? { created_before: new Date(new Date(inputToUtc(createdBefore)).getTime() + 60_000).toISOString() } : {}),
+      }, error: "" };
+    } catch (error) { return { values: {}, error: error.message }; }
+  }, [createdFrom, createdBefore]);
   const leadFilters = useMemo(() => ({
     ...salesFilters,
     ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
     ...(campaignQuery.trim() ? { campaign: campaignQuery.trim() } : {}),
-    ...(createdFrom ? { created_from: new Date(createdFrom).toISOString() } : {}),
-    ...(createdBefore ? { created_before: new Date(new Date(createdBefore).getTime() + 60_000).toISOString() } : {}),
-  }), [debouncedSearch, campaignQuery, createdFrom, createdBefore, salesFilters]);
+    ...dateFilters.values,
+  }), [debouncedSearch, campaignQuery, dateFilters, salesFilters]);
   const states = useMemo(() => {
     const base = settings.states?.length ? settings.states : [{ key: "new", label: "New", color: "blue" }];
     const hasAiQualified = base.some((state) => state.key === "ai_qualified");
@@ -261,6 +279,8 @@ export default function CrmInbox() {
   const totalPages = Math.max(1, Math.ceil((pagination.total || 0) / pagination.limit));
 
   const selectLead = (lead) => {
+    setLeadSaveError("");
+    lastServerTestLead.current = lead.is_test_lead === true;
     setSelectedLead(lead);
     const values = valuesFrom(lead, activeFields);
     lastServerValues.current = values;
@@ -293,6 +313,7 @@ export default function CrmInbox() {
 
   const refreshSelectedLead = (lead, fields = activeFields) => {
     const previous = lastServerValues.current;
+    const previousTestLead = lastServerTestLead.current;
     const incoming = valuesFrom(lead, fields);
     setFieldValues((current) => {
       const merged = { ...incoming };
@@ -302,7 +323,9 @@ export default function CrmInbox() {
       return merged;
     });
     lastServerValues.current = incoming;
-    setSelectedLead(lead);
+    setSelectedLead((current) => current && (current.is_test_lead === true) !== previousTestLead
+      ? { ...lead, is_test_lead: current.is_test_lead === true } : lead);
+    lastServerTestLead.current = lead.is_test_lead === true;
   };
 
   const openCreateLead = () => {
@@ -412,10 +435,11 @@ export default function CrmInbox() {
     if (!selectedLead?.id) return undefined;
     let cancelled = false;
     const interval = setInterval(async () => {
-      if (document.hidden) return;
+      if (document.hidden || pendingLeadSaves.current) return;
+      const revision = leadSaveRevision.current;
       try {
         const r = await api.get(`/workspaces/${wsId}/crm/leads/${selectedLead.id}`);
-        if (!cancelled) {
+        if (!cancelled && revision === leadSaveRevision.current && !pendingLeadSaves.current) {
           setLeads((prev) => prev.map((lead) => lead.id === r.data.id ? r.data : lead));
           refreshSelectedLead(r.data);
         }
@@ -438,7 +462,7 @@ export default function CrmInbox() {
         toast.warning("Lead created, but the call outcome needs review before retrying");
       } else if (call.status === "scheduled") {
         toast.success(call.scheduled_for
-          ? `Lead created. Call scheduled for ${new Date(call.scheduled_for).toLocaleString()}`
+          ? `Lead created. Call scheduled for ${formatDateTime(call.scheduled_for)}`
           : "Lead created. Qualification call scheduled");
       } else if (call.status === "started") {
         toast.success("Lead created. Qualification call started");
@@ -489,15 +513,49 @@ export default function CrmInbox() {
     }
   };
 
-  const saveLead = async () => {
+  const saveLead = (patch) => {
     if (!selectedLead) return;
-    try {
+    const id = selectedLead.id;
+    const payload = patch || { status: selectedLead.status, field_values: fieldValues };
+    pendingLeadSaves.current += 1;
+    leadSaveRevision.current += 1;
+    leadSaveQueue.current = leadSaveQueue.current.catch(() => {}).then(async () => {
       setSaving(true);
-      const r = await api.patch(`/workspaces/${wsId}/crm/leads/${selectedLead.id}`, { status: selectedLead.status, field_values: fieldValues });
-      toast.success("CRM record saved");
-      mergeLead(r.data);
-    } catch (e) {
-      toast.error(formatError(e.response?.data?.detail));
+      setLeadSaveError("");
+      const previous = failedLeadPatches.current[id] || {};
+      const effective = { ...previous, ...payload };
+      if (previous.field_values || payload.field_values) effective.field_values = { ...previous.field_values, ...payload.field_values };
+      try {
+        const { data } = await api.patch(`/workspaces/${wsId}/crm/leads/${id}`, effective);
+        delete failedLeadPatches.current[id];
+        setLeads((current) => current.map((lead) => lead.id === id ? data : lead));
+        if (activeLeadId.current === id) {
+          lastServerValues.current = valuesFrom(data, activeFields);
+          setSelectedLead((current) => current?.id === id ? { ...data, status: current.status } : current);
+        }
+        setPipelineRevision((value) => value + 1);
+        window.dispatchEvent(new CustomEvent("arevei:lead-metrics-changed", { detail: { wsId } }));
+      } catch (error) { failedLeadPatches.current[id] = effective; setLeadSaveError(formatError(error.response?.data?.detail || error.message)); }
+      finally { pendingLeadSaves.current -= 1; setSaving(false); }
+    });
+    return leadSaveQueue.current;
+  };
+
+  const setTestLead = async (isTestLead) => {
+    if (!selectedLead || saving) return;
+    const id = selectedLead.id;
+    setSaving(true);
+    try {
+      const { data } = await api.patch(`/workspaces/${wsId}/crm/leads/${id}/test-lead`, { is_test_lead: isTestLead });
+      if (data.is_test_lead !== isTestLead) throw new Error("Test lead status was not saved. Please try again.");
+      lastServerTestLead.current = data.is_test_lead;
+      setSelectedLead((current) => current?.id === id ? { ...current, is_test_lead: data.is_test_lead } : current);
+      setLeads((current) => current.map((lead) => lead.id === id ? { ...lead, is_test_lead: data.is_test_lead } : lead));
+      setPipelineRevision((current) => current + 1);
+      window.dispatchEvent(new CustomEvent("arevei:lead-metrics-changed", { detail: { wsId } }));
+      toast.success(isTestLead ? "Test lead saved. Excluded from performance metrics." : "Lead included in performance metrics.");
+    } catch (error) {
+      toast.error(formatError(error.response?.data?.detail || error.message));
     } finally {
       setSaving(false);
     }
@@ -846,6 +904,7 @@ export default function CrmInbox() {
             </label>
             <button type="button" disabled={!searchQuery && !campaignQuery && !createdFrom && !createdBefore && !Object.values(salesFilters).some(Boolean)} onClick={() => { setSearchQuery(""); setCampaignQuery(""); setCreatedFrom(""); setCreatedBefore(""); setSalesFilters({}); setPage(1); }} className="h-10 px-3 rounded-lg border bg-background text-sm font-medium hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed">Clear filters</button>
           </div>
+          {dateFilters.error && <p role="alert" className="text-sm text-destructive">{dateFilters.error} The date filter has not been applied.</p>}
 
           <div className="grid sm:grid-cols-3 gap-3">
             {[["sales_agent_id", "Sales agent", "sales_agent"], ["channel_partner_id", "Channel partner", "channel_partner"], ["introduced_by_id", "Lead brought by", null]].map(([key, label, role]) => <label key={key} className="text-xs font-medium text-muted-foreground">{label}<select value={salesFilters[key] || ""} onChange={(event) => { setSalesFilters({ ...salesFilters, [key]: event.target.value }); setPage(1); }} className="mt-1 h-10 w-full rounded-lg border bg-background px-3 text-sm text-foreground"><option value="">All</option>{salesPeople.filter((person) => !role || person.role === role).map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></label>)}
@@ -859,8 +918,8 @@ export default function CrmInbox() {
           </div>
           <div className={`grid gap-6 items-start ${selectedLead ? "xl:grid-cols-[minmax(0,1fr)_560px]" : "grid-cols-1"}`}>
             <div className="space-y-3 min-w-0">
-              {recordsLayout === "kanban" && recordView !== "trash" ? <CrmPipeline wsId={wsId} states={states} filters={debouncedLeadFilters} statusFilter={statusFilter} onSelect={openLead} revision={pipelineRevision} onChanged={(lead) => { setPipelineRevision((v) => v + 1); setSelectedLead((old) => old?.id === lead.id ? lead : old); loadAll(); }} /> : <>
-              <LeadTable wsId={wsId} leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} canCallWithAI={hasCallableAgent} onSelect={openLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
+              {recordsLayout === "kanban" && recordView !== "trash" ? <CrmPipeline tagLibrary={settings.tag_library} wsId={wsId} states={states} filters={debouncedLeadFilters} statusFilter={statusFilter} onSelect={openLead} revision={pipelineRevision} onChanged={(lead) => { setPipelineRevision((v) => v + 1); setSelectedLead((old) => old?.id === lead.id ? lead : old); loadAll(); }} /> : <>
+              <LeadTable tagLibrary={settings.tag_library} wsId={wsId} leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} canCallWithAI={hasCallableAgent} onSelect={openLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
               <Pagination page={page} totalPages={totalPages} total={pagination.total} onPage={setPage} />
               </>}
             </div>
@@ -875,6 +934,17 @@ export default function CrmInbox() {
                 setLead={setSelectedLead}
                 saving={saving}
                 saveLead={saveLead}
+                leadSaveError={leadSaveError}
+                saveField={(key, value) => { if (lastServerValues.current[key] !== value) saveLead({ field_values: { [key]: value } }); }}
+                setTestLead={setTestLead}
+                tagLibrary={settings.tag_library}
+                onTagLibraryUpdated={(library) => setSettings((current) => ({ ...current, tag_library: library }))}
+                onLabelsUpdated={(updated) => {
+                  setSelectedLead((current) => current?.id === updated.id ? { ...current, tags: updated.tags, customer_status: updated.customer_status, conversion_type: updated.conversion_type } : current);
+                  setLeads((current) => current.map((item) => item.id === updated.id ? { ...item, tags: updated.tags, customer_status: updated.customer_status } : item));
+                  setPipelineRevision((value) => value + 1);
+                  window.dispatchEvent(new CustomEvent("arevei:lead-metrics-changed", { detail: { wsId } }));
+                }}
                 conversionType={conversionType}
                 setConversionType={setConversionType}
                 convertLead={convertLead}
@@ -957,7 +1027,7 @@ function AgentCallSelector({ agents, selectedAgentId, setSelectedAgentId }) {
   );
 }
 
-function LeadTable({ wsId, leads, fields, states, selectedLead, loading, trashed, callingLeadId, canCallWithAI, onSelect, onStatus, onTrash, onRestore, onCall }) {
+function LeadTable({ wsId, leads, fields, states, selectedLead, loading, trashed, callingLeadId, canCallWithAI, onSelect, onStatus, onTrash, onRestore, onCall, tagLibrary }) {
   const primaryFields = fields.slice(0, 4);
   const snapshots = useFollowUpSnapshots(wsId, trashed ? [] : leads.map((lead) => lead.id));
   return (
@@ -979,9 +1049,11 @@ function LeadTable({ wsId, leads, fields, states, selectedLead, loading, trashed
                 <tr onClick={() => onSelect(lead)} className={`group-hover:bg-accent/10 cursor-pointer transition-colors ${selectedLead?.id === lead.id ? "bg-accent/20" : "bg-card"}`}>
                   <td className="p-4">
                     <div className="flex flex-wrap items-center gap-2"><button type="button" onClick={(e) => { e.stopPropagation(); onSelect(lead); }} className="text-left text-base font-semibold text-foreground underline-offset-4 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={`Open details for ${leadName}`}>{leadName}</button>{lead.customer_status === "customer" && <span className="text-[11px] uppercase px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-600 dark:text-emerald-400">Customer</span>}{isJunk && <span className="text-[11px] uppercase px-1.5 py-0.5 rounded border border-destructive/40 text-destructive">Junk</span>}{qualificationStatus && <span className={`text-[11px] uppercase px-1.5 py-0.5 rounded border ${qualificationStatus === "qualified" ? "border-emerald-500/40 text-emerald-600 dark:text-emerald-400" : qualificationStatus === "not_qualified" ? "border-destructive/40 text-destructive" : "border-border text-muted-foreground"}`}>{qualificationStatus.replace("_", " ")}</span>}</div>
+                    {lead.is_test_lead && <span className="inline-block mt-1 text-[11px] uppercase px-1.5 py-0.5 rounded border border-amber-500/40 text-amber-700 dark:text-amber-400">Test lead</span>}
+                    {lead.tags?.length > 0 && <div className="mt-2"><LeadTagBadges tags={lead.tags} library={tagLibrary} /></div>}
                     {summaryFields.length > 0 && <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5 text-sm text-foreground/70">{summaryFields.map((field) => <span key={field.key}><span className="text-muted-foreground">{field.label}:</span> {String(values[field.key])}</span>)}</div>}
                     {(lead.sales_assignment?.sales_agent_name || lead.sales_assignment?.channel_partner_name) && <p className="mt-1.5 text-xs text-muted-foreground">{[lead.sales_assignment.sales_agent_name && `Agent: ${lead.sales_assignment.sales_agent_name}`, lead.sales_assignment.channel_partner_name && `Partner: ${lead.sales_assignment.channel_partner_name}`].filter(Boolean).join(" ? ")}</p>}
-                    {scheduledFor && <div className="mt-2 inline-flex items-center gap-1.5 text-sm text-primary"><PhoneCall className="w-4 h-4" /> Scheduled {new Date(scheduledFor).toLocaleString()}</div>}
+                    {scheduledFor && <div className="mt-2 inline-flex items-center gap-1.5 text-sm text-primary"><PhoneCall className="w-4 h-4" /> Scheduled {formatDateTime(scheduledFor)}</div>}
                   </td>
                   <td className="p-4" onClick={(e) => e.stopPropagation()}>
                     {trashed ? (
@@ -990,7 +1062,7 @@ function LeadTable({ wsId, leads, fields, states, selectedLead, loading, trashed
                       <select aria-label={`Stage for ${values.full_name || values.phone || "lead"}`} value={lead.status} onChange={(e) => onStatus(lead, e.target.value)} className={`min-h-9 px-2.5 py-1 rounded-md border text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${stateClasses[state.color] || stateClasses.slate}`}>{states.map((s) => <option key={s.key} value={s.key} className="bg-background text-foreground">{s.label}</option>)}</select>
                     )}
                   </td>
-                  <td className="p-4 text-sm text-foreground/75 hidden lg:table-cell">{new Date(trashed ? lead.delete_after : lead.created_at).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}</td>
+                  <td className="p-4 text-sm text-foreground/75 hidden lg:table-cell">{formatDate(trashed ? lead.delete_after : lead.created_at, { day: "numeric", month: "short", year: "numeric" })}</td>
                   <td className="p-4 text-right" onClick={(e) => e.stopPropagation()}>
                     {trashed ? (
                       <button onClick={() => onRestore(lead)} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title="Restore lead" aria-label="Restore lead"><RotateCcw className="w-4 h-4" /></button>
@@ -1028,13 +1100,13 @@ function LeadDetail(props) {
   const [activeStageId, setActiveStageId] = useState("");
   const [whatsappOpen, setWhatsappOpen] = useState(false);
   const [smsOpen, setSmsOpen] = useState(false);
-  const isCustomer = lead.customer_status === "customer" || lead.status === "won";
+  const isCustomer = lead.customer_status === "customer" || (!lead.customer_status && lead.status === "won");
   const isTrashed = Boolean(lead.deleted_at);
   useEffect(() => {
     if (paymentPlan.stages?.[0]?.id && !paymentPlan.stages.some((stage) => stage.id === activeStageId)) setActiveStageId(paymentPlan.stages[0].id);
   }, [activeStageId, paymentPlan.stages]);
   const setField = (key, value) => setValues({ ...values, [key]: value });
-  const setStatus = (status) => setLead({ ...lead, status });
+  const setStatus = (status) => { setLead({ ...lead, status }); saveLead({ status }); };
   const setTotalAmount = (value) => {
     const stages = (paymentPlan.stages || []).length ? paymentPlan.stages : [{
       id: `new-${Date.now()}`,
@@ -1122,7 +1194,7 @@ function LeadDetail(props) {
     <aside aria-label="Lead details" className="fixed inset-0 z-50 overflow-y-auto overscroll-contain bg-background p-4 xl:sticky xl:top-4 xl:z-auto xl:max-h-[calc(100dvh-130px)] xl:bg-transparent xl:p-0">
       <div className="p-5 rounded-xl border bg-card space-y-5 max-w-3xl mx-auto xl:max-w-none">
         <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b pb-4 pt-2 bg-card">
-          <div className="min-w-0"><h3 className="font-bold text-lg truncate">{values.full_name || values.phone || values.email || "Unnamed Lead"}</h3><span className="text-xs text-muted-foreground flex items-center gap-1 mt-1"><Calendar className="w-3.5 h-3.5" /> Captured on {new Date(lead.created_at).toLocaleString()}</span></div>
+          <div className="min-w-0"><h3 className="font-bold text-lg truncate">{values.full_name || values.phone || values.email || "Unnamed Lead"}</h3><span className="text-xs text-muted-foreground flex items-center gap-1 mt-1"><Calendar className="w-3.5 h-3.5" /> Captured on {formatDateTime(lead.created_at)}</span></div>
           <div className="flex items-center gap-2">
             {isTrashed ? (
               <button onClick={() => restoreLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title="Restore lead"><RotateCcw className="w-4 h-4" /></button>
@@ -1141,7 +1213,7 @@ function LeadDetail(props) {
         </div>
         <LeadWhatsAppCompose open={whatsappOpen} onOpenChange={setWhatsappOpen} phone={values.phone || lead.phone} leadName={values.full_name || lead.full_name} onMarkSent={addLeadNote} />
         <LeadSmsCompose open={smsOpen} onOpenChange={setSmsOpen} wsId={wsId} lead={lead} />
-        {isTrashed && <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs text-destructive">This lead is in trash and can be restored until {new Date(lead.delete_after).toLocaleDateString()}.</div>}
+        {isTrashed && <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs text-destructive">This lead is in trash and can be restored until {formatDate(lead.delete_after)}.</div>}
         <div className="sticky top-[76px] z-10 flex flex-wrap gap-1 rounded-lg border bg-card p-1" role="group" aria-label="Lead sections">
           {DETAIL_TABS.map((tab) => <button key={tab} aria-pressed={detailTab === tab} onClick={() => setDetailTab(tab)} className={`px-3 h-9 rounded-md text-xs font-semibold whitespace-nowrap ${detailTab === tab ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{tab}</button>)}
         </div>
@@ -1151,18 +1223,24 @@ function LeadDetail(props) {
 
         {detailTab === "Details" && (
           <section className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              {!isCustomer ? <><select aria-label="Payment mode" value={conversionType} onChange={(e) => setConversionType(e.target.value)} className="h-9 px-3 rounded-lg border bg-background text-sm"><option value="single_payment">Single Payment</option><option value="payment_plan">Payment Plan</option></select><button onClick={convertLead} disabled={saving} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-accent hover:bg-accent/80 text-sm font-semibold disabled:opacity-50"><CheckCircle2 className="w-4 h-4" /> Convert Lead</button></> : <p className="text-xs text-muted-foreground">Customer · {lead.conversion_type === "single_payment" ? "Single Payment" : "Payment Plan"}</p>}
+            </div>
+            <div className="grid sm:grid-cols-2 gap-3">
+              {fields.map((field) => field.key === "assigned_salesperson" && lead.sales_assignment && "sales_agent_id" in lead.sales_assignment ? <ReadOnlyValue key={field.key} label={field.label} value={lead.sales_assignment.sales_agent_id ? lead.sales_assignment.sales_agent_name || "Assigned agent" : "Unassigned"} /> : <DynamicField key={field.key} field={field} value={values[field.key] || ""} onChange={(v) => setField(field.key, v)} onBlur={() => props.saveField(field.key, values[field.key] ?? "")} />)}
+            </div>
+            <p role="status" className="text-xs text-muted-foreground">{saving ? "Saving changes..." : "Core details save automatically when you leave a field."}</p>
+            {props.leadSaveError && <div role="alert" className="text-sm text-destructive">{props.leadSaveError} <button type="button" onClick={() => saveLead()} className="underline">Retry saving</button></div>}
+            <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground uppercase">State</span><select aria-label="Lead state" value={lead.status} onChange={(e) => setStatus(e.target.value)} className="w-full sm:max-w-sm h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary">{states.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}</select></label>
+            <LeadLabels wsId={wsId} lead={lead} library={props.tagLibrary} onLibraryUpdated={props.onTagLibraryUpdated} onUpdated={props.onLabelsUpdated} disabled={saving || isTrashed} />
             <MetaAttribution lead={lead} wsId={wsId} onUpdate={setLead} />
             {!isTrashed && <SalesAssignment wsId={wsId} lead={lead} onUpdated={setLead} />}
             {!isTrashed && <ShareLead wsId={wsId} lead={lead} onUpdated={setLead} />}
+            <label className="flex items-start gap-3 rounded-lg border bg-background p-3">
+              <input type="checkbox" checked={lead.is_test_lead === true} disabled={saving || isTrashed} onChange={(event) => props.setTestLead(event.target.checked)} className="mt-1 h-4 w-4" />
+              <span><span className="block text-sm font-semibold">Test lead</span><span className="block text-xs text-muted-foreground mt-1">{saving ? "Saving..." : lead.is_test_lead ? "Saved as a test lead. Excluded from performance reports, sales metrics and pipeline value." : "Select to exclude this lead from performance reports, sales metrics and pipeline value. Saves automatically."} Uncheck to include it again.</span></span>
+            </label>
             {!isTrashed && <OpportunitySelector wsId={wsId} lead={lead} onUpdated={onOpportunityUpdated} />}
-            <div className="grid sm:grid-cols-2 gap-3">
-              {fields.map((field) => field.key === "assigned_salesperson" && lead.sales_assignment && "sales_agent_id" in lead.sales_assignment ? <ReadOnlyValue key={field.key} label={field.label} value={lead.sales_assignment.sales_agent_id ? lead.sales_assignment.sales_agent_name || "Assigned agent" : "Unassigned"} /> : <DynamicField key={field.key} field={field} value={values[field.key] || ""} onChange={(v) => setField(field.key, v)} />)}
-              <label className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground uppercase">State</span><select value={lead.status} onChange={(e) => setStatus(e.target.value)} className="w-full h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary">{states.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}</select></label>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button onClick={saveLead} disabled={saving} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><Save className="w-4 h-4" /> Save CRM</button>
-              {!isCustomer && <><select value={conversionType} onChange={(e) => setConversionType(e.target.value)} className="h-9 px-3 rounded-lg border bg-background text-sm"><option value="single_payment">Single Payment</option><option value="payment_plan">Payment Plan</option></select><button onClick={convertLead} disabled={saving} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-accent hover:bg-accent/80 text-sm font-semibold disabled:opacity-50"><CheckCircle2 className="w-4 h-4" /> Convert Lead</button></>}
-            </div>
           </section>
         )}
 
@@ -1312,14 +1390,14 @@ function CreateLeadDialog({ fields, values, setValues, saving, onCreate, onClose
   );
 }
 
-function DynamicField({ field, value, onChange }) {
+function DynamicField({ field, value, onChange, onBlur }) {
   const common = "w-full h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary";
   const label = <span className="text-xs font-semibold text-muted-foreground uppercase">{field.label}{field.required && <span className="text-destructive"> *</span>}</span>;
-  if (field.type === "long_text" || field.type === "json") return <label className="space-y-1.5 sm:col-span-2">{label}<textarea value={value} onChange={(e) => onChange(e.target.value)} rows={3} className="w-full px-3 py-2 rounded-lg border bg-background text-sm" /></label>;
-  if (field.type === "boolean") return <label className="space-y-1.5">{label}<select value={value ? "true" : "false"} onChange={(e) => onChange(e.target.value === "true")} className={common}><option value="false">No</option><option value="true">Yes</option></select></label>;
-  if (field.type === "select") return <label className="space-y-1.5">{label}<select value={value} onChange={(e) => onChange(e.target.value)} className={common}><option value="">Select</option>{(field.options || []).map((o) => <option key={o} value={o}>{o}</option>)}</select></label>;
+  if (field.type === "long_text" || field.type === "json") return <label onBlur={onBlur} className="space-y-1.5 sm:col-span-2">{label}<textarea aria-label={field.label} value={value} onChange={(e) => onChange(e.target.value)} rows={3} className="w-full px-3 py-2 rounded-lg border bg-background text-sm" /></label>;
+  if (field.type === "boolean") return <label onBlur={onBlur} className="space-y-1.5">{label}<select aria-label={field.label} value={value ? "true" : "false"} onChange={(e) => onChange(e.target.value === "true")} className={common}><option value="false">No</option><option value="true">Yes</option></select></label>;
+  if (field.type === "select") return <label onBlur={onBlur} className="space-y-1.5">{label}<select aria-label={field.label} value={value} onChange={(e) => onChange(e.target.value)} className={common}><option value="">Select</option>{(field.options || []).map((o) => <option key={o} value={o}>{o}</option>)}</select></label>;
   const type = field.type === "email" ? "email" : field.type === "phone" ? "tel" : field.type === "number" || field.type === "currency" ? "number" : field.type === "date" ? "date" : field.type === "datetime" ? "datetime-local" : field.type === "url" ? "url" : "text";
-  return <label className="space-y-1.5">{label}<input type={type} value={value} onChange={(e) => onChange(e.target.value)} className={common} /></label>;
+  return <label onBlur={onBlur} className="space-y-1.5">{label}<input aria-label={field.label} type={type} value={value} onChange={(e) => onChange(e.target.value)} className={common} /></label>;
 }
 function SmallInput({ label, value, onChange }) {
   return <label className="space-y-1 block"><span className="text-[11px] font-semibold text-muted-foreground uppercase">{label}</span><input value={value} onChange={(e) => onChange(e.target.value)} className="h-9 px-2 text-xs w-full rounded-lg border bg-background focus:outline-none focus:ring-1 focus:ring-primary" /></label>;
@@ -1471,6 +1549,8 @@ function SettingsPanel({ wsId, fields, states, organization, templates, plivoAge
   const [stateDrafts, setStateDrafts] = useState({});
   const [savingFieldKey, setSavingFieldKey] = useState("");
   const [savingStateKey, setSavingStateKey] = useState("");
+  const [reorderingStates, setReorderingStates] = useState(false);
+  const [draggedStateKey, setDraggedStateKey] = useState(null);
 
   useEffect(() => setOrg(organization), [organization]);
 
@@ -1556,6 +1636,21 @@ function SettingsPanel({ wsId, fields, states, organization, templates, plivoAge
     }
   };
 
+  const reorderState = async (state, target) => {
+    if (reorderingStates || savingStateKey || states.some(stateHasChanges)) return;
+    const nextStates = moveLeadStateToPosition(states, state.key, target);
+    if (nextStates === states) return;
+    setReorderingStates(true);
+    try {
+      await saveStates(nextStates);
+      toast.success("Lead state order saved");
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail || e.message));
+    } finally {
+      setReorderingStates(false);
+    }
+  };
+
   return (
     <div className="grid gap-6 xl:grid-cols-2 items-start">
       <TwilioSmsSettings wsId={wsId} />
@@ -1580,15 +1675,29 @@ function SettingsPanel({ wsId, fields, states, organization, templates, plivoAge
       </section>
       <section className="rounded-xl border bg-card p-5 space-y-4">
         <h3 className="font-bold flex items-center gap-2"><Palette className="w-4 h-4 text-primary" /> Lead States</h3>
+        <p className="text-xs text-muted-foreground">Drag a state onto another row, or choose its position to move it in one step. Changes save automatically across the pipeline and stage menus.</p>
+        {states.some(stateHasChanges) && <p className="text-xs text-muted-foreground">Save your label or color edits before moving states.</p>}
+        {reorderingStates && <p role="status" className="text-xs text-muted-foreground">Saving state order...</p>}
         <div className="space-y-2">{states.map((state, index) => {
           const draft = stateDraft(state);
           const dirty = stateHasChanges(state);
           return (
-            <div key={state.key} className="grid grid-cols-[1fr_110px_84px_36px] gap-2 items-center p-2 rounded-lg border bg-background">
-              <input value={draft.label} onChange={(e) => setStateDraft(state, { label: e.target.value })} className="h-9 px-2 rounded border bg-background text-sm" />
-              <select value={draft.color} onChange={(e) => setStateDraft(state, { color: e.target.value })} className="h-9 px-2 rounded border bg-background text-xs">{Object.keys(stateClasses).map((color) => <option key={color} value={color}>{color}</option>)}</select>
-              <button onClick={() => saveStateDraft(state)} disabled={!dirty || savingStateKey === state.key || !draft.label.trim()} className="inline-flex items-center justify-center gap-1 h-9 rounded border hover:bg-accent text-xs font-semibold disabled:opacity-40" title="Save state"><Save className="w-3.5 h-3.5" /> Save</button>
-              <span className="text-xs text-muted-foreground text-center">{index + 1}</span>
+            <div key={state.key} onDragOver={(event) => { if (draggedStateKey && !reorderingStates) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); const dragged = states.find((item) => item.key === draggedStateKey); setDraggedStateKey(null); if (dragged) reorderState(dragged, index); }} className={`grid grid-cols-[minmax(0,1fr)_80px] sm:grid-cols-[minmax(0,1fr)_90px_70px_80px] gap-2 items-center p-2 rounded-lg border bg-background ${draggedStateKey === state.key ? "opacity-50" : draggedStateKey ? "border-primary border-dashed" : ""}`}>
+              <input aria-label={`Label for ${state.label}`} disabled={reorderingStates || Boolean(savingStateKey)} value={draft.label} onChange={(e) => setStateDraft(state, { label: e.target.value })} className="min-w-0 h-9 px-2 rounded border bg-background text-sm" />
+              <select aria-label={`Color for ${state.label}`} disabled={reorderingStates || Boolean(savingStateKey)} value={draft.color} onChange={(e) => setStateDraft(state, { color: e.target.value })} className="h-9 px-2 rounded border bg-background text-xs">{Object.keys(stateClasses).map((color) => <option key={color} value={color}>{color}</option>)}</select>
+              <button onClick={() => saveStateDraft(state)} disabled={reorderingStates || !dirty || Boolean(savingStateKey) || !draft.label.trim()} className="inline-flex items-center justify-center gap-1 h-9 rounded border hover:bg-accent text-xs font-semibold disabled:opacity-40" title="Save state"><Save className="w-3.5 h-3.5" /> Save</button>
+              <div className="flex items-center justify-end gap-1">
+                <button type="button" aria-label={`Move ${state.label} up`} disabled={index === 0 || reorderingStates || Boolean(savingStateKey) || states.some(stateHasChanges)} onClick={() => reorderState(state, index - 1)} className="h-9 w-9 rounded border hover:bg-accent disabled:opacity-40">↑</button>
+                <button type="button" aria-label={`Move ${state.label} down`} disabled={index === states.length - 1 || reorderingStates || Boolean(savingStateKey) || states.some(stateHasChanges)} onClick={() => reorderState(state, index + 1)} className="h-9 w-9 rounded border hover:bg-accent disabled:opacity-40">↓</button>
+              </div>
+              <div className="col-span-full flex flex-wrap items-center gap-2 border-t pt-2">
+                <button type="button" draggable={!reorderingStates && !savingStateKey && !states.some(stateHasChanges)} disabled={reorderingStates || Boolean(savingStateKey) || states.some(stateHasChanges)} onDragStart={(event) => { event.dataTransfer.setData("text/plain", state.key); event.dataTransfer.effectAllowed = "move"; setDraggedStateKey(state.key); }} onDragEnd={() => setDraggedStateKey(null)} aria-label={`Drag ${state.label} to reorder`} className="hidden sm:block h-10 px-3 rounded border cursor-grab active:cursor-grabbing text-xs disabled:opacity-40">Drag to move</button>
+                <label className="flex flex-1 items-center gap-2 text-xs text-muted-foreground">Move to position
+                  <select aria-label={`Move ${state.label} to position`} value={index} disabled={reorderingStates || Boolean(savingStateKey) || states.some(stateHasChanges)} onChange={(event) => reorderState(state, Number(event.target.value))} className="min-w-0 flex-1 h-10 px-2 rounded border bg-background text-foreground">
+                    {states.map((targetState, position) => <option key={targetState.key} value={position}>{position + 1} · {targetState.label}</option>)}
+                  </select>
+                </label>
+              </div>
             </div>
           );
         })}</div>

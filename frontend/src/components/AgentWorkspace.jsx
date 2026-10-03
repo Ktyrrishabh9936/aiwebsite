@@ -21,6 +21,9 @@ const sections = [
 export function AgentWorkspace({ ws, active }) {
   const status = useAiStatus(ws);
   const [selected, setSelected] = useState(null);
+  const [showWorkspace, setShowWorkspace] = useState(false);
+  const workspaceRef = useRef(null);
+  const conversationRef = useRef(null);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -35,6 +38,16 @@ export function AgentWorkspace({ ws, active }) {
   const scrollRef = useRef(null);
   const pendingRef = useRef(false);
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  useEffect(() => {
+    if (showWorkspace) workspaceRef.current?.scrollIntoView?.({ block: "start" });
+  }, [showWorkspace]);
+
+  function returnToChat() {
+    setShowWorkspace(false);
+    conversationRef.current?.scrollIntoView?.({ block: "start" });
+    inputRef.current?.focus();
+  }
 
   useEffect(() => {
     let live = true;
@@ -90,6 +103,7 @@ export function AgentWorkspace({ ws, active }) {
 
   function selectSection(section) {
     setSelected(section);
+    returnToChat();
     inputRef.current?.focus();
   }
 
@@ -138,8 +152,9 @@ export function AgentWorkspace({ ws, active }) {
   const statusLabel = busy ? (runningOperation?.label || "Manager is choosing the next action") : ({ loading: "Loading AI configuration", checking: "Connecting", working: "Last request succeeded", failed: "Connection needs attention", missing: "Provider setup needed", untested: "Ready for your first message" }[status.state]);
 
   return (
-    <div className="agent-space">
-      <section className="agent-universe" aria-label="Workspace galaxy">
+    <div className={`agent-space ${showWorkspace ? "show-workspace" : ""}`}>
+      <section id="agent-visual-workspace" ref={workspaceRef} className="agent-universe" aria-label="Workspace galaxy">
+        <button type="button" className="agent-mobile-workspace-control" onClick={returnToChat}>Back to chat</button>
         <div className="agent-space-heading"><span className="agent-eyebrow">ONE WORKSPACE. CONNECTED INTELLIGENCE.</span><h1>Your workspace, in orbit.</h1><p>Set the direction. Work through your AI manager.</p></div>
         <div className="agent-map">
           <svg className="agent-connections" viewBox="0 0 800 600" preserveAspectRatio="none" aria-hidden="true">
@@ -181,7 +196,7 @@ export function AgentWorkspace({ ws, active }) {
         </section>
       </section>
 
-      <section className="agent-conversation" aria-label="AI manager conversation">
+      <section ref={conversationRef} className="agent-conversation" aria-label="AI manager conversation">
         <header className="agent-chat-heading"><span className="agent-chat-mark"><Sparkles size={20} /></span><div><h2>AI Manager</h2><p role="status">{statusLabel}</p></div><span className="agent-chat-tag">AGENT MODE</span></header>
         <div className="agent-focus"><span>Conversation focus</span><button onClick={() => selectSection(null)} title="Reset to whole workspace">{selected?.name || "Whole workspace"}{selected && " ×"}</button></div>
         <div className="agent-messages" ref={scrollRef} role="log" aria-label="Messages" aria-live="polite" aria-busy={busy}>
@@ -194,6 +209,7 @@ export function AgentWorkspace({ ws, active }) {
           <div className="agent-input-box"><textarea ref={inputRef} aria-label="Message AI manager" value={input} onChange={(event) => setInput(event.target.value)} placeholder={selected ? `Talk to your manager about ${selected.name.toLowerCase()}…` : "Tell your manager what you have in mind…"} rows={3} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(event); } }} /><div className="agent-input-actions"><button type="button" className={`agent-mic ${listening ? "is-listening" : ""}`} onClick={toggleVoice} disabled={!SpeechRecognition || busy} aria-label={listening ? "Stop voice input" : "Start voice input"} aria-pressed={listening}>{listening ? <MicOff size={17} /> : <Mic size={17} />}<span>{listening ? "Listening…" : "Speak"}</span></button><button className="agent-send" type="submit" disabled={!input.trim() || busy || status.state === "checking"} aria-label="Send message">{busy ? <Loader2 size={17} className="animate-spin" /> : <Send size={17} />}</button></div></div>
           <p className="agent-composer-hint">{!SpeechRecognition ? "Voice input isn’t supported in this browser. Type to chat." : "Speak or type · Review your words, then send"}</p>
         </form>
+        <button type="button" className="agent-mobile-workspace-control agent-workspace-toggle" aria-expanded={showWorkspace} aria-controls="agent-visual-workspace" onClick={() => setShowWorkspace(true)}>See it working{busy ? " · Working" : operations.length ? ` · ${operations.length} actions` : ""}</button>
       </section>
     </div>
   );

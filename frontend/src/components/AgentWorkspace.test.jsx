@@ -24,6 +24,20 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); container.remove(); delete window.SpeechRecognition; jest.clearAllMocks(); });
 const button = (text) => Array.from(container.querySelectorAll("button")).find((node) => node.textContent.includes(text));
 
+test("visual workspace opens on demand after a prompt and returns to the saved chat", async () => {
+  await act(async () => root.render(<AgentWorkspace ws={ws} active />));
+  expect(button("See it working").getAttribute("aria-expanded")).toBe("false");
+  await act(async () => button("What should I focus on today?").click());
+  await act(async () => container.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await act(async () => button("See it working").click());
+  expect(button("See it working").getAttribute("aria-expanded")).toBe("true");
+  expect(container.querySelector(".agent-space").classList.contains("show-workspace")).toBe(true);
+  await act(async () => button("Back to chat").click());
+  expect(button("See it working").getAttribute("aria-expanded")).toBe("false");
+  expect(container.querySelector('[role="log"]').textContent).toContain("Here is your plan.");
+  expect(document.activeElement).toBe(container.querySelector("textarea"));
+});
+
 test("activity restores saved changes and distinguishes pending delegation from a completed call", async () => {
   loadManagerConversation.mockResolvedValue({ messages: [{ role: "assistant", content: "Follow-up saved." }], runs: [{
     run_id: "saved-run", status: "completed", events: [

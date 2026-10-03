@@ -130,6 +130,8 @@ def performance_rows(people, leads, property_id=""):
     rows = {str(person["_id"]): {"id": str(person["_id"]), "name": person["name"], "role": person["role"], "active": person.get("active", True),
             "assigned_leads": 0, "sales": 0, "sales_minor": 0, "introduced_leads": 0, "marketing_leads": 0, "referral_leads": 0, "introduced_sales": 0} for person in people}
     for lead in leads:
+        if lead.get("is_test_lead") is True:
+            continue
         opportunity = lead.get("opportunity") or {}
         if property_id and property_id not in {opportunity.get("project_id"), opportunity.get("item_id"), (lead.get("referral_property") or {}).get("id")}:
             continue
@@ -159,6 +161,6 @@ async def performance(ws_id: str, request: Request, property_id: str = ""):
     _, workspace = await require_workspace_access(request, ws_id)
     db = db_from(request)
     people = await db.crm_sales_people.find({"workspace_id": ws_id}).to_list(None)
-    leads = await db.crm_leads.find(lead_query(ws_id), {"sales_assignment": 1, "sales_credit": 1, "opportunity": 1, "referral_property": 1, "status": 1}).to_list(None)
+    leads = await db.crm_leads.find(lead_query(ws_id, exclude_test=True), {"sales_assignment": 1, "sales_credit": 1, "opportunity": 1, "referral_property": 1, "status": 1, "is_test_lead": 1}).to_list(None)
     properties = [{"id": str(doc["_id"]), "name": doc.get("name", "Property")} async for doc in db.properties.find({"workspace_id": ws_id}, {"name": 1}).sort("name", 1)]
     return {"items": performance_rows(people, leads, property_id), "properties": properties, "currency": workspace_currency(workspace)}
