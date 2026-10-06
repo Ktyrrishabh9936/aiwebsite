@@ -2,11 +2,12 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import CrmReminders from "./CrmReminders";
 import api from "../lib/api";
+import { saveTimezonePreference } from "../lib/timezone";
 
 jest.mock("../lib/api", () => ({ __esModule: true, formatError: (v) => v, default: { get: jest.fn(), post: jest.fn(), patch: jest.fn() } }));
 let container, root;
 beforeEach(() => { global.IS_REACT_ACT_ENVIRONMENT = true; container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container); api.get.mockResolvedValue({ data: { items: [], total: 0 } }); api.post.mockResolvedValue({ data: {} }); api.patch.mockResolvedValue({ data: {} }); });
-afterEach(() => { act(() => root.unmount()); container.remove(); jest.clearAllMocks(); });
+afterEach(() => { act(() => root.unmount()); container.remove(); localStorage.removeItem("arevei_timezone"); jest.clearAllMocks(); });
 async function change(element, value) { await act(async () => { Object.getOwnPropertyDescriptor(element.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, "value").set.call(element, value); element.dispatchEvent(new Event("input", { bubbles: true })); }); }
 
 test("creates a lead reminder with UTC time and sharing instructions", async () => {
@@ -19,12 +20,14 @@ test("creates a lead reminder with UTC time and sharing instructions", async () 
 });
 
 test("daily planner filters dates, opens the lead and marks a reminder done", async () => {
+  saveTimezonePreference("manual", "Asia/Kolkata");
   api.get.mockResolvedValue({ data: { items: [{ id: "task", lead_id: "lead", title: "Call", objective: "Share prices", scheduled_time: "2026-09-21T10:00:00Z", status: "pending", lead_name: "Diya", lead_phone: "+14155550123", lead_available: true }], total: 1 } });
   const open = jest.fn();
   await act(async () => root.render(<CrmReminders wsId="ws" onOpenLead={open} />));
   expect(api.get).toHaveBeenCalledWith("/workspaces/ws/crm/reminders", { params: expect.objectContaining({ start: expect.any(String), end: expect.any(String), status: "pending" }) });
   expect(container.querySelector('[aria-current="date"]')?.getAttribute("aria-pressed")).toBe("true");
   expect(container.textContent).toContain("Due ");
+  expect(container.textContent).toContain("IST");
   expect(container.textContent).toContain("Share prices");
   await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Diya").click());
   expect(open).toHaveBeenCalledWith("lead");

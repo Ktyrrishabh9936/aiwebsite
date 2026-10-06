@@ -142,6 +142,16 @@ def payload_for(task, lead):
             "url": f"/app/w/{ws_id}/crm?lead={lead_id}", "reminder_id": str(task["_id"])}
 
 
+async def user_has_workspace_access(db, user, workspace, ws_id):
+    user_id = str(user["_id"])
+    if str(workspace.get("user_id")) == user_id or user.get("role") == "admin":
+        return True
+    memberships = getattr(db, "workspace_memberships", None)
+    if memberships is None:
+        return False
+    return bool(await memberships.find_one({"workspace_id": ws_id, "user_id": user_id, "active": True}))
+
+
 async def dispatch_due(db, *, now=None, sender=send_push):
     if not configured():
         return {"sent": 0, "failed": 0, "enabled": False}
@@ -156,7 +166,7 @@ async def dispatch_due(db, *, now=None, sender=send_push):
             continue
         user = await db.users.find_one({"_id": ObjectId(user_id)})
         workspace = await db.workspaces.find_one({"_id": ObjectId(ws_id)})
-        if not user or not workspace or (str(workspace.get("user_id")) != user_id and user.get("role") != "admin"):
+        if not user or not workspace or not await user_has_workspace_access(db, user, workspace, ws_id):
             continue
         lead = await db.crm_leads.find_one({"_id": ObjectId(lead_id), "workspace_id": ws_id, "deleted_at": None})
         if not lead:

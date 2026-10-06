@@ -12,7 +12,13 @@ const localTime = (value) => zonedInput(value);
 const blank = () => ({ title: "", note: "", due_at: localTime(Date.now() + 3600000) });
 const inputClass = "w-full rounded-lg border bg-background p-2 text-sm";
 const dateLabel = (value) => formatDate(value instanceof Date ? inputToUtc(`${calendarDate(value)}T12:00`) : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(value) ? inputToUtc(value.slice(0, 16)) : value, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
-const timeLabel = (value) => formatTime(value, { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+const timeLabel = (value) => {
+  const zone = getAppTimezone();
+  if (zone === "Asia/Kolkata" || zone === "Asia/Calcutta") {
+    return `${formatTime(value, { hour: "numeric", minute: "2-digit" })} IST`;
+  }
+  return formatTime(value, { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+};
 const calendarDays = (month) => {
   const start = new Date(month.getFullYear(), month.getMonth(), 1);
   start.setDate(start.getDate() - start.getDay());

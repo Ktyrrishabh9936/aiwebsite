@@ -67,6 +67,7 @@ def fixture(monkeypatch):
     user, workspace, lead, task = [ObjectId() for _ in range(4)]
     db = SimpleNamespace(
         users=Collection([{"_id": user}]), workspaces=Collection([{"_id": workspace, "user_id": str(user)}]),
+        workspace_memberships=Collection(),
         crm_leads=Collection([{"_id": lead, "workspace_id": str(workspace), "full_name": "Asha"}]),
         tasks=Collection([{"_id": task, "workspace_id": str(workspace), "lead_id": str(lead), "created_by": str(user),
                            "title": "Call Asha", "status": "pending", "source": "crm_reminder",
@@ -105,6 +106,18 @@ def test_unavailable_or_ineligible_reminders_are_not_sent(fixture, change):
     sender = AsyncMock()
     assert asyncio.run(push.dispatch_due(db, now=now, sender=sender))["sent"] == 0
     sender.assert_not_awaited()
+
+
+def test_active_workspace_member_receives_own_reminder(fixture):
+    db, now = fixture
+    user_id = db.tasks.rows[0]["created_by"]
+    workspace_id = db.tasks.rows[0]["workspace_id"]
+    db.workspaces.rows[0]["user_id"] = str(ObjectId())
+    db.workspace_memberships.rows.append({"workspace_id": workspace_id, "user_id": user_id, "active": True})
+    sender = AsyncMock()
+    result = asyncio.run(push.dispatch_due(db, now=now, sender=sender))
+    assert result["sent"] == 1
+    sender.assert_awaited_once()
 
 
 def test_transient_failures_retry_after_lease_and_expired_devices_disable(fixture):
