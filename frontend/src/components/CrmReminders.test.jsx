@@ -3,10 +3,12 @@ import { createRoot } from "react-dom/client";
 import CrmReminders from "./CrmReminders";
 import api from "../lib/api";
 import { saveTimezonePreference } from "../lib/timezone";
+import { currentDevice, enablePush } from "../lib/pushNotifications";
 
 jest.mock("../lib/api", () => ({ __esModule: true, formatError: (v) => v, default: { get: jest.fn(), post: jest.fn(), patch: jest.fn() } }));
+jest.mock("../lib/pushNotifications", () => ({ currentDevice: jest.fn(), enablePush: jest.fn() }));
 let container, root;
-beforeEach(() => { global.IS_REACT_ACT_ENVIRONMENT = true; container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container); api.get.mockResolvedValue({ data: { items: [], total: 0 } }); api.post.mockResolvedValue({ data: {} }); api.patch.mockResolvedValue({ data: {} }); });
+beforeEach(() => { global.IS_REACT_ACT_ENVIRONMENT = true; container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container); api.get.mockResolvedValue({ data: { items: [], total: 0 } }); api.post.mockResolvedValue({ data: {} }); api.patch.mockResolvedValue({ data: {} }); currentDevice.mockResolvedValue({ supported: true, configured: true, enabled: false }); enablePush.mockResolvedValue(); });
 afterEach(() => { act(() => root.unmount()); container.remove(); localStorage.removeItem("arevei_timezone"); jest.clearAllMocks(); });
 async function change(element, value) { await act(async () => { Object.getOwnPropertyDescriptor(element.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, "value").set.call(element, value); element.dispatchEvent(new Event("input", { bubbles: true })); }); }
 
@@ -34,4 +36,14 @@ test("daily planner filters dates, opens the lead and marks a reminder done", as
   await change(container.querySelector('input[placeholder="Record the lead’s response before completing"]'), "Asked for a call tomorrow");
   await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Complete follow-up").click());
   expect(api.patch).toHaveBeenCalledWith("/workspaces/ws/crm/reminders/task", { status: "done", outcome: "Asked for a call tomorrow" });
+});
+
+test("follow-up notification control registers server push instead of only granting permission", async () => {
+  currentDevice.mockResolvedValueOnce({ supported: true, configured: true, enabled: false })
+    .mockResolvedValue({ supported: true, configured: true, enabled: true });
+  await act(async () => root.render(<CrmReminders wsId="ws" />));
+  const button = [...container.querySelectorAll("button")].find((item) => item.textContent === "Enable notifications");
+  await act(async () => button.click());
+  expect(enablePush).toHaveBeenCalledWith("ws");
+  expect(container.textContent).toContain("Enabled on this device");
 });

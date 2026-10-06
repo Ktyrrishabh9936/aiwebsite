@@ -1,6 +1,7 @@
 import { formatDate, formatTime, appDate, zonedInput, inputToUtc, dayBounds, getAppTimezone } from "../lib/timezone";
 import { useCallback, useEffect, useState } from "react";
 import api, { formatError } from "../lib/api";
+import { currentDevice, enablePush } from "../lib/pushNotifications";
 
 export function localDate(value = new Date()) {
   return appDate(value);
@@ -40,23 +41,32 @@ export default function CrmReminders({ wsId, leadId, onOpenLead }) {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [revision, setRevision] = useState(0);
-  const [notificationPermission, setNotificationPermission] = useState(() => typeof Notification === "undefined" ? "unsupported" : Notification.permission);
+  const [notificationStatus, setNotificationStatus] = useState(null);
+  const [notificationBusy, setNotificationBusy] = useState(false);
   const base = `/workspaces/${wsId}/crm`;
   const today = localDate();
   const chooseDay = (value) => { setDay(value); setMonth(new Date(`${value}T00:00:00`)); setView("day"); setPage(0); };
   const enableNotifications = async () => {
-    if (typeof Notification === "undefined") return;
+    setNotificationBusy(true);
+    setError("");
     try {
-      const permission = await Notification.requestPermission();
-      setNotificationPermission(permission);
-      if (permission === "granted") window.dispatchEvent(new Event("arevei:reminder-notifications-enabled"));
-    } catch { setError("Browser notifications could not be enabled."); }
+      await enablePush(wsId);
+      setNotificationStatus(await currentDevice(wsId));
+      window.dispatchEvent(new Event("arevei:reminder-notifications-enabled"));
+    } catch (failure) {
+      setError(formatError(failure.response?.data?.detail || failure.message));
+    } finally { setNotificationBusy(false); }
   };
   useEffect(() => {
-    const syncPermission = () => setNotificationPermission(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
-    window.addEventListener("focus", syncPermission);
-    return () => window.removeEventListener("focus", syncPermission);
-  }, []);
+    let live = true;
+    const refresh = () => currentDevice(wsId)
+      .then((value) => { if (live) setNotificationStatus(value); })
+      .catch(() => { if (live) setNotificationStatus({ supported: false, configured: false, enabled: false }); });
+    refresh();
+    window.addEventListener("focus", refresh);
+    window.addEventListener("arevei:push-changed", refresh);
+    return () => { live = false; window.removeEventListener("focus", refresh); window.removeEventListener("arevei:push-changed", refresh); };
+  }, [wsId]);
   useEffect(() => {
     let live = true;
     const params = { status, offset: page * 50, limit: 50 };
@@ -95,9 +105,9 @@ export default function CrmReminders({ wsId, leadId, onOpenLead }) {
       <div className="grid grid-cols-7 gap-1">{calendarDays(month).map((date) => { const key = calendarDate(date); const selected = key === day; const isToday = key === today; return <button key={key} type="button" aria-label={dateLabel(date)} aria-current={isToday ? "date" : undefined} aria-pressed={selected} onClick={() => chooseDay(key)} className={`h-9 rounded-lg text-sm transition ${selected ? "bg-primary text-primary-foreground font-semibold" : isToday ? "border-2 border-primary text-primary font-semibold" : date.getMonth() === month.getMonth() ? "hover:bg-accent" : "text-muted-foreground/50 hover:bg-accent"}`}>{date.getDate()}</button>; })}</div>
     </div>
     <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3 text-sm">
-      <span className="font-medium">Browser alerts</span>
-      {notificationPermission === "granted" ? <span className="text-emerald-600 dark:text-emerald-400">Enabled</span> : notificationPermission === "denied" ? <span className="text-muted-foreground">Blocked in browser settings</span> : notificationPermission === "unsupported" ? <span className="text-muted-foreground">Unavailable in this browser</span> : <button type="button" onClick={enableNotifications} className="rounded-lg border px-3 py-1.5 font-medium hover:bg-accent">Enable notifications</button>}
-      <span className="text-xs text-muted-foreground">Alerts appear at the due time while this workspace is open.</span>
+      <span className="font-medium">Follow-up notifications</span>
+      {notificationStatus?.enabled ? <span className="text-emerald-600 dark:text-emerald-400">Enabled on this device</span> : notificationStatus?.supported === false ? <span className="text-muted-foreground">Unavailable in this browser</span> : notificationStatus?.configured === false ? <span className="text-muted-foreground">Server notification setup is pending</span> : <button type="button" disabled={notificationBusy || !notificationStatus} onClick={enableNotifications} className="rounded-lg border px-3 py-1.5 font-medium hover:bg-accent disabled:opacity-50">{notificationBusy ? "Enabling…" : "Enable notifications"}</button>}
+      <span className="text-xs text-muted-foreground">Alerts are delivered for this workspace even when the installed app is closed.</span>
     </div>
     {(leadId || editing) && <form onSubmit={save} className="rounded-xl border bg-card p-4 space-y-3">
       <h4 className="text-sm font-medium">{editing ? "Edit follow-up" : "Plan a follow-up"}</h4>
