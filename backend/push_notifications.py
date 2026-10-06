@@ -41,6 +41,11 @@ def endpoint_id(endpoint):
     return hashlib.sha256(endpoint.encode()).hexdigest()
 
 
+def vapid_key_id():
+    """Identify the non-secret public key that owns a push subscription."""
+    return hashlib.sha256(configuration()["public_key"].encode()).hexdigest()
+
+
 class DeviceInput(BaseModel):
     endpoint: str = Field(max_length=2048)
     keys: dict[str, str]
@@ -87,7 +92,8 @@ async def subscription_status(ws_id: str, endpoint: str, request: Request):
     db = request.app.state.db
     user, _ = await get_current_user_and_workspace(request, db, ws_id)
     row = await db.push_subscriptions.find_one({"_id": endpoint_id(endpoint), "user_id": str(user["_id"]),
-                                              "workspace_ids": ws_id, "active": True})
+                                              "workspace_ids": ws_id, "active": True,
+                                              "vapid_key_id": vapid_key_id()})
     return {"enabled": bool(row)}
 
 
@@ -104,7 +110,8 @@ async def subscribe(ws_id: str, body: DeviceInput, request: Request):
     if existing and existing.get("user_id") != str(user["_id"]):
         await db.push_subscriptions.update_one({"_id": key}, {"$set": {"workspace_ids": []}})
     await db.push_subscriptions.update_one({"_id": key}, {
-        "$set": {"user_id": str(user["_id"]), "subscription": body.model_dump(), "active": True, "updated_at": now},
+        "$set": {"user_id": str(user["_id"]), "subscription": body.model_dump(), "active": True,
+                 "vapid_key_id": vapid_key_id(), "updated_at": now},
         "$setOnInsert": {"created_at": now}, "$addToSet": {"workspace_ids": ws_id}}, upsert=True)
     return {"enabled": True}
 
@@ -171,7 +178,8 @@ async def dispatch_due(db, *, now=None, sender=send_push):
         lead = await db.crm_leads.find_one({"_id": ObjectId(lead_id), "workspace_id": ws_id, "deleted_at": None})
         if not lead:
             continue
-        async for device in db.push_subscriptions.find({"user_id": user_id, "workspace_ids": ws_id, "active": True}):
+        async for device in db.push_subscriptions.find({"user_id": user_id, "workspace_ids": ws_id, "active": True,
+                                                        "vapid_key_id": vapid_key_id()}):
             delivery_id = endpoint_id(f"{task['_id']}:{task['scheduled_time']}:{device['_id']}")
             await db.push_deliveries.update_one({"_id": delivery_id}, {"$setOnInsert": {
                 "status": "pending", "attempts": 0, "next_attempt_at": now, "created_at": now,
@@ -185,7 +193,9 @@ async def dispatch_due(db, *, now=None, sender=send_push):
                 continue
             # Recheck edits, completion, subscription disablement just before delivery.
             current = await db.tasks.find_one({"_id": task["_id"], "status": "pending", "scheduled_time": task["scheduled_time"]})
-            active = await db.push_subscriptions.find_one({"_id": device["_id"], "user_id": user_id, "workspace_ids": ws_id, "active": True})
+            active = await db.push_subscriptions.find_one({"_id": device["_id"], "user_id": user_id,
+                                                           "workspace_ids": ws_id, "active": True,
+                                                           "vapid_key_id": vapid_key_id()})
             if not current or not active:
                 await db.push_deliveries.delete_one({"_id": delivery_id, "lease": lease})
                 continue

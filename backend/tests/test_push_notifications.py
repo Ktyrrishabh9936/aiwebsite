@@ -73,6 +73,7 @@ def fixture(monkeypatch):
                            "title": "Call Asha", "status": "pending", "source": "crm_reminder",
                            "scheduled_time": (now - timedelta(minutes=1)).isoformat()}]),
         push_subscriptions=Collection([{"_id": "device", "user_id": str(user), "workspace_ids": [str(workspace)],
+                                        "vapid_key_id": push.vapid_key_id(),
                                         "active": True, "subscription": {"endpoint": "https://fcm.googleapis.com/test"}}]),
         push_deliveries=Collection())
     return db, now
@@ -118,6 +119,15 @@ def test_active_workspace_member_receives_own_reminder(fixture):
     result = asyncio.run(push.dispatch_due(db, now=now, sender=sender))
     assert result["sent"] == 1
     sender.assert_awaited_once()
+
+
+def test_subscription_from_another_vapid_key_is_not_sent(fixture):
+    db, now = fixture
+    db.push_subscriptions.rows[0]["vapid_key_id"] = "different-environment"
+    sender = AsyncMock()
+    result = asyncio.run(push.dispatch_due(db, now=now, sender=sender))
+    assert result["sent"] == 0
+    sender.assert_not_awaited()
 
 
 def test_transient_failures_retry_after_lease_and_expired_devices_disable(fixture):

@@ -50,8 +50,15 @@ export default function CrmReminders({ wsId, leadId, onOpenLead }) {
     setNotificationBusy(true);
     setError("");
     try {
-      await enablePush(wsId);
-      setNotificationStatus(await currentDevice(wsId));
+      if (notificationStatus?.configured === false) {
+        if (typeof Notification === "undefined") throw new Error("Notifications are unavailable in this browser.");
+        const permission = await Notification.requestPermission();
+        if (permission !== "granted") throw new Error("Notifications are blocked in your browser settings.");
+        setNotificationStatus({ supported: true, configured: false, enabled: true, localOnly: true });
+      } else {
+        await enablePush(wsId);
+        setNotificationStatus(await currentDevice(wsId));
+      }
       window.dispatchEvent(new Event("arevei:reminder-notifications-enabled"));
     } catch (failure) {
       setError(formatError(failure.response?.data?.detail || failure.message));
@@ -106,8 +113,8 @@ export default function CrmReminders({ wsId, leadId, onOpenLead }) {
     </div>
     <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3 text-sm">
       <span className="font-medium">Follow-up notifications</span>
-      {notificationStatus?.enabled ? <span className="text-emerald-600 dark:text-emerald-400">Enabled on this device</span> : notificationStatus?.supported === false ? <span className="text-muted-foreground">Unavailable in this browser</span> : notificationStatus?.configured === false ? <span className="text-muted-foreground">Server notification setup is pending</span> : <button type="button" disabled={notificationBusy || !notificationStatus} onClick={enableNotifications} className="rounded-lg border px-3 py-1.5 font-medium hover:bg-accent disabled:opacity-50">{notificationBusy ? "Enabling…" : "Enable notifications"}</button>}
-      <span className="text-xs text-muted-foreground">Alerts are delivered for this workspace even when the installed app is closed.</span>
+      {notificationStatus?.enabled ? <span className="text-emerald-600 dark:text-emerald-400">{notificationStatus.localOnly ? "Browser alerts enabled" : "Enabled on this device"}</span> : notificationStatus?.supported === false ? <span className="text-muted-foreground">Unavailable in this browser</span> : <button type="button" disabled={notificationBusy || !notificationStatus} onClick={enableNotifications} className="rounded-lg border px-3 py-1.5 font-medium hover:bg-accent disabled:opacity-50">{notificationBusy ? "Enabling…" : notificationStatus?.configured === false ? "Enable browser alerts" : "Enable notifications"}</button>}
+      <span className="text-xs text-muted-foreground">{notificationStatus?.localOnly || notificationStatus?.configured === false ? "Local browser alerts require this workspace to remain open." : "Alerts are delivered for this workspace even when the installed app is closed."}</span>
     </div>
     {(leadId || editing) && <form onSubmit={save} className="rounded-xl border bg-card p-4 space-y-3">
       <h4 className="text-sm font-medium">{editing ? "Edit follow-up" : "Plan a follow-up"}</h4>

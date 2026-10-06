@@ -47,3 +47,15 @@ test("follow-up notification control registers server push instead of only grant
   expect(enablePush).toHaveBeenCalledWith("ws");
   expect(container.textContent).toContain("Enabled on this device");
 });
+
+test("falls back to foreground browser alerts when local server push is not configured", async () => {
+  currentDevice.mockResolvedValue({ supported: true, configured: false, enabled: false });
+  const originalNotification = window.Notification;
+  Object.defineProperty(window, "Notification", { configurable: true, value: { requestPermission: jest.fn().mockResolvedValue("granted") } });
+  await act(async () => root.render(<CrmReminders wsId="ws" />));
+  const button = [...container.querySelectorAll("button")].find((item) => item.textContent === "Enable browser alerts");
+  await act(async () => button.click());
+  expect(enablePush).not.toHaveBeenCalled();
+  expect(container.textContent).toContain("Browser alerts enabled");
+  Object.defineProperty(window, "Notification", { configurable: true, value: originalNotification });
+});
