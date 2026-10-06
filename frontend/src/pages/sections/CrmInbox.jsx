@@ -221,7 +221,6 @@ export default function CrmInbox() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [campaignQuery, setCampaignQuery] = useState("");
   const [salesFilters, setSalesFilters] = useState({});
   const salesPeople = useSalesPeople(wsId);
   const [createdFrom, setCreatedFrom] = useState("");
@@ -248,23 +247,23 @@ export default function CrmInbox() {
   const [newField, setNewField] = useState({ label: "", key: "", type: "text", required: false, options: [] });
   const [newState, setNewState] = useState({ label: "", key: "", color: "blue" });
   const [templateDraft, setTemplateDraft] = useState({ name: "Receipt", type: "receipt", button_label: "Download Receipt", active: true, html: "<h1>Receipt</h1><p>{{full_name}}</p><p>{{email}}</p><table>{{payment_plan.stages}}</table>" });
-  const listRefreshInFlight = useRef(false);
+  const leadRequestRevision = useRef(0);
+  const refreshController = useRef(null);
 
   const activeFields = useMemo(() => (settings.fields || []).filter((field) => field.active !== false), [settings.fields]);
   const dateFilters = useMemo(() => {
     try {
       return { values: {
-        ...(createdFrom ? { created_from: inputToUtc(createdFrom) } : {}),
-        ...(createdBefore ? { created_before: new Date(new Date(inputToUtc(createdBefore)).getTime() + 60_000).toISOString() } : {}),
+        ...(createdFrom ? { created_from: inputToUtc(`${createdFrom}T00:00`) } : {}),
+        ...(createdBefore ? { created_before: new Date(new Date(inputToUtc(`${createdBefore}T00:00`)).getTime() + 24 * 60 * 60 * 1000).toISOString() } : {}),
       }, error: "" };
     } catch (error) { return { values: {}, error: error.message }; }
   }, [createdFrom, createdBefore]);
   const leadFilters = useMemo(() => ({
     ...salesFilters,
     ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
-    ...(campaignQuery.trim() ? { campaign: campaignQuery.trim() } : {}),
     ...dateFilters.values,
-  }), [debouncedSearch, campaignQuery, dateFilters, salesFilters]);
+  }), [debouncedSearch, dateFilters, salesFilters]);
   const states = useMemo(() => {
     const base = settings.states?.length ? settings.states : [{ key: "new", label: "New", color: "blue" }];
     const hasAiQualified = base.some((state) => state.key === "ai_qualified");
@@ -274,8 +273,8 @@ export default function CrmInbox() {
     const stored = plivoAgentState.agents || [];
     return plivoAgentState.legacy_environment_agent ? [...stored, plivoAgentState.legacy_environment_agent] : stored;
   }, [plivoAgentState]);
-  const enabledPlivoAgents = useMemo(() => plivoAgents.filter((agent) => agent.enabled !== false && agent.readiness?.ready !== false), [plivoAgents]);
-  const hasCallableAgent = true; // Backend resolves the lead profile and validates its workspace provider.
+  const enabledPlivoAgents = useMemo(() => plivoAgents.filter((agent) => agent.enabled !== false && agent.readiness?.ready === true), [plivoAgents]);
+  const hasCallableAgent = enabledPlivoAgents.length > 0;
   const totalPages = Math.max(1, Math.ceil((pagination.total || 0) / pagination.limit));
 
   const selectLead = (lead) => {
@@ -348,27 +347,31 @@ export default function CrmInbox() {
   };
 
   const refreshLeadList = async (signal) => {
-    if (listRefreshInFlight.current) return;
-    listRefreshInFlight.current = true;
+    refreshController.current?.abort();
+    const controller = signal ? null : new AbortController();
+    if (controller) refreshController.current = controller;
+    const requestSignal = signal || controller.signal;
+    const revision = ++leadRequestRevision.current;
     try {
-      const { data } = await api.get(`/workspaces/${wsId}/crm/leads?${leadListParams().toString()}`, { signal });
-      applyLeadPage(data);
+      const { data } = await api.get(`/workspaces/${wsId}/crm/leads?${leadListParams().toString()}`, { signal: requestSignal });
+      if (revision === leadRequestRevision.current) applyLeadPage(data);
     } catch (e) {
       if (e.code !== "ERR_CANCELED") toast.error(formatError(e.response?.data?.detail));
-    } finally {
-      listRefreshInFlight.current = false;
     }
   };
 
   const loadAll = async (signal) => {
+    const revision = ++leadRequestRevision.current;
     try {
       setLoading(true);
       const params = leadListParams();
       const { data } = await api.get(`/workspaces/${wsId}/crm/bootstrap?${params.toString()}`, { signal });
+      if (revision !== leadRequestRevision.current) return;
       setSettings(data.settings);
       const nextPlivoAgents = data.agents || { agents: [], selected_agent_config_id: "", legacy_environment_agent: null };
       setPlivoAgentState(nextPlivoAgents);
       setSelectedAgentId((current) => nextSelectedAgentId(current, nextPlivoAgents));
+      if (revision !== leadRequestRevision.current) return;
       applyLeadPage(data.leads);
       if (selectedLead) {
         const refreshed = (data.leads?.items || []).find((lead) => lead.id === selectedLead.id);
@@ -382,7 +385,7 @@ export default function CrmInbox() {
       if (e.code === "ERR_CANCELED") return;
       toast.error(formatError(e.response?.data?.detail));
     } finally {
-      setLoading(false);
+      if (revision === leadRequestRevision.current) setLoading(false);
     }
   };
 
@@ -893,16 +896,13 @@ export default function CrmInbox() {
             <label className="text-xs font-medium text-muted-foreground">Search leads
               <div className="relative mt-1"><Search className="absolute left-3 top-3 w-4 h-4" /><input value={searchQuery} maxLength={200} onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }} placeholder="Name, phone, or campaign" className="w-full h-10 pl-9 pr-3 rounded-lg border bg-background text-sm text-foreground" /></div>
             </label>
-            <label className="text-xs font-medium text-muted-foreground">Campaign
-              <input value={campaignQuery} maxLength={200} onChange={(e) => { setCampaignQuery(e.target.value); setPage(1); }} placeholder="Filter campaign" className="mt-1 w-full h-10 px-3 rounded-lg border bg-background text-sm text-foreground" />
+            <label onClick={(event) => event.currentTarget.querySelector("input")?.showPicker?.()} className="text-xs font-medium text-muted-foreground cursor-pointer">Created from
+              <input type="date" value={createdFrom} onChange={(e) => { setCreatedFrom(e.target.value); setPage(1); }} className="mt-1 w-full h-10 px-2 rounded-lg border bg-background text-sm text-foreground" />
             </label>
-            <label className="text-xs font-medium text-muted-foreground">Created from
-              <input type="datetime-local" value={createdFrom} onChange={(e) => { setCreatedFrom(e.target.value); setPage(1); }} className="mt-1 w-full h-10 px-2 rounded-lg border bg-background text-sm text-foreground" />
+            <label onClick={(event) => event.currentTarget.querySelector("input")?.showPicker?.()} className="text-xs font-medium text-muted-foreground cursor-pointer">Created through
+              <input type="date" min={createdFrom || undefined} value={createdBefore} onChange={(e) => { setCreatedBefore(e.target.value); setPage(1); }} className="mt-1 w-full h-10 px-2 rounded-lg border bg-background text-sm text-foreground" />
             </label>
-            <label className="text-xs font-medium text-muted-foreground">Created through
-              <input type="datetime-local" min={createdFrom || undefined} value={createdBefore} onChange={(e) => { setCreatedBefore(e.target.value); setPage(1); }} className="mt-1 w-full h-10 px-2 rounded-lg border bg-background text-sm text-foreground" />
-            </label>
-            <button type="button" disabled={!searchQuery && !campaignQuery && !createdFrom && !createdBefore && !Object.values(salesFilters).some(Boolean)} onClick={() => { setSearchQuery(""); setCampaignQuery(""); setCreatedFrom(""); setCreatedBefore(""); setSalesFilters({}); setPage(1); }} className="h-10 px-3 rounded-lg border bg-background text-sm font-medium hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed">Clear filters</button>
+            <button type="button" disabled={!searchQuery && !createdFrom && !createdBefore && !Object.values(salesFilters).some(Boolean)} onClick={() => { setSearchQuery(""); setCreatedFrom(""); setCreatedBefore(""); setSalesFilters({}); setPage(1); }} className="h-10 px-3 rounded-lg border bg-background text-sm font-medium hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed">Clear filters</button>
           </div>
           {dateFilters.error && <p role="alert" className="text-sm text-destructive">{dateFilters.error} The date filter has not been applied.</p>}
 
@@ -1068,9 +1068,9 @@ function LeadTable({ wsId, leads, fields, states, selectedLead, loading, trashed
                       <button onClick={() => onRestore(lead)} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title="Restore lead" aria-label="Restore lead"><RotateCcw className="w-4 h-4" /></button>
                     ) : (
                       <div className="flex items-center justify-end gap-2">
-                        <button onClick={() => onCall(lead)} disabled={!values.phone || callingLeadId === lead.id || isJunk || !canCallWithAI} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40" title={isJunk ? "Junk leads cannot be called" : !canCallWithAI ? "Connect an AI agent first" : values.phone ? "Call with AI" : "Phone number required"} aria-label={`Call ${values.full_name || values.phone || "lead"} with AI`}>
+                        {canCallWithAI && <button onClick={() => onCall(lead)} disabled={!values.phone || callingLeadId === lead.id || isJunk} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40" title={isJunk ? "Junk leads cannot be called" : values.phone ? "Call with AI" : "Phone number required"} aria-label={`Call ${values.full_name || values.phone || "lead"} with AI`}>
                           {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
-                        </button>
+                        </button>}
                         <button onClick={() => onTrash(lead)} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-foreground/70 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title="Move lead to trash" aria-label={`Move ${values.full_name || values.phone || "lead"} to trash`}><Trash2 className="w-4 h-4" /></button>
                       </div>
                     )}
@@ -1202,9 +1202,9 @@ function LeadDetail(props) {
               <>
                 <button type="button" onClick={() => setWhatsappOpen(true)} className="inline-flex h-9 items-center gap-1.5 rounded-lg border bg-background px-2.5 text-xs font-semibold text-emerald-500 hover:bg-accent" title="Compose WhatsApp message" aria-label={`Message ${values.full_name || values.phone || "lead"} on WhatsApp`}><MessageSquare className="h-4 w-4" /><span className="hidden sm:inline">WhatsApp</span></button>
                 <button type="button" onClick={() => setSmsOpen(true)} className="inline-flex h-9 items-center gap-1.5 rounded-lg border bg-background px-2.5 text-xs font-semibold text-primary hover:bg-accent" title="Send SMS" aria-label={`Send SMS to ${values.full_name || values.phone || "lead"}`}><Send className="h-4 w-4" /><span className="hidden sm:inline">SMS</span></button>
-                <button onClick={() => callLead(lead)} disabled={saving || !values.phone || callingLeadId === lead.id || isJunkLead || !canCallWithAI} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title={isJunkLead ? "Junk leads cannot be called" : !canCallWithAI ? "Connect an AI agent first" : values.phone ? "Call with AI" : "Phone number required"}>
+                {canCallWithAI && <button onClick={() => callLead(lead)} disabled={saving || !values.phone || callingLeadId === lead.id || isJunkLead} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title={isJunkLead ? "Junk leads cannot be called" : values.phone ? "Call with AI" : "Phone number required"}>
                   {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
-                </button>
+                </button>}
                 <button onClick={() => trashLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-50" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
               </>
             )}

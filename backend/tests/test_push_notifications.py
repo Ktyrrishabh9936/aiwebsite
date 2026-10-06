@@ -130,6 +130,17 @@ def test_dispatch_requires_cron_secret(monkeypatch):
     assert error.value.status_code == 401
 
 
+def test_serverless_delivery_requires_cron_secret(monkeypatch):
+    monkeypatch.setenv("VAPID_PUBLIC_KEY", "public")
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "private")
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.delenv("CRON_SECRET", raising=False)
+    assert push.configured() is True
+    assert push.delivery_configured() is False
+    monkeypatch.setenv("CRON_SECRET", "production-secret")
+    assert push.delivery_configured() is True
+
+
 def test_subscription_rejects_arbitrary_endpoints():
     keys = {"auth": base64.urlsafe_b64encode(bytes(16)).decode(), "p256dh": base64.urlsafe_b64encode(bytes(65)).decode()}
     with pytest.raises(ValidationError):

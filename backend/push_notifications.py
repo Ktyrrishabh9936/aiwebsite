@@ -30,6 +30,13 @@ def configured():
     return bool(config["public_key"] and config["private_key"])
 
 
+def delivery_configured():
+    """Serverless deployments also need an authenticated external scheduler."""
+    if not configured():
+        return False
+    return not os.getenv("VERCEL") or bool(os.getenv("CRON_SECRET", "").strip())
+
+
 def endpoint_id(endpoint):
     return hashlib.sha256(endpoint.encode()).hexdigest()
 
@@ -72,7 +79,7 @@ class EndpointInput(BaseModel):
 @router.get("/config")
 async def push_config(request: Request):
     await get_current_user(request, request.app.state.db)
-    return {"enabled": configured(), "public_key": configuration()["public_key"]}
+    return {"enabled": delivery_configured(), "public_key": configuration()["public_key"]}
 
 
 @router.get("/workspaces/{ws_id}/subscription")
