@@ -28,9 +28,10 @@ Vercel project, in the environment used by that deployment:
 1. Add `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` and `CRON_SECRET`.
    Copy the existing values securely from the ignored local `backend/.env`.
 2. Redeploy the backend so it receives the new environment values.
-3. Redeploy with `backend/vercel.json`; its Vercel Cron calls
-   `/api/push/dispatch` every minute. Vercel automatically sends
-   `Authorization: Bearer <CRON_SECRET>` when that environment variable exists.
+3. On Vercel Hobby, configure an external scheduler to call
+   `/api/push/dispatch` every minute with `Authorization: Bearer <CRON_SECRET>`.
+   Vercel Hobby rejects cron expressions that run more than once per day.
+   On Vercel Pro, an every-minute Vercel Cron may be used instead.
 4. Open Settings in the installed staging app and enable notifications. Create
    a test follow-up due in two minutes and check delivery with the app closed.
 
@@ -41,7 +42,7 @@ frontend project, to a different Vercel environment, or without a backend
 redeployment will not enable it. The scheduler is also required for delivery;
 configuring VAPID keys alone does not schedule notifications on Vercel.
 
-On a persistent backend, leave `DISABLE_BACKGROUND_JOBS` off. The included Vercel configuration schedules `GET /api/push/dispatch` every minute. On another serverless host, configure an external scheduler to call that endpoint with `Authorization: Bearer <CRON_SECRET>`. POST is also supported. Do not put the secret in the URL. Both methods require the same authorization. Serverless deployment without a scheduler does not deliver notifications.
+On a persistent backend, leave `DISABLE_BACKGROUND_JOBS` off. On Vercel Hobby or another serverless host without a one-minute scheduler, configure an external scheduler to call `GET /api/push/dispatch` every minute with `Authorization: Bearer <CRON_SECRET>`. POST is also supported. Do not put the secret in the URL. Both methods require the same authorization. Serverless deployment without a scheduler does not deliver notifications.
 
 Delivery records in MongoDB use atomic claims and leases to prevent concurrent workers from sending the same reminder to the same device. Transient errors retry after two minutes, up to five attempts. Expired subscriptions (404/410) are disabled. Rescheduled reminders use a new delivery key; done/cancelled reminders and unavailable leads are skipped. Pending reminders older than 24 hours are excluded to avoid a flood after downtime. Accepted push messages may still arrive after a last-second edit; network delivery is not an exactly-once guarantee.
 
