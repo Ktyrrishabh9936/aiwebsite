@@ -1312,14 +1312,18 @@ app.include_router(build_auth_router(db))
 app.include_router(build_coding_router(db))
 app.include_router(api)
 
-cors_origins = [origin.strip().rstrip("/") for origin in os.environ.get("CORS_ORIGINS", "*").split(",") if origin.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=False,
-    allow_origins=cors_origins,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Lambda Function URLs add CORS headers themselves.  Do not also add them in
+# FastAPI there: duplicate Access-Control-Allow-Origin values are rejected by
+# browsers.  Local/Uvicorn deployments keep the application-level middleware.
+if not os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+    cors_origins = [origin.strip().rstrip("/") for origin in os.environ.get("CORS_ORIGINS", "*").split(",") if origin.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_credentials=False,
+        allow_origins=cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @app.on_event("startup")

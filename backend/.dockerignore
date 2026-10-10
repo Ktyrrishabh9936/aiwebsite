@@ -1,0 +1,16 @@
+# Never put local secrets or local Python environments into the Lambda image.
+.env
+.env.*
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.log
+tests/
+
+# Deployment and editor artifacts are not needed at runtime.
+.git/
+.vscode/
+.idea/
+vercel.json
