@@ -24,8 +24,12 @@ export default function Login() {
       const session = await login(email, password);
       toast.success("Welcome back");
       const returnTo = location.state?.from;
-      if (typeof returnTo === "string" && returnTo.startsWith("/app/") && !returnTo.startsWith("//")) nav(returnTo, { replace: true });
-      else if (session?.default_workspace_id) nav(`/app/w/${session.default_workspace_id}`);
+      // A saved return path can belong to a previous user/session (or to a
+      // workspace that was deleted). The login response is authoritative, so
+      // enter the current user's workspace first instead of rendering a stale
+      // workspace URL as "Workspace not found".
+      if (session?.default_workspace_id) nav(`/app/w/${session.default_workspace_id}`, { replace: true });
+      else if (typeof returnTo === "string" && returnTo.startsWith("/app/") && !returnTo.startsWith("//")) nav(returnTo, { replace: true });
       else if (!localStorage.getItem("arevei_onboarded")) nav("/welcome");
       else nav("/app");
     } catch (err) {

@@ -4,10 +4,11 @@ import Login from "./Login";
 import { useAuth } from "../context/AuthContext";
 
 const mockNavigate = jest.fn();
+let mockLocation = { state: {} };
 jest.mock("react-router-dom", () => ({
   Link: ({ children, to, ...props }) => <a href={to} {...props}>{children}</a>,
   useNavigate: () => mockNavigate,
-  useLocation: () => ({ state: {} }),
+  useLocation: () => mockLocation,
 }), { virtual: true });
 jest.mock("../context/AuthContext", () => ({ useAuth: jest.fn() }));
 jest.mock("sonner", () => ({ toast: { success: jest.fn(), error: jest.fn() } }));
@@ -26,6 +27,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   mockNavigate.mockClear();
+  mockLocation = { state: {} };
 });
 
 afterEach(() => {
@@ -47,5 +49,21 @@ test("navigates directly to the default workspace returned by login", async () =
   });
   await act(async () => container.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   expect(login).toHaveBeenCalled();
-  expect(mockNavigate).toHaveBeenCalledWith("/app/w/workspace-123");
+  expect(mockNavigate).toHaveBeenCalledWith("/app/w/workspace-123", { replace: true });
+});
+
+test("uses the signed-in user's workspace instead of a stale saved route", async () => {
+  mockLocation = { state: { from: "/app/w/deleted-or-other-user-workspace/crm" } };
+  const login = jest.fn().mockResolvedValue({ default_workspace_id: "workspace-123" });
+  useAuth.mockReturnValue({ login });
+  await act(async () => root.render(<Login />));
+  const inputs = container.querySelectorAll("input");
+  await act(async () => {
+    inputs[0].value = "user@example.com";
+    inputs[0].dispatchEvent(new Event("input", { bubbles: true }));
+    inputs[1].value = "secret1";
+    inputs[1].dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => container.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  expect(mockNavigate).toHaveBeenCalledWith("/app/w/workspace-123", { replace: true });
 });
