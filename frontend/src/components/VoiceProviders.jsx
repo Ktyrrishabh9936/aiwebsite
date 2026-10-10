@@ -40,17 +40,42 @@ export default function VoiceProviders({ workspaceId }) {
 
   const run = async (test = false, recover = false) => {
     setBusy(true); setMessage("");
+    let stage = "save";
     try {
       const recoveryRequested = recover || (provider === "sarvam" && !!credentials.api_key?.trim());
-      await api.put(`${base}/${provider}`, { ...draft, credentials, revision: selected?.revision, ...(recoveryRequested ? { recover_credentials: true } : {}) });
+      const payload = { ...draft, credentials, revision: selected?.revision, ...(recoveryRequested ? { recover_credentials: true } : {}) };
+      let saved;
+      try {
+        ({ data: saved } = await api.put(`${base}/${provider}`, payload));
+      } catch (error) {
+        const detail = error.response?.data?.detail;
+        const unsupportedRecovery = error.response?.status === 422 && Array.isArray(detail) && detail.length === 1
+          && detail[0].type === "extra_forbidden"
+          && JSON.stringify(detail[0].loc) === JSON.stringify(["body", "recover_credentials"]);
+        if (!recoveryRequested || !unsupportedRecovery) throw error;
+        if (recover) throw new Error("This backend does not support credential recovery. Deploy the updated backend, then reconnect.");
+        const { recover_credentials, ...compatiblePayload } = payload;
+        ({ data: saved } = await api.put(`${base}/${provider}`, compatiblePayload));
+      }
+      setProviders((items) => items.map((item) => item.provider === provider
+        ? { ...item, ...saved } : { ...item, is_default: false }));
       setCredentials({});
+      stage = "test";
       const result = test ? (await api.post(`${base}/${provider}/test`, {})).data : null;
+      if (result) setProviders((items) => items.map((item) => item.provider === provider ? { ...item, ...result } : item));
+      stage = "refresh";
       const { data } = await api.get(base); setProviders(data);
       setProvider(data.find((item) => item.is_default)?.provider || provider);
       setMessage(result ? result.status.replaceAll("_", " ") : `${provider === "sarvam" ? "Sarvam" : "Plivo"} saved as this workspace's default voice provider.`);
     } catch (error) {
       const detail = error.response?.data?.detail;
-      setMessage(typeof detail === "string" ? detail : "Could not save or verify provider configuration");
+      const prefix = stage === "save" ? "Could not save provider configuration"
+        : stage === "test" ? "Configuration saved, but connection verification failed"
+        : "Configuration saved, but provider details could not be refreshed";
+      const reason = detail != null ? formatError(detail)
+        : !error.response ? (error.message && !error.request ? error.message : "The backend could not be reached. Check the connection and the backend's CORS settings.")
+        : `The backend returned HTTP ${error.response.status}.`;
+      setMessage(`${prefix}: ${reason}`);
     } finally { setBusy(false); }
   };
 

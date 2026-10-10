@@ -15,6 +15,26 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => root.unmount()); container.remove(); jest.clearAllMocks(); });
 
+test("save validation errors show the backend detail", async () => {
+  api.get.mockResolvedValue({ data: [{ provider: "sarvam", is_default: true, revision: 2, config: {} }] });
+  api.put.mockRejectedValue({ response: { status: 422, data: { detail: [{ msg: "Unknown field: recover_credentials" }] } } });
+  await act(async () => root.render(<VoiceProviders workspaceId="A" />));
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Save").click());
+  expect(container.querySelector('[role="status"]').textContent).toContain("Unknown field: recover_credentials");
+});
+
+test("failed verification preserves the saved revision and clears stale connected status", async () => {
+  api.get.mockResolvedValue({ data: [{ provider: "sarvam", is_default: true, revision: 2, status: "connected", config: {} }] });
+  api.put.mockResolvedValue({ data: { provider: "sarvam", is_default: true, revision: 3, status: "unverified", config: {} } });
+  api.post.mockRejectedValue({ response: { status: 503, data: { detail: "Voice credential encryption is not configured" } } });
+  await act(async () => root.render(<VoiceProviders workspaceId="A" />));
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Save & Test Connection").click());
+  expect(container.textContent).toContain("Status: unverified");
+  expect(container.querySelector('[role="status"]').textContent).toContain("Configuration saved, but connection verification failed: Voice credential encryption is not configured");
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Save").click());
+  expect(api.put.mock.calls[1][1].revision).toBe(3);
+});
+
 test("provider fields switch independently and saved secrets are never displayed or resubmitted", async () => {
   api.get.mockResolvedValue({ data: [
     { provider: "plivo", enabled: true, config: { auth_id: "account" }, configured_secrets: ["auth_token"], status: "connected", revision: 1 },
@@ -135,4 +155,17 @@ test("saving a replacement Sarvam key requests recovery directly", async () => {
  await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(field,'replacement-key');field.dispatchEvent(new Event('input',{bubbles:true}));});
  await act(async()=>[...container.querySelectorAll('button')].find(b=>b.textContent==='Save').click());
  expect(api.put).toHaveBeenCalledWith('/workspaces/A/voice-providers/sarvam',expect.objectContaining({credentials:{api_key:'replacement-key'},recover_credentials:true,revision:2}));
+});
+
+test("replacement keys can be saved to older backends without the unsupported recovery field", async () => {
+ api.get.mockResolvedValue({data:[{provider:"sarvam",is_default:true,revision:2,config:{app_id:"existing"},configured_secrets:["api_key"]}]});
+ api.put.mockRejectedValueOnce({response:{status:422,data:{detail:[{type:"extra_forbidden",loc:["body","recover_credentials"],msg:"Extra inputs are not permitted"}]}}})
+   .mockResolvedValueOnce({data:{provider:"sarvam",revision:3,status:"unverified",config:{app_id:"existing"}}});
+ await act(async()=>root.render(<VoiceProviders workspaceId="A"/>));
+ const field=container.querySelector('input[type="password"]');
+ await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(field,'replacement-key');field.dispatchEvent(new Event('input',{bubbles:true}));});
+ await act(async()=>[...container.querySelectorAll('button')].find(b=>b.textContent==='Save').click());
+ expect(api.put).toHaveBeenCalledTimes(2);
+ expect(api.put.mock.calls[1][1]).toEqual({enabled:false,config:{app_id:'existing'},credentials:{api_key:'replacement-key'},revision:2});
+ expect(container.querySelector('[role="status"]').textContent).toContain('saved as this workspace');
 });

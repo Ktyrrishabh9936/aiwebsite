@@ -85,7 +85,7 @@ Gateway. It needs outbound internet access for MongoDB Atlas and web push.
 4. Enable CORS, with:
    - Allowed origin: `https://ainativemanager.vercel.app`
    - Methods: `GET, POST, PUT, PATCH, DELETE, OPTIONS`
-   - Headers: `Content-Type, Authorization`
+   - Headers: `Content-Type, Authorization, X-App-Timezone`
 5. Create it and copy the generated URL.
 
 The application keeps its own user authentication. The scheduled invocation is
