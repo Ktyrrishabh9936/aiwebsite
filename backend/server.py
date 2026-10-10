@@ -25,6 +25,7 @@ from models import Workspace, Task, Blog, Notification, BLOG_IMAGE_POOL, now_iso
 from auth import build_auth_router, get_current_user, get_current_user_and_workspace
 from push_notifications import router as push_router, push_scheduler
 from manager_agent import router as manager_agent_router
+from sales_leadership import router as sales_router, leadership_loop, sales_strategy
 from coding import build_coding_router
 import agents
 import llm_service
@@ -374,38 +375,7 @@ async def gen_roadmap(ws_id: str, request: Request):
     ws = await owned_workspace(ws_id, user)
     if ws.get("brain_status") != "ready":
         raise HTTPException(400, "Brain is not ready yet")
-    model_id = ws.get("model_id")
-    brain = ws.get("brain", {})
-    with usage_scope(ws_id, "roadmap_strategy"):
-        roadmap = await agents.build_roadmap(model_id, brain)
-    await db.workspaces.update_one({"_id": oid(ws_id)}, {"$set": {"roadmap": roadmap.get("months", []),
-                                                                   "strategy_summary": roadmap.get("strategy_summary", "")}})
-    # generate + schedule tasks
-    with usage_scope(ws_id, "roadmap_tasks"):
-        raw_tasks = await agents.generate_tasks(model_id, brain, roadmap, count=8)
-    await db.tasks.delete_many({"workspace_id": ws_id, "status": "pending"})
-    now = datetime.now(timezone.utc)
-    auto_count = 0
-    for i, t in enumerate(raw_tasks):
-        is_content = t.get("agent") == "content"
-        # first few content tasks auto-run soon to showcase automation
-        auto = is_content and auto_count < 3
-        if auto:
-            sched = now + timedelta(seconds=20 + auto_count * 40)
-            requires_approval = False
-            auto_count += 1
-        else:
-            sched = now + timedelta(days=i)
-            requires_approval = True
-        task = Task(workspace_id=ws_id, title=t.get("title", "Untitled task"),
-                    objective=t.get("objective", ""), agent=t.get("agent", "content"),
-                    deliverable_type=t.get("deliverable_type", "blog_post"),
-                    success_criteria=t.get("success_criteria", ""),
-                    month_number=int(t.get("month_number", 1) or 1),
-                    requires_approval=bool(requires_approval),
-                    scheduled_time=sched.isoformat())
-        await db.tasks.insert_one(task.to_mongo())
-    await notify(ws_id, "info", "Roadmap generated", f"{len(raw_tasks)} tasks scheduled across your 12-month plan.")
+    await sales_strategy(db, ws)
     doc = await db.workspaces.find_one({"_id": oid(ws_id)})
     return doc_out(doc)
 
@@ -420,7 +390,7 @@ async def list_tasks(ws_id: str, request: Request):
 
 async def execute_task(task_doc):
     """Run a task through its specialist agent."""
-    if task_doc.get("source") in {"qualification_engine", "crm_reminder"}:
+    if task_doc.get("source") in {"qualification_engine", "crm_reminder", "sales_manager"}:
         raise HTTPException(409, "This is a human follow-up task. Complete the action in CRM and mark it done.")
     ws = await db.workspaces.find_one({"_id": oid(task_doc["workspace_id"])})
     if not ws:
@@ -516,6 +486,8 @@ async def approve_task(task_id: str, request: Request):
     if not task:
         raise HTTPException(404, "Task not found")
     await owned_workspace(task["workspace_id"], user)
+    if task.get("source") == "sales_manager":
+        raise HTTPException(409, "Record a sales task outcome using the sales task completion endpoint")
     if task.get("output_ref"):
         await db.blogs.update_one({"_id": oid(task["output_ref"])},
                                   {"$set": {"status": "published", "published_at": now_iso()}})
@@ -1295,6 +1267,7 @@ async def google_sheets_poller_loop():
 from google_sheets import router as google_sheets_router
 from workflows import router as workflows_router
 from crm import router as crm_router
+from customer_lifecycle import router as customers_router
 from sms import router as sms_router
 from sales_team import router as sales_team_router
 from sales_team import shared_router as shared_leads_router
@@ -1312,6 +1285,7 @@ from billing import router as billing_router
 api.include_router(google_sheets_router)
 api.include_router(workflows_router)
 api.include_router(crm_router)
+api.include_router(customers_router)
 api.include_router(sms_router)
 api.include_router(sales_team_router)
 api.include_router(shared_leads_router)
@@ -1331,6 +1305,7 @@ api.include_router(ai_usage_router)
 api.include_router(billing_router)
 api.include_router(push_router)
 api.include_router(manager_agent_router)
+api.include_router(sales_router)
 api.include_router(build_voice_router(db, manager_service, owned_workspace, require_user))
 
 app.include_router(build_auth_router(db))
@@ -1357,6 +1332,7 @@ async def startup():
     if not background_jobs_disabled:
         if os.environ.get("VERCEL"):
             logger.warning("Background loops are enabled on Vercel; keep them enabled for compatibility until a durable worker is deployed")
+        app.state.sales_leadership_job = asyncio.create_task(leadership_loop(db))
         asyncio.create_task(scheduler_loop())
         asyncio.create_task(google_sheets_poller_loop())
         if not os.environ.get("VERCEL"):
@@ -1375,4 +1351,9 @@ async def shutdown():
             await push_job
         except asyncio.CancelledError:
             pass
+    sales_job = getattr(app.state, "sales_leadership_job", None)
+    if sales_job:
+        sales_job.cancel()
+        try: await sales_job
+        except asyncio.CancelledError: pass
     client.close()

@@ -1,3 +1,4 @@
+import SalesTaskAction from "../../components/SalesTaskAction";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useOutletContext, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
@@ -10,6 +11,7 @@ import api from "../../lib/api";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../../components/ui/dialog";
 
 const agentColors = {
+  sales: "bg-violet-500/10 text-violet-500",
   content: "bg-primary/10 text-primary",
   seo: "bg-emerald-500/10 text-emerald-500",
   creative: "bg-amber-500/10 text-amber-500",
@@ -247,14 +249,14 @@ export default function Tasks() {
   const del = async (id) => { await api.delete(`/tasks/${id}`); load(); };
 
   if ((ws.roadmap || []).length === 0 && tasks.length === 0) {
-    return <div className="p-10 max-w-4xl mx-auto text-center text-muted-foreground border border-dashed border-border rounded-md py-16 m-6 sm:m-10">Generate a roadmap first (Overview -> Generate roadmap) to schedule tasks.</div>;
+    return <div className="p-10 max-w-4xl mx-auto text-center text-muted-foreground border border-dashed border-border rounded-md py-16 m-6 sm:m-10">Complete Sales Strategy setup, then review the live pipeline to create the next sales actions.</div>;
   }
 
   return (
     <div className="p-6 sm:p-10 max-w-5xl mx-auto space-y-6">
       <div>
         <h1 className="font-display text-3xl font-black tracking-tight">Tasks</h1>
-        <p className="text-muted-foreground mt-1">Auto-scheduled by the manager. The scheduler runs due tasks automatically every ~30s.</p>
+        <p className="text-muted-foreground mt-1">Sales priorities and existing CRM follow-ups. Record customer outcomes to complete sales actions; they never run calls automatically.</p>
       </div>
 
       <div className="space-y-3">
@@ -274,6 +276,7 @@ export default function Tasks() {
               <div className="min-w-0 flex-1">
                 <div className="font-medium truncate">{t.title}</div>
                 <div className="text-xs text-muted-foreground truncate">{t.objective}</div>
+                {t.source === "sales_manager" && <div className="text-[10px] text-muted-foreground mt-1">Owner: {t.owner} ? {t.reason}</div>}
               </div>
               <div className="hidden sm:flex items-center gap-1.5 text-xs shrink-0">
                 <s.icon className={`w-3.5 h-3.5 ${s.cls}`} />
@@ -283,9 +286,10 @@ export default function Tasks() {
                 {(t.status === "done" || t.status === "awaiting_approval") && (
                   <button onClick={() => setDetail(t)} data-testid={`task-view-${t.id}`} className="grid place-items-center w-9 h-9 rounded-full border border-border hover:bg-accent" title="View output"><Eye className="w-4 h-4" /></button>
                 )}
+                {t.source === "sales_manager" && t.status === "pending" && <SalesTaskAction task={t} wsId={ws.id} onComplete={load}/> }
                 {t.source === "crm_reminder" && t.status === "pending" && <Link className="text-sm text-primary px-2" to={`/app/w/${ws.id}/crm?tab=reminders`}>Record follow-up outcome in CRM</Link>}
                 {t.source === "qualification_engine" && t.status === "pending" && <><Link className="text-sm text-primary px-2" to={`/app/w/${ws.id}/crm`}>Open CRM</Link><button onClick={() => approve(t.id, true)} disabled={busy === t.id} className="px-3 h-9 rounded-full border text-sm disabled:opacity-60">Mark done</button></>}
-                {t.status === "pending" && !["qualification_engine", "crm_reminder"].includes(t.source) && (
+                {t.status === "pending" && !["qualification_engine", "crm_reminder", "sales_manager"].includes(t.source) && (
                   <button onClick={() => run(t.id)} disabled={busy === t.id} data-testid={`task-run-${t.id}`} className="inline-flex items-center gap-1.5 px-3 h-9 rounded-full bg-primary text-primary-foreground text-sm font-medium disabled:opacity-60">
                     {busy === t.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />} Run
                   </button>

@@ -21,6 +21,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import useReminderNotifications from "../hooks/useReminderNotifications";
 import SalesPortal from "./SalesPortal";
+import ProductUpdates from "../components/ProductUpdates";
 
 const kindDot = { success: "bg-primary", approval: "bg-amber-500", error: "bg-destructive", info: "bg-muted-foreground" };
 const workspaceStatus = {
@@ -131,7 +132,7 @@ export default function WorkspaceLayout() {
       setWorkspaceUrl("");
       queryClient.invalidateQueries({ queryKey: ["workspace-bootstrap"] });
       loadWorkspaces();
-      navigate(`/app/w/${r.data.id}`);
+      navigate(`/app/w/${r.data.id}/sales-strategy`);
     } catch {
       toast.error("Could not create workspace");
     } finally {
@@ -151,9 +152,9 @@ export default function WorkspaceLayout() {
   if (["sales_agent", "channel_partner"].includes(ws.access_role)) return <SalesPortal key={wsId} workspace={ws} workspaces={workspaces} />;
 
   return (
-    <div className={`h-[100dvh] overflow-hidden ${agentMode ? "" : collapsed ? "md:pl-[76px]" : "md:pl-64"}`}>
+    <div className={`app-shell h-[100dvh] overflow-hidden ${agentMode ? "" : collapsed ? "md:pl-[76px]" : "md:pl-64"}`}>
       <a href="#workspace-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:bg-background focus:p-3 focus:rounded-lg">Skip to content</a>
-      <aside aria-label="Sidebar" className={`${agentMode ? "hidden" : "hidden md:flex"} fixed inset-y-0 left-0 z-30 flex-col ${collapsed ? "w-[76px]" : "w-64"} border-r border-border bg-card`}>
+      <aside aria-label="Sidebar" className={`app-sidebar ${agentMode ? "hidden" : "hidden md:flex"} fixed inset-y-0 left-0 z-30 flex-col ${collapsed ? "w-[76px]" : "w-64"} border-r border-border bg-card`}>
         <div className={`h-16 shrink-0 flex items-center ${collapsed ? "justify-center" : "justify-between px-5"} border-b border-border`}>
           {!collapsed && <Logo className="text-base" to="/app" />}
           <button type="button" onClick={toggleSidebar} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} title={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed} className="p-2 rounded-lg text-muted-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring">{collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}</button>
@@ -171,17 +172,18 @@ export default function WorkspaceLayout() {
       </Sheet>
 
       <div className="h-[100dvh] flex flex-col min-w-0">
-        <header className="sticky top-0 z-20 glass border-b border-border">
+        <header className="app-topbar sticky top-0 z-20 glass border-b border-border">
           <div className="min-h-16 px-3 sm:px-5 py-2 flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0 flex items-center gap-3">
               <button type="button" onClick={() => setMobileNavigation(true)} aria-label="Open navigation" className={`${agentMode ? "" : "md:hidden"} p-2 rounded-lg border hover:bg-accent`}><Menu size={18} /></button>
               <div className="min-w-0"><p className="text-[11px] text-muted-foreground truncate max-w-48">{ws.name}</p><h2 className="font-semibold truncate">{agentMode ? "AI Manager" : pageTitle}</h2></div>
             </div>
-            <div className="flex rounded-full border border-border p-1 gap-1" role="group" aria-label="Workspace mode">
+            <div className="app-mode-switch flex rounded-full border border-border p-1 gap-1" role="group" aria-label="Workspace mode">
               <button type="button" aria-pressed={!agentMode} onClick={() => setAgentMode(false)} className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-xs font-semibold ${!agentMode ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}><Users size={14} /> Human Mode</button>
               <button type="button" aria-pressed={agentMode} onClick={() => { setAgentVisited(true); setAgentMode(true); }} className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-xs font-semibold ${agentMode ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}><Bot size={14} /> Agent Mode</button>
             </div>
             <div className="flex items-center gap-2.5">
+              <ProductUpdates userId={user?.id} wsId={wsId} onExplore={path => { setAgentMode(false); navigate(path); }} />
               <ModelPicker value={ws.model_id} onChange={changeModel} />
               <Popover onOpenChange={(o) => o && loadNotes()}>
                 <PopoverTrigger asChild>
@@ -297,3 +299,5 @@ export default function WorkspaceLayout() {
     </div>
   );
 }
+
+

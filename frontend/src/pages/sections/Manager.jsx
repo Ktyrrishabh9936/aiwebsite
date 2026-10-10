@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { useOutletContext } from "react-router-dom";
+import { useOutletContext, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Send, Sparkles, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import api from "../../lib/api";
 import { AiStatus, useAiStatus, aiErrorMessage } from "../../components/AiStatus";
 import { ChatText } from "../../components/ChatText";
+import SalesBriefing from "../../components/SalesBriefing";
 
 export default function Manager() {
   const { ws, refresh } = useOutletContext();
+  const nav = useNavigate();
   const aiStatus = useAiStatus(ws);
   const [messages, setMessages] = useState([
     { role: "assistant", content: `I'm your AI manager for ${ws.name}. Ask me about your business, CRM leads, or growth strategy.` },
@@ -17,15 +19,31 @@ export default function Manager() {
   const [streaming, setStreaming] = useState(false);
   const [genning, setGenning] = useState(false);
   const [showRoadmap, setShowRoadmap] = useState(false);
+  const [checkingInsights, setCheckingInsights] = useState(false);
   const scrollRef = useRef(null);
 
   useEffect(() => { scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight); }, [messages]);
+
+  const checkInsights = async () => {
+    if (checkingInsights || streaming) return;
+    setCheckingInsights(true);
+    setMessages(current => [...current, { role: "user", content: "Check Insights" }]);
+    try {
+      const { data } = await api.get(`/workspaces/${ws.id}/sales/briefing`);
+      if (typeof data.total_leads !== "number") throw new Error("Invalid briefing");
+      setMessages(current => [...current, data.total_leads > 0
+        ? { role: "assistant", content: "Here are your current CRM insights and sales priorities.", insights: true }
+        : { role: "assistant", content: "There are no leads in your CRM yet. Train your Brain with business knowledge, products, services and customer information, then build your sales strategy. Add or import leads to receive pipeline insights.", setup: true }]);
+    } catch {
+      setMessages(current => [...current, { role: "assistant", content: "I couldn't load the CRM insights. Please try Check Insights again." }]);
+    } finally { setCheckingInsights(false); }
+  };
 
   const send = async (e) => {
     e?.preventDefault();
     const msg = input.trim();
     if (!msg || streaming || aiStatus.state === "checking") return;
-    const history = messages.slice(-6);
+    const history = messages.slice(-6).map(({ role, content }) => ({ role, content }));
     setMessages((m) => [...m, { role: "user", content: msg }, { role: "assistant", content: "" }]);
     setInput("");
     setStreaming(true);
@@ -51,13 +69,14 @@ export default function Manager() {
   };
 
   const genRoadmap = async () => {
+    if (!ws.sales_profile) { nav(`/app/w/${ws.id}/sales-strategy`); return; }
     setGenning(true);
-    try { await api.post(`/workspaces/${ws.id}/roadmap`); await refresh(); toast.success("Roadmap regenerated"); }
+    try { await api.post(`/workspaces/${ws.id}/roadmap`); await refresh(); toast.success("Sales strategy updated"); }
     catch { toast.error("Failed"); }
     finally { setGenning(false); }
   };
 
-  const roadmap = ws.roadmap || [];
+  const roadmap = ws.sales_strategy ? ws.roadmap || [] : [];
 
   return (
     <div className="flex flex-col lg:flex-row h-[calc(100dvh-4rem)] min-h-0">
@@ -65,12 +84,12 @@ export default function Manager() {
       {showRoadmap && <div id="manager-roadmap" className="order-last shrink-0 w-full lg:w-[360px] max-h-[40vh] lg:max-h-none overflow-y-auto p-6 border-t lg:border-t-0 lg:border-l border-border">
         <div className="flex items-end justify-between mb-6 flex-wrap gap-3">
           <div>
-            <h2 className="font-display text-xl font-bold tracking-tight">Growth Roadmap</h2>
-            <p className="text-muted-foreground mt-1">12-month plan owned by the AI manager.</p>
+            <h2 className="font-display text-xl font-bold tracking-tight">Sales Strategy</h2>
+            <p className="text-muted-foreground mt-1">Revenue, pipeline and conversion priorities.</p>
           </div>
           {ws.brain_status === "ready" && (
             <button onClick={genRoadmap} disabled={genning} data-testid="regen-roadmap-btn" className="inline-flex items-center gap-2 px-4 h-10 rounded-full border border-border hover:bg-accent text-sm font-medium disabled:opacity-60">
-              {genning ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} {roadmap.length ? "Regenerate" : "Generate"}
+              {genning ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} {roadmap.length ? "Update strategy" : "Sales setup"}
             </button>
           )}
         </div>
@@ -78,7 +97,7 @@ export default function Manager() {
         {ws.strategy_summary && (
           <div className="border border-primary/30 bg-primary/5 rounded-md p-5 mb-6">
             <div className="text-xs uppercase tracking-[0.2em] font-bold text-primary mb-2">Strategy thesis</div>
-            <p className="leading-relaxed">{ws.strategy_summary}</p>
+            <p className="leading-relaxed">{ws.sales_strategy ? ws.strategy_summary : "Complete Sales Strategy setup to replace the previous website growth plan."}</p>
           </div>
         )}
 
@@ -111,7 +130,7 @@ export default function Manager() {
             <Sparkles className="w-5 h-5 text-primary shrink-0" />
             <div><h1 className="font-display text-xl font-bold">AI Manager</h1><p className="text-xs text-muted-foreground">Your business, leads, and strategy in one conversation.</p></div>
           </div>
-          <button type="button" onClick={() => setShowRoadmap((open) => !open)} aria-expanded={showRoadmap} aria-controls="manager-roadmap" className="shrink-0 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-accent">{showRoadmap ? "Hide roadmap" : "Growth roadmap"}</button>
+          <button type="button" onClick={() => setShowRoadmap((open) => !open)} aria-expanded={showRoadmap} aria-controls="manager-roadmap" className="shrink-0 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-accent">{showRoadmap ? "Hide roadmap" : "Sales strategy"}</button>
         </div>
         <AiStatus status={aiStatus} busy={streaming} />
         <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-5 sm:px-8 py-6 space-y-5" data-testid="chat-messages">
@@ -119,15 +138,18 @@ export default function Manager() {
             <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
               <div className={`max-w-[90%] sm:max-w-[85%] rounded-xl px-5 py-3.5 text-sm leading-relaxed ${m.role === "user" ? "bg-primary text-primary-foreground whitespace-pre-wrap" : "bg-secondary"}`}>
                 {m.content ? (m.role === "assistant" ? <ChatText text={m.content} /> : m.content) : (streaming && i === messages.length - 1 ? <Loader2 className="w-4 h-4 animate-spin" /> : "")}
+                {m.insights && <div className="mt-4"><SalesBriefing wsId={ws.id} expanded /></div>}
+                {m.setup && <div className="mt-4 flex flex-wrap gap-3"><button onClick={() => nav(`/app/w/${ws.id}/brain`)} className="rounded-lg border px-3 py-2 font-semibold hover:bg-accent">Train Brain</button><button onClick={() => nav(`/app/w/${ws.id}/brain?tab=sales`)} className="rounded-lg bg-primary text-primary-foreground px-3 py-2 font-semibold">Build sales strategy</button></div>}
               </div>
             </div>
           ))}
         </div>
-        <form onSubmit={send} className="p-4 border-t border-border flex items-center gap-2">
+        <div className="px-4 py-2 border-t border-border"><button type="button" onClick={checkInsights} data-update="check-insights" disabled={checkingInsights || streaming} className="rounded-full border px-4 py-2 text-sm font-semibold hover:bg-accent disabled:opacity-60">{checkingInsights ? "Checking insights..." : "Check Insights"}</button></div>
+        <form onSubmit={send} className="p-4 flex items-center gap-2">
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask the manager…"
+            placeholder="Ask AI Manager…"
             data-testid="chat-input"
             className="flex-1 h-11 px-4 rounded-full bg-background border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring"
           />

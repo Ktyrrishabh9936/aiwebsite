@@ -1,3 +1,4 @@
+import LeadSalesInsights from "../../components/LeadSalesInsights";
 import { formatDate, formatDateTime, appDate, inputToUtc } from "../../lib/timezone";
 import AuthenticatedDocumentLink from "../../components/AuthenticatedDocumentLink";
 import LeadNotes from "../../components/LeadNotes";
@@ -33,7 +34,7 @@ const DEFAULT_STAGES = [];
 const PAYMENT_METHODS = ["Cash", "Bank Transfer", "UPI", "Cheque", "Card", "Other"];
 const PAYMENT_STATUSES = ["Paid", "Pending"];
 const ORG_FIELDS = ["company_name", "logo_url", "address", "phone", "email", "website", "tax_number", "bank_details", "authorized_signatory", "receipt_prefix", "invoice_prefix"];
-const DETAIL_TABS = ["Details", "Qualification", "Follow-up", "Payments", "Receipts", "Invoice", "Notes"];
+const DETAIL_TABS = ["AI Insights", "Details", "Qualification", "Follow-up", "Payments", "Receipts", "Invoice", "Notes"];
 const DEFAULT_AGENT_MAPPINGS_TEXT = JSON.stringify({
   workspace_id: "workspace_id",
   lead_id: "lead_id",
@@ -454,10 +455,10 @@ export default function CrmInbox() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wsId, selectedLead?.id, selectedLead?.qualification_call?.status]);
 
-  const createLead = async ({ triggerAiCall = true, salesAssignment = {} } = {}) => {
+  const createLead = async ({ triggerAiCall = true, salesAssignment = {}, customerId = "", repeatRequest = "" } = {}) => {
     try {
       setSaving(true);
-      const r = await api.post(`/workspaces/${wsId}/crm/leads`, { field_values: createValues, trigger_ai_call: triggerAiCall, sales_assignment: salesAssignment });
+      const r = customerId ? await api.post(`/workspaces/${wsId}/crm/customers/${customerId}/opportunities`, { request: repeatRequest, kind: "upsell", field_values: createValues, sales_assignment: salesAssignment }) : await api.post(`/workspaces/${wsId}/crm/leads`, { field_values: createValues, trigger_ai_call: triggerAiCall, sales_assignment: salesAssignment });
       const call = r.data?.qualification_call || {};
       if (call.status === "failed") {
         toast.error(`Lead created, but the call failed: ${call.last_error || "Check the lead's call status"}`);
@@ -972,6 +973,7 @@ export default function CrmInbox() {
           </div>
           {showCreateLead && (
             <CreateLeadDialog
+              wsId={wsId}
               people={salesPeople}
               fields={activeFields}
               values={createValues}
@@ -1050,7 +1052,7 @@ function LeadTable({ wsId, leads, fields, states, selectedLead, loading, trashed
                   <td className="p-4">
                     <div className="flex flex-wrap items-center gap-2"><button type="button" onClick={(e) => { e.stopPropagation(); onSelect(lead); }} className="text-left text-base font-semibold text-foreground underline-offset-4 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={`Open details for ${leadName}`}>{leadName}</button>{lead.customer_status === "customer" && <span className="text-[11px] uppercase px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-600 dark:text-emerald-400">Customer</span>}{isJunk && <span className="text-[11px] uppercase px-1.5 py-0.5 rounded border border-destructive/40 text-destructive">Junk</span>}{qualificationStatus && <span className={`text-[11px] uppercase px-1.5 py-0.5 rounded border ${qualificationStatus === "qualified" ? "border-emerald-500/40 text-emerald-600 dark:text-emerald-400" : qualificationStatus === "not_qualified" ? "border-destructive/40 text-destructive" : "border-border text-muted-foreground"}`}>{qualificationStatus.replace("_", " ")}</span>}</div>
                     {lead.is_test_lead && <span className="inline-block mt-1 text-[11px] uppercase px-1.5 py-0.5 rounded border border-amber-500/40 text-amber-700 dark:text-amber-400">Test lead</span>}
-                    {lead.tags?.length > 0 && <div className="mt-2"><LeadTagBadges tags={lead.tags} library={tagLibrary} /></div>}
+                    {lead.opportunity_kind && <span className="inline-block mt-2 rounded-full bg-primary/15 text-primary px-2 py-1 text-xs font-bold">{lead.opportunity_kind === "upsell" ? "UPSELL" : lead.opportunity_kind.replaceAll("_", " ").toUpperCase()}</span>}{lead.tags?.length > 0 && <div className="mt-2"><LeadTagBadges tags={lead.tags} library={tagLibrary} /></div>}
                     {summaryFields.length > 0 && <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5 text-sm text-foreground/70">{summaryFields.map((field) => <span key={field.key}><span className="text-muted-foreground">{field.label}:</span> {String(values[field.key])}</span>)}</div>}
                     {(lead.sales_assignment?.sales_agent_name || lead.sales_assignment?.channel_partner_name) && <p className="mt-1.5 text-xs text-muted-foreground">{[lead.sales_assignment.sales_agent_name && `Agent: ${lead.sales_assignment.sales_agent_name}`, lead.sales_assignment.channel_partner_name && `Partner: ${lead.sales_assignment.channel_partner_name}`].filter(Boolean).join(" ? ")}</p>}
                     {scheduledFor && <div className="mt-2 inline-flex items-center gap-1.5 text-sm text-primary"><PhoneCall className="w-4 h-4" /> Scheduled {formatDateTime(scheduledFor)}</div>}
@@ -1213,10 +1215,12 @@ function LeadDetail(props) {
         </div>
         <LeadWhatsAppCompose open={whatsappOpen} onOpenChange={setWhatsappOpen} phone={values.phone || lead.phone} leadName={values.full_name || lead.full_name} onMarkSent={addLeadNote} />
         <LeadSmsCompose open={smsOpen} onOpenChange={setSmsOpen} wsId={wsId} lead={lead} />
+        {(lead.customer_id || isCustomer || lead.status === "won") && <div className="rounded-lg border p-4 text-sm space-y-2"><Link className="font-semibold text-primary" to={`/app/w/${wsId}/customers`}>View customer lifecycle & LTV</Link>{lead.customer_id && <p className="text-muted-foreground">Linked {lead.opportunity_kind || "repeat"} opportunity · {lead.repeat_request}</p>}</div>}
         {isTrashed && <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs text-destructive">This lead is in trash and can be restored until {formatDate(lead.delete_after)}.</div>}
         <div className="sticky top-[76px] z-10 flex flex-wrap gap-1 rounded-lg border bg-card p-1" role="group" aria-label="Lead sections">
-          {DETAIL_TABS.map((tab) => <button key={tab} aria-pressed={detailTab === tab} onClick={() => setDetailTab(tab)} className={`px-3 h-9 rounded-md text-xs font-semibold whitespace-nowrap ${detailTab === tab ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{tab}</button>)}
+          {DETAIL_TABS.map((tab) => <button key={tab} data-update={tab === "AI Insights" ? "lead-insights" : undefined} aria-pressed={detailTab === tab} onClick={() => setDetailTab(tab)} className={`px-3 h-9 rounded-md text-xs font-semibold whitespace-nowrap ${detailTab === tab ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{tab}</button>)}
         </div>
+        {detailTab === "AI Insights" && !isTrashed && <LeadSalesInsights wsId={wsId} leadId={lead.id}/> }
         {detailTab === "Qualification" && <>{lead.auto_qualification_enabled === false && <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">Automatic AI call was skipped when this lead was added. You can still use Call with AI when needed.</p>}<LeadQualificationPanel key={lead.id} lead={lead} /><QualificationSummary communication={communication} qualification={qualification} saving={saving || cancellingCallId === lead.id} onCancel={() => cancelScheduledCall(lead)} /></>}
         {detailTab === "Follow-up" && (isTrashed ? <p className="text-sm text-muted-foreground">Restore this lead to plan follow-ups.</p> : <CrmReminders wsId={wsId} leadId={lead.id} />)}
         {detailTab === "Payments" && !isCustomer && <p className="text-sm text-muted-foreground">Convert this lead to a customer in Details to manage payments.</p>}
@@ -1350,14 +1354,24 @@ function LeadDetail(props) {
           </section>
         )}
 
-        {detailTab !== "Details" && detailTab !== "Notes" && !isCustomer && <div className="text-xs text-muted-foreground rounded-lg border border-dashed p-4">Convert this lead first to use payments and documents.</div>}
+        {["Payments", "Receipts", "Invoice"].includes(detailTab) && !isCustomer && <div className="text-xs text-muted-foreground rounded-lg border border-dashed p-4">Convert this lead first to use payments and documents.</div>}
       </div>
     </aside>
   );
 }
 
 
-function CreateLeadDialog({ fields, values, setValues, saving, onCreate, onClose, people = [] }) {
+export function CreateLeadDialog({ wsId, fields, values, setValues, saving, onCreate, onClose, people = [] }) {
+  const [customerId, setCustomerId] = useState("");
+  const [customers, setCustomers] = useState([]);
+  const [customerSearch, setCustomerSearch] = useState("");
+  const [customerError, setCustomerError] = useState("");
+  const [repeatRequest, setRepeatRequest] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    api.get(`/workspaces/${wsId}/crm/customers`, { params: { limit: 100, search: customerSearch }, signal: controller.signal }).then(({data}) => { if (!controller.signal.aborted) { setCustomers(data.items || []); setCustomerError(""); } }).catch(() => { if (!controller.signal.aborted) setCustomerError("Customer list unavailable. Retry by searching."); });
+    return () => controller.abort();
+  }, [wsId, customerSearch]);
   const [skipAiCall, setSkipAiCall] = useState(false);
   const [salesAssignment, setSalesAssignment] = useState({ acquisition_channel: "direct" });
   const requiredMissing = fields.some((field) => field.required && !String(values[field.key] || "").trim());
@@ -1373,6 +1387,7 @@ function CreateLeadDialog({ fields, values, setValues, saving, onCreate, onClose
           <button onClick={onClose} className="p-1 rounded-lg hover:bg-accent text-muted-foreground" title="Close"><XCircle className="w-5 h-5" /></button>
         </div>
         <div className="p-5 grid sm:grid-cols-2 gap-3 max-h-[70vh] overflow-y-auto">
+          <div className="sm:col-span-2 space-y-2"><label className="block text-sm">Search existing customers<input aria-label="Search existing customers" value={customerSearch} onChange={e => { setCustomerSearch(e.target.value); setCustomerId(""); }} className="block mt-1 w-full rounded-lg border bg-background p-2" /></label><label className="block text-sm">Customer (optional)<select aria-label="Select customer" data-update="customer-selection" value={customerId} onChange={e => { const id=e.target.value; setCustomerId(id); const customer=customers.find(c=>c.id===id); if(customer) setValues({...values,full_name:customer.name,phone:customer.phone,email:customer.email}); }} className="mt-1 w-full rounded-lg border bg-background p-2"><option value="">New lead (no existing customer)</option>{customers.filter(c=>!c.archived).map(c=><option key={c.id} value={c.id}>{c.name} / {c.phone || c.email}</option>)}</select></label>{customerError && <p role="alert" className="text-sm text-destructive">{customerError}</p>}{customerId && <label className="block text-sm">Upsell product or service request<textarea aria-label="Upsell request" required maxLength={2000} value={repeatRequest} onChange={e=>setRepeatRequest(e.target.value)} className="block mt-1 w-full rounded-lg border bg-background p-2"/><span className="text-muted-foreground">Creates a linked upsell lead without an automatic initial call.</span></label>}</div>
           {fields.map((field) => <DynamicField key={field.key} field={field} value={values[field.key] || ""} onChange={(v) => setField(field.key, v)} />)}
           {[["sales_agent_id", "Sales agent", "sales_agent"], ["channel_partner_id", "Channel partner", "channel_partner"], ["introduced_by_id", "Lead brought by", null]].map(([key, label, role]) => <label key={key} className="text-sm">{label}<select value={salesAssignment[key] || ""} onChange={(event) => setSalesAssignment({ ...salesAssignment, [key]: event.target.value })} className="mt-1 h-10 w-full rounded-lg border bg-background px-2"><option value="">None</option>{people.filter((person) => person.active && (!role || person.role === role)).map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></label>)}
           <label className="text-sm">Acquisition channel<select value={salesAssignment.acquisition_channel} onChange={(event) => setSalesAssignment({ ...salesAssignment, acquisition_channel: event.target.value })} className="mt-1 h-10 w-full rounded-lg border bg-background px-2"><option value="direct">Direct enquiry</option><option value="marketing">Marketing</option><option value="referral">Referral</option></select></label>
@@ -1383,7 +1398,7 @@ function CreateLeadDialog({ fields, values, setValues, saving, onCreate, onClose
         </div>
         <div className="p-5 border-t flex flex-wrap items-center justify-end gap-2">
           <button onClick={onClose} className="px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold">Cancel</button>
-          <button onClick={() => onCreate({ triggerAiCall: !skipAiCall, salesAssignment })} disabled={saving || requiredMissing} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><Plus className="w-4 h-4" /> Add Lead</button>
+          <button onClick={() => onCreate({ triggerAiCall: customerId ? false : !skipAiCall, salesAssignment, customerId, repeatRequest })} disabled={saving || requiredMissing || (customerId && !repeatRequest.trim())} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><Plus className="w-4 h-4" /> Add Lead</button>
         </div>
       </div>
     </div>

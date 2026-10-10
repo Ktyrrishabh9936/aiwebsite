@@ -3,8 +3,8 @@ import { NavLink } from "react-router-dom";
 import { LayoutDashboard, Users, Building2, Boxes, ListChecks, Brain, MessageSquare, Bot, Workflow, Settings, Search, PackageOpen } from "lucide-react";
 
 export const navigationGroups = [
-  { label: "Workspace", items: [{ to: "", label: "Overview", icon: LayoutDashboard }, { to: "crm", label: "CRM", icon: Users }, { to: "properties", label: "Properties", icon: Building2, module: "real_estate" }, { to: "products-services", label: "Products & Services", icon: PackageOpen, module: "agency" }, { to: "projects", label: "Projects", icon: Boxes }, { to: "tasks", label: "Tasks", icon: ListChecks }] },
-  { label: "AI & automation", items: [{ to: "manager", label: "Manager", icon: MessageSquare }, { to: "agents", label: "AI Agents", icon: Bot }, { to: "qualification", label: "Qualification", icon: ListChecks }, { to: "brain", label: "Brain", icon: Brain }, { to: "workflows", label: "Workflows", icon: Workflow }] },
+  { label: "Workspace", items: [{ to: "", label: "Overview", icon: LayoutDashboard }, { to: "crm", label: "CRM", icon: Users }, { to: "customers", label: "Customers", icon: Users }, { to: "properties", label: "Properties", icon: Building2, module: "real_estate" }, { to: "products-services", label: "Products & Services", icon: PackageOpen, module: "agency" }, { to: "projects", label: "Projects", icon: Boxes }, { to: "tasks", label: "Tasks", icon: ListChecks }] },
+  { label: "AI & automation", items: [{ to: "manager", label: "AI Manager", icon: MessageSquare }, { to: "agents", label: "AI Agents", icon: Bot }, { to: "qualification", label: "Qualification", icon: ListChecks }, { to: "brain", label: "Brain", icon: Brain }, { to: "workflows", label: "Workflows", icon: Workflow }] },
   { label: "Preferences", items: [{ to: "settings", label: "Settings", icon: Settings }] },
 ];
 
@@ -15,7 +15,7 @@ export function visibleNavigationGroups(modules = { real_estate: true, agency: f
 export default function WorkspaceNavigation({ wsId, modules, collapsed = false, onNavigate }) {
   const [search, setSearch] = useState("");
   const groups = visibleNavigationGroups(modules).map((group) => ({ ...group, items: group.items.filter((item) => collapsed || `${item.label} ${group.label}`.toLowerCase().includes(search.toLowerCase().trim())) })).filter((group) => group.items.length);
-  return <div className="flex-1 min-h-0 flex flex-col">
+  return <div className="app-navigation flex-1 min-h-0 flex flex-col">
     {!collapsed && <label className="relative block mx-3 mt-3"><Search size={14} className="absolute left-3 top-3 text-muted-foreground" /><input aria-label="Find a page" placeholder="Find a page…" value={search} onChange={(e) => setSearch(e.target.value)} className="h-9 w-full rounded-lg border bg-background pl-9 pr-3 text-xs focus:outline-none focus:ring-2 focus:ring-ring" /></label>}
     <nav aria-label="Workspace navigation" className="flex-1 overflow-y-auto overscroll-contain p-3 space-y-4">
       {groups.map((group) => <div key={group.label}>
@@ -26,3 +26,4 @@ export default function WorkspaceNavigation({ wsId, modules, collapsed = false, 
     </nav>
   </div>;
 }
+

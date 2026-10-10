@@ -384,3 +384,24 @@ def test_sarvam_end_to_end_workspace_isolation_and_replay(monkeypatch):
         events = await db.plivo_call_events.find({}).to_list(10)
         assert proof not in json.dumps(events, default=str)
     asyncio.run(isolated(run))
+
+def test_sarvam_recovery_requires_explicit_fresh_key_and_preserves_agent_config():
+    from types import SimpleNamespace
+    async def run():
+        config = {"app_id": "existing-agent"}
+        old = {"workspace_id": "A", "provider": "sarvam", "encrypted_credentials": "unreadable", "config": config, "revision": 4}
+        db = AsyncMock()
+        db.workspace_voice_provider_configs.find_one.return_value = old
+        db.workspace_voice_provider_configs.update_one.return_value = SimpleNamespace(matched_count=1)
+        with pytest.raises(HTTPException):
+            await save_config(db, "A", "sarvam", True, config, {"api_key": "replacement"}, 4)
+        with pytest.raises(HTTPException) as missing:
+            await save_config(db, "A", "sarvam", True, config, {}, 4, True)
+        assert missing.value.status_code == 422
+        await save_config(db, "A", "sarvam", True, config, {"api_key": "replacement"}, 4, True)
+        query, update = db.workspace_voice_provider_configs.update_one.call_args.args
+        assert query["revision"] == 4
+        assert update["$set"]["config"] == config
+        recovered = decrypt("A", "sarvam", update["$set"]["encrypted_credentials"])
+        assert recovered["api_key"] == "replacement" and len(recovered["callback_token"]) >= 32
+    asyncio.run(run())

@@ -341,6 +341,7 @@ LEAD_SUMMARY_FIELDS = {
     "sales_assignment": 1,
     "workspace_id": 1, "field_values": 1, "status": 1,
     "customer_status": 1, "conversion_type": 1,
+    "customer_id": 1, "opportunity_kind": 1, "repeat_request": 1,
     "qualification_status": 1, "qualification_call.status": 1,
     "qualification_call.scheduled_for": 1,
     "qualification_call.qualification_status": 1,

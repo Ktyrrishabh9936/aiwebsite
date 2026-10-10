@@ -1,4 +1,6 @@
 import "./App.css";
+const Customers = lazy(() => import("./pages/sections/Customers"));
+import ApplicationAppearance from "./components/ApplicationAppearance";
 import { lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from "react-router-dom";
 import { Toaster } from "./components/ui/sonner";
@@ -18,6 +20,7 @@ const Onboarding = lazy(() => import("./pages/Onboarding"));
 const CodeProjects = lazy(() => import("./pages/CodeProjects"));
 const CodeWorkspace = lazy(() => import("./pages/CodeWorkspace"));
 const WorkspaceLayout = lazy(() => import("./pages/WorkspaceLayout"));
+
 const Overview = lazy(() => import("./pages/sections/Overview"));
 const Brain = lazy(() => import("./pages/sections/Brain"));
 const Manager = lazy(() => import("./pages/sections/Manager"));
@@ -51,6 +54,7 @@ function App() {
       <ThemeProvider>
         <AuthProvider>
           <BrowserRouter>
+            <ApplicationAppearance>
             <Suspense fallback={<div className="min-h-screen grid place-items-center text-muted-foreground">Loading…</div>}>
             <Routes>
               <Route path="/" element={<Landing />} />
@@ -68,6 +72,8 @@ function App() {
                 <Route path="/app/code/:pid" element={<CodeWorkspace />} />
                 <Route path="/app/w/:wsId" element={<WorkspaceLayout />}>
                   <Route index element={<Overview />} />
+                  <Route path="sales-strategy" element={<Navigate to="../brain?tab=sales" replace />} />
+                  <Route path="customers" element={<Customers />} />
                   <Route path="projects" element={<Projects />} />
                   <Route path="properties" element={<Properties />} />
                   <Route path="products-services" element={<ProductsServices />} />
@@ -87,6 +93,7 @@ function App() {
               </Route>
             </Routes>
             </Suspense>
+            </ApplicationAppearance>
           </BrowserRouter>
           <Toaster position="top-right" richColors />
         </AuthProvider>
@@ -96,3 +103,5 @@ function App() {
 }
 
 export default App;
+
+

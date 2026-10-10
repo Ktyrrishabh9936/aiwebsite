@@ -16,7 +16,7 @@ export function AppSidebar({ active, onNavigate }) {
   const { user, logout } = useAuth();
   const nav = useNavigate();
   return (
-    <aside className="hidden md:flex flex-col w-60 shrink-0 border-r border-border bg-card min-h-screen">
+    <aside className="app-sidebar hidden md:flex flex-col w-60 shrink-0 border-r border-border bg-card min-h-screen">
       <div className="h-16 flex items-center px-5 border-b border-border">
         <Logo className="text-base" to={null} />
       </div>
@@ -46,3 +46,4 @@ export function AppSidebar({ active, onNavigate }) {
     </aside>
   );
 }
+

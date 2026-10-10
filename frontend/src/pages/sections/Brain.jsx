@@ -1,5 +1,6 @@
+import SalesStrategy from "./SalesStrategy";
 import { useEffect, useMemo, useState } from "react";
-import { useOutletContext } from "react-router-dom";
+import { useOutletContext, useSearchParams } from "react-router-dom";
 import { Plus, RefreshCw, Save, Loader2, Building2, Trash2, Code2 } from "lucide-react";
 import { toast } from "sonner";
 import api from "../../lib/api";
@@ -315,6 +316,12 @@ function stripEmpty(value) {
 }
 
 export default function BrainView() {
+  const [params, setParams] = useSearchParams();
+  const sales = params.get("tab") === "sales";
+  return <><div className="max-w-6xl mx-auto px-6 sm:px-10 pt-6"><div role="tablist" aria-label="Brain sections" className="flex gap-2 border-b pb-3">{[[false, "Company knowledge"], [true, "Sales strategy"]].map(([isSales, label]) => <button key={label} role="tab" data-update={isSales ? "sales-strategy" : undefined} aria-selected={sales === isSales} onClick={() => setParams(isSales ? { tab: "sales" } : {})} className={`rounded-lg px-4 py-2 text-sm font-semibold ${sales === isSales ? "bg-primary text-primary-foreground" : "hover:bg-accent text-muted-foreground"}`}>{label}</button>)}</div></div><div role="tabpanel">{sales ? <SalesStrategy /> : <KnowledgeView />}</div></>;
+}
+
+function KnowledgeView() {
   const { ws, refresh } = useOutletContext();
   const brain = useMemo(() => withOrganizationFallback(ws.brain || {}, ws.website_url), [ws.brain, ws.website_url]);
   const [editOpen, setEditOpen] = useState(false);

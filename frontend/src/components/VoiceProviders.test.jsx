@@ -126,3 +126,13 @@ test("shows setup guide validation details", async () => {
   await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate setup guide").click());
   expect(details.querySelector('[role="status"]').textContent).toBe("Instructions are too long");
 });
+
+test("saving a replacement Sarvam key requests recovery directly", async () => {
+ api.get.mockResolvedValue({data:[{provider:"sarvam",is_default:true,revision:2,config:{app_id:"existing"},configured_secrets:["api_key"]}]});
+ api.put.mockResolvedValue({data:{}});
+ await act(async()=>root.render(<VoiceProviders workspaceId="A"/>));
+ const field=container.querySelector('input[type="password"]');
+ await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(field,'replacement-key');field.dispatchEvent(new Event('input',{bubbles:true}));});
+ await act(async()=>[...container.querySelectorAll('button')].find(b=>b.textContent==='Save').click());
+ expect(api.put).toHaveBeenCalledWith('/workspaces/A/voice-providers/sarvam',expect.objectContaining({credentials:{api_key:'replacement-key'},recover_credentials:true,revision:2}));
+});

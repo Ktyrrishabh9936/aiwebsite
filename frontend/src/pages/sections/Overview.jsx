@@ -1,3 +1,4 @@
+import SalesBriefing from "../../components/SalesBriefing";
 import { formatDateTime } from "../../lib/timezone";
 import { useCallback, useEffect, useState } from "react";
 import { useOutletContext, useNavigate } from "react-router-dom";
@@ -34,8 +35,8 @@ const zeroAnalytics = {
 
 function Stat({ icon: Icon, label, value, testid, detail }) {
   return (
-    <div className="min-w-0 rounded-xl border bg-card p-4 sm:p-5" data-testid={testid}>
-      <div className="flex items-center justify-between gap-2 text-sm text-muted-foreground"><span>{label}</span><Icon aria-hidden="true" className="w-4 h-4 shrink-0" /></div>
+    <div className="app-stat min-w-0 rounded-xl border bg-card p-4 sm:p-5" data-testid={testid}>
+      <div className="flex items-center justify-between gap-2 text-sm text-muted-foreground"><span>{label}</span><span className="app-stat-icon"><Icon aria-hidden="true" className="w-4 h-4 shrink-0" /></span></div>
       <div className="mt-3 text-2xl sm:text-3xl font-semibold tracking-tight tabular-nums break-words">{value}</div>
       {detail && <div className="mt-2 text-xs text-muted-foreground leading-relaxed">{detail}</div>}
     </div>
@@ -91,7 +92,7 @@ export default function Overview() {
   const [tasks, setTasks] = useState([]);
   const [blogs, setBlogs] = useState([]);
   const [crmAnalytics, setCrmAnalytics] = useState(zeroAnalytics);
-  const [genning, setGenning] = useState(false);
+  const genning = false;
   const [cancellingCallId, setCancellingCallId] = useState("");
   const [analyticsStatus, setAnalyticsStatus] = useState("loading");
   const reduceMotion = useReducedMotion();
@@ -107,20 +108,6 @@ export default function Overview() {
     const t = setInterval(load, 6000);
     return () => clearInterval(t);
   }, [load]);
-
-  const genRoadmap = async () => {
-    setGenning(true);
-    try {
-      await api.post(`/workspaces/${ws.id}/roadmap`);
-      await refresh();
-      toast.success("Roadmap generated & tasks scheduled");
-      nav("manager");
-    } catch (e) {
-      toast.error("Could not generate roadmap");
-    } finally {
-      setGenning(false);
-    }
-  };
 
   const cancelScheduledCall = async (leadId) => {
     try {
@@ -147,6 +134,11 @@ export default function Overview() {
 
   return (
     <div className="workspace-overview p-4 sm:p-8 max-w-7xl mx-auto space-y-7">
+      <section className="app-overview-hero" aria-label="Sales workspace overview">
+        <div><p className="app-eyebrow">Your AI Native sales workspace</p><h1>Your pipeline. A clearer next move.</h1><p>Keep your leads, conversations, and sales activity connected. Focus on the relationships that move your business forward.</p></div>
+        <button type="button" onClick={() => nav("manager")} className="bg-primary text-primary-foreground">Open AI Manager <ArrowRight size={15}/></button>
+      </section>
+      <SalesBriefing wsId={ws.id}/>
       {building && (
         <div className="border border-border rounded-md bg-card p-6 flex items-center gap-4">
           <Loader2 className="w-6 h-6 text-primary animate-spin" />
@@ -242,26 +234,26 @@ export default function Overview() {
           <Stat icon={Brain} label="Business brain" value={({ ready: "Ready", building: "Training", pending: "Queued", error: "Needs attention" })[ws.brain_status] || "Not started"} testid="stat-brain" />
           <Stat icon={ListChecks} label="Scheduled tasks" value={tasks.length} testid="stat-tasks" />
           <Stat icon={FileText} label="Published blogs" value={published} testid="stat-blogs" />
-          <Stat icon={CalendarDays} label="Roadmap months" value={(ws.roadmap || []).length} testid="stat-roadmap" />
+          <Stat icon={CalendarDays} label="Sales plan months" value={(ws.sales_strategy?.months || []).length} testid="stat-roadmap" />
         </div>
       </section>
 
-      {ws.brain_status === "ready" && (ws.roadmap || []).length === 0 && (
+      {ws.brain_status === "ready" && !ws.sales_strategy && (
         <motion.div initial={reduceMotion ? false : { opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="border border-primary/30 rounded-xl bg-primary/5 p-6 sm:p-8 text-center">
           <Sparkles className="w-8 h-8 text-primary mx-auto mb-3" />
-          <h3 className="font-display text-xl font-bold">Brain is ready. Generate your growth plan.</h3>
-          <p className="text-muted-foreground mt-1 mb-5">The manager will draft a 12-month roadmap and auto-schedule daily tasks.</p>
-          <button onClick={genRoadmap} disabled={genning} data-testid="generate-roadmap-btn" className="inline-flex items-center gap-2 px-6 h-11 rounded-full bg-primary text-primary-foreground font-semibold disabled:opacity-60">
+          <h3 className="font-display text-xl font-bold">Brain is ready. Prepare your sales strategy.</h3>
+          <p className="text-muted-foreground mt-1 mb-5">Set your revenue goal, team capacity and business context before preparing your sales plan.</p>
+          <button onClick={() => nav("sales-strategy")} disabled={genning} data-testid="generate-roadmap-btn" className="inline-flex items-center gap-2 px-6 h-11 rounded-full bg-primary text-primary-foreground font-semibold disabled:opacity-60">
             {genning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-            {genning ? "Generating..." : "Generate roadmap"}
+            {genning ? "Generating..." : "Set up sales strategy"}
           </button>
         </motion.div>
       )}
 
-      {ws.strategy_summary && (
+      {ws.sales_strategy?.strategy_summary && (
         <div className="border border-border rounded-md bg-card p-6">
-          <div className="text-xs uppercase tracking-[0.2em] font-bold text-primary mb-2">Strategy</div>
-          <p className="text-lg leading-relaxed">{ws.strategy_summary}</p>
+          <div className="text-xs uppercase tracking-[0.2em] font-bold text-primary mb-2">Sales Strategy</div>
+          <p className="text-lg leading-relaxed">{ws.sales_strategy.strategy_summary}</p>
         </div>
       )}
 
@@ -302,3 +294,5 @@ export default function Overview() {
     </div>
   );
 }
+
+

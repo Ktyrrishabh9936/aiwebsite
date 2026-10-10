@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+﻿import { Link } from "react-router-dom";
 
 export function LogoMark({ className = "w-7 h-7" }) {
   return (
@@ -11,11 +11,12 @@ export function LogoMark({ className = "w-7 h-7" }) {
 
 export function Logo({ className = "", to = "/" }) {
   const inner = (
-    <span className={`inline-flex items-center gap-2 font-display font-black tracking-tight ${className}`}>
-      {/* <LogoMark className="w-7 h-7" /> */}
-      <span>Arevei</span>
+    <span className={`app-brand ${className}`}>
+      <span className="app-brand-symbol" aria-hidden="true">AI</span>
+      <span className="app-brand-name">AI Manager<small>by Arevei</small></span>
     </span>
   );
   if (to) return <Link to={to} data-testid="logo-link">{inner}</Link>;
   return inner;
 }
+

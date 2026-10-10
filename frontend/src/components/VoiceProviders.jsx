@@ -38,10 +38,11 @@ export default function VoiceProviders({ workspaceId }) {
     setDraft({ config, enabled: selected?.enabled || false }); setCredentials({}); setGuide(null); setGuideMessage("");
   }, [selected, provider]);
 
-  const run = async (test = false) => {
+  const run = async (test = false, recover = false) => {
     setBusy(true); setMessage("");
     try {
-      await api.put(`${base}/${provider}`, { ...draft, credentials, revision: selected?.revision });
+      const recoveryRequested = recover || (provider === "sarvam" && !!credentials.api_key?.trim());
+      await api.put(`${base}/${provider}`, { ...draft, credentials, revision: selected?.revision, ...(recoveryRequested ? { recover_credentials: true } : {}) });
       setCredentials({});
       const result = test ? (await api.post(`${base}/${provider}/test`, {})).data : null;
       const { data } = await api.get(base); setProviders(data);
@@ -141,6 +142,7 @@ export default function VoiceProviders({ workspaceId }) {
     </fieldset>
     <p className="text-sm">Status: {(selected?.status || "missing_configuration").replaceAll("_", " ")}{selected?.is_default && " · Workspace default"}{selected?.last_verified_at && ` · Checked ${formatDateTime(selected.last_verified_at)}`}</p>
     {message && <p role="status" className="text-sm">{message}</p>}
+    {provider === "sarvam" && message.includes("cannot be decrypted") && <div className="border rounded-lg p-4 space-y-3"><p className="text-sm">The saved API key is unreadable. Enter your Sarvam Voice Agents API key above, then reconnect. Agent settings are preserved. Callback security will be regenerated; update the callback URL in Sarvam using the refreshed webhook details below.</p><button type="button" disabled={busy || !credentials.api_key?.trim()} className="rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm disabled:opacity-50" onClick={() => run(true, true)}>Reconnect Sarvam</button></div>}
     <div className="space-y-2"><h3 className="font-semibold text-sm">Webhooks</h3><p className="text-xs text-muted-foreground">{selected?.last_callback_at ? `Last verified callback: ${formatDateTime(selected.last_callback_at)}` : "No verified callback received yet"}</p>
       {selected?.webhooks?.message && <p className="text-sm">{selected.webhooks.message}</p>}
       {selected?.webhooks?.endpoints?.map((endpoint) => <div key={endpoint.event} className="text-xs border rounded p-2 space-y-1"><p>{endpoint.method} · {endpoint.event}</p><code className="break-all">{endpoint.url}</code><button type="button" className="block underline" onClick={() => copy(endpoint.url, "Webhook URL copied")}>Copy</button></div>)}

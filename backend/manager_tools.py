@@ -16,6 +16,8 @@ ID = {"type": "string", "pattern": "^[a-fA-F0-9]{24}$"}
 TIME = {"type": "string", "description": "ISO 8601 timestamp with explicit UTC offset. Ask for timezone if unknown."}
 FIELDS = {"type": "object", "description": "Configured lead field keys from get_crm_configuration.", "maxProperties": 40, "additionalProperties": {"type": ["string", "number", "boolean", "null"]}}
 TOOLS = [
+    tool("get_sales_briefing", "Reviewing live sales priorities", "Overview", "Read live pipeline risks, overdue work, offer questions, team and products. No writes or calls."),
+    tool("get_lead_sales_insights", "Reviewing lead sales insights", "CRM", "Inspect grounded lead risks and next actions without changing qualification or customer state.", {"lead_id": ID}, ["lead_id"]),
     tool("get_business_context", "Reading business goals", "Brain", "Read business profile, saved strategy, roadmap and current time."),
     tool("get_crm_configuration", "Reading CRM fields and stages", "CRM", "Discover valid fields, required fields and stages before creating or updating leads."),
     tool("search_leads", "Finding leads", "CRM", "Find leads by name, phone, custom field or stage. Paginated results; total is the matching count. Ask if multiple names match.",
@@ -85,10 +87,25 @@ class ManagerTools:
         if name in {"create_lead", "update_lead"} and "field_values" in args:
             if self.field_keys is None: raise ValueError("Read CRM configuration before writing lead fields")
             if set(args["field_values"]) - self.field_keys: raise ValueError("Use only configured active lead fields")
+        if name == "get_sales_briefing":
+            from sales_leadership import snapshot
+            return await snapshot(self.db, self.workspace)
+        if name == "get_lead_sales_insights":
+            from sales_leadership import lead_insight
+            lead = await self.lead(args["lead_id"])
+            tasks = await self.db.tasks.find({"workspace_id": self.ws_id, "lead_id": args["lead_id"], "status": {"$in": ["pending", "awaiting_approval"]}}).to_list(200)
+            result = lead_insight(lead, tasks, self.workspace.get("sales_profile") or {})
+            customer_id = lead.get("customer_id") or (str(lead["_id"]) if lead.get("customer_status") == "customer" or lead.get("status") == "won" else None)
+            if customer_id and not lead.get("is_test_lead"):
+                from customer_lifecycle import customer_history
+                result["customer"] = await customer_history(self.db, self.ws_id, customer_id, self.workspace.get("currency") or "INR")
+                result["request"] = lead.get("repeat_request") or ""
+                result["opportunity_kind"] = lead.get("opportunity_kind") or "initial"
+            return result
         if name == "get_business_context":
             return {"name": self.workspace.get("name"), "business": self.workspace.get("brain", {}).get("business_profile", {}),
                     "goals_constraints": self.workspace.get("brain", {}).get("goals_constraints", {}),
-                    "strategy": self.workspace.get("strategy_summary", ""), "roadmap": self.workspace.get("roadmap", []), "now_utc": datetime.now(timezone.utc).isoformat()}
+                    "sales_profile": self.workspace.get("sales_profile", {}), "strategy": self.workspace.get("strategy_summary", ""), "roadmap": self.workspace.get("roadmap", []), "now_utc": datetime.now(timezone.utc).isoformat()}
         if name == "get_crm_configuration":
             settings = await ensure_crm_settings(self.db, self.ws_id)
             self.field_keys = {field["key"] for field in settings.get("fields", []) if field.get("active", True)}

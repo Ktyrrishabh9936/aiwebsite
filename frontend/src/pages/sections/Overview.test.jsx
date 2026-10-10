@@ -3,10 +3,12 @@ import { createRoot } from "react-dom/client";
 import Overview from "./Overview";
 import api from "../../lib/api";
 
+jest.mock("../../components/SalesBriefing", () => () => null);
 const mockNavigate = jest.fn();
+let mockWorkspace;
 jest.mock("react-router-dom", () => ({
   useNavigate: () => mockNavigate,
-  useOutletContext: () => ({ ws: { id: "workspace", brain_status: "ready", roadmap: [{}] }, refresh: jest.fn() }),
+  useOutletContext: () => ({ ws: mockWorkspace, refresh: jest.fn() }),
 }), { virtual: true });
 jest.mock("../../lib/api", () => ({ __esModule: true, default: { get: jest.fn() } }));
 jest.mock("recharts", () => ({
@@ -18,6 +20,7 @@ jest.mock("recharts", () => ({
 
 let container, root;
 beforeEach(() => {
+  mockWorkspace = { id: "workspace", brain_status: "ready", roadmap: [{}], strategy_summary: "Legacy SEO strategy" };
   global.IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -36,6 +39,22 @@ test("shows sales figures and opens the CRM from the primary action", async () =
   const openCrm = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Open CRM"));
   await act(async () => openCrm.click());
   expect(mockNavigate).toHaveBeenCalledWith("crm");
+});
+
+test("legacy strategy and roadmap are replaced by sales setup", async () => {
+  await act(async () => root.render(<Overview />));
+  expect(container.textContent).not.toContain("Legacy SEO strategy");
+  expect(container.querySelector('[data-testid="stat-roadmap"]').textContent).toContain("0");
+  await act(async () => container.querySelector('[data-testid="generate-roadmap-btn"]').click());
+  expect(mockNavigate).toHaveBeenCalledWith("sales-strategy");
+});
+
+test("overview uses the saved sales strategy instead of the legacy summary", async () => {
+  mockWorkspace.sales_strategy = { strategy_summary: "Increase qualified pipeline and conversion", months: [{ month: 1 }] };
+  await act(async () => root.render(<Overview />));
+  expect(container.textContent).toContain("Increase qualified pipeline and conversion");
+  expect(container.textContent).not.toContain("Legacy SEO strategy");
+  expect(container.querySelector('[data-testid="generate-roadmap-btn"]')).toBeNull();
 });
 
 test("charts switch between lead counts and payments without mixing units", async () => {

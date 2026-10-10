@@ -1,0 +1,14 @@
+import React, {act} from 'react';
+import {createRoot} from 'react-dom/client';
+import Customers from './Customers';
+import api from '../../lib/api';
+const mockNav=jest.fn();
+jest.mock('react-router-dom',()=>({Link:({to,children})=><a href={to}>{children}</a>,useNavigate:()=>mockNav,useOutletContext:()=>({ws:{id:'ws',currency:'INR'}})}),{virtual:true});
+jest.mock('../../lib/api',()=>({__esModule:true,default:{get:jest.fn(),post:jest.fn(),delete:jest.fn()}}));
+let root,container;
+beforeEach(()=>{global.IS_REACT_ACT_ENVIRONMENT=true;container=document.createElement('div');document.body.appendChild(container);root=createRoot(container);api.get.mockResolvedValue({data:{total:1,limit:25,items:[{id:'customer',name:'Sarah',ltv:'1500',outstanding:'0',lifecycle:'customer',open_opportunities:1,deals:[{id:'original',request:'Initial purchase',kind:'initial',status:'won',paid:'1500',due:'0'}]}]}});});
+afterEach(()=>{act(()=>root.unmount());container.remove();jest.clearAllMocks();});
+test('shows collected lifetime value and original deal history',async()=>{await act(async()=>root.render(<Customers/>));expect(container.textContent).toContain('Customer · fully paid');expect(container.textContent).toContain('1,500');await act(async()=>[...container.querySelectorAll('button')].find(b=>b.textContent==='View lifecycle').click());expect(container.querySelector('a').getAttribute('href')).toBe('/app/w/ws/crm?lead=original');expect(api.post).not.toHaveBeenCalled();});
+test('repeat request creates a linked opportunity and opens that new lead',async()=>{api.post.mockResolvedValue({data:{id:'repeat'}});await act(async()=>root.render(<Customers/>));await act(async()=>[...container.querySelectorAll('button')].find(b=>b.textContent==='View lifecycle').click());const field=container.querySelector('textarea');await act(async()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(field,'Premium service');field.dispatchEvent(new Event('input',{bubbles:true}));});await act(async()=>container.querySelector('form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));expect(api.post).toHaveBeenCalledWith('/workspaces/ws/crm/customers/customer/opportunities',{request:'Premium service',kind:'upsell'});expect(mockNav).toHaveBeenCalledWith('/app/w/ws/crm?lead=repeat');});
+
+test('deleting a customer removes the list entry after confirmation',async()=>{window.confirm=jest.fn(()=>true);api.delete.mockResolvedValue({data:{ok:true}});await act(async()=>root.render(<Customers/>));await act(async()=>[...container.querySelectorAll('button')].find(b=>b.textContent==='Delete customer').click());expect(window.confirm).toHaveBeenCalled();expect(api.delete).toHaveBeenCalledWith('/workspaces/ws/crm/customers/customer');expect(container.textContent).not.toContain('Sarah');});

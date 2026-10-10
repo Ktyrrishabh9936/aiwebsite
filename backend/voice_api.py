@@ -26,6 +26,7 @@ class ConfigUpdate(BaseModel):
     config: dict = Field(default_factory=dict)
     credentials: dict[str, SecretStr] = Field(default_factory=dict)
     revision: int | None = None
+    recover_credentials: bool = False
 
 
 class SecretRegeneration(BaseModel):
@@ -171,7 +172,7 @@ async def put_config(ws_id: str, provider: Provider, request: Request, body: Con
     # SecretStr ensures validation diagnostics never reflect supplied secrets.
     db = db_from(request)
     saved = await save_config(db, ws_id, provider, body.enabled, body.config,
-                              {k: v.get_secret_value() for k, v in body.credentials.items()}, body.revision)
+                              {k: v.get_secret_value() for k, v in body.credentials.items()}, body.revision, body.recover_credentials)
     workspace = await db.workspaces.find_one({"_id": ObjectId(ws_id)})
     await db.workspaces.update_one(
         {"_id": ObjectId(ws_id)},

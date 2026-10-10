@@ -1,12 +1,13 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { toast } from "sonner";
-import { Logo } from "../components/Logo";
-import { ThemeToggle } from "../components/ThemeToggle";
+import AuthLayout, { PasswordField } from "../components/AuthLayout";
+import { ArrowRight, Loader2, LogIn } from "lucide-react";
+
 import { useAuth } from "../context/AuthContext";
 import { formatError } from "../lib/api";
-import { Input } from "../components/ui/input";
-import { Label } from "../components/ui/label";
+
+
 
 export default function Login() {
   const { login } = useAuth();
@@ -34,58 +35,13 @@ export default function Login() {
     }
   };
 
-  return (
-    <div className="min-h-screen grid lg:grid-cols-2">
-      <div className="hidden lg:flex flex-col justify-between p-10 bg-primary text-primary-foreground grain">
-        <Logo className="text-lg text-primary-foreground" />
-        <div>
-          <h2 className="font-display text-4xl font-black leading-tight">
-            Your website, run by an AI manager.
-          </h2>
-          <p className="mt-4 text-primary-foreground/80 max-w-md">
-            Log in to your control panel — brains, roadmaps, agents, and auto-published content.
-          </p>
-        </div>
-        <span className="text-sm text-primary-foreground/60">AI-native website growth OS</span>
-      </div>
-
-      <div className="flex flex-col p-6 sm:p-10">
-        <div className="flex justify-between items-center">
-          <Logo className="lg:hidden" />
-          <div className="ml-auto"><ThemeToggle /></div>
-        </div>
-        <div className="flex-1 grid place-items-center">
-          <form onSubmit={submit} className="w-full max-w-sm space-y-5" data-testid="login-form">
-            <div>
-              <h1 className="font-display text-3xl font-black">Log in</h1>
-              <p className="text-muted-foreground mt-1 text-sm">Welcome back to Arevei.</p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="email">Email</Label>
-              <Input id="email" type="email" data-testid="login-email" value={email} onChange={(e) => setEmail(e.target.value)} required placeholder="admin@arevei.ai" />
-            </div>
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-3">
-                <Label htmlFor="password">Password</Label>
-                <Link to="/forgot-password" data-testid="login-forgot-password-link" className="text-xs font-semibold text-primary hover:underline">Forgot password?</Link>
-              </div>
-              <Input id="password" type="password" data-testid="login-password" value={password} onChange={(e) => setPassword(e.target.value)} required placeholder="••••••••" />
-            </div>
-            <button
-              type="submit"
-              disabled={loading}
-              data-testid="login-submit"
-              className="w-full h-11 rounded-full bg-primary text-primary-foreground font-semibold hover:-translate-y-0.5 transition-transform disabled:opacity-60"
-            >
-              {loading ? "Logging in…" : "Log in"}
-            </button>
-            <p className="text-sm text-muted-foreground text-center">
-              No account?{" "}
-              <Link to="/register" data-testid="to-register" className="text-primary font-medium hover:underline">Sign up</Link>
-            </p>
-          </form>
-        </div>
-      </div>
-    </div>
-  );
+  return <AuthLayout>
+    <form onSubmit={submit} data-testid="login-form">
+      <div className="auth-form-heading"><span className="auth-heading-icon"><LogIn size={22}/></span><p className="am-eyebrow">Good to have you back</p><h1>Welcome back.</h1><p>Sign in to keep your sales pipeline moving.</p></div>
+      <div className="auth-field"><label htmlFor="email">Email address</label><input id="email" type="email" autoComplete="email" data-testid="login-email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@company.com"/></div>
+      <div className="auth-field"><div className="auth-field-heading"><label htmlFor="password">Password</label><Link to="/forgot-password" data-testid="login-forgot-password-link">Forgot password?</Link></div><PasswordField autoComplete="current-password" data-testid="login-password" value={password} onChange={e => setPassword(e.target.value)} required placeholder="Enter your password"/></div>
+      <button type="submit" disabled={loading} data-testid="login-submit" className="am-button auth-submit">{loading ? <><Loader2 size={16} className="auth-spinner"/>Signing in...</> : <>Sign in<ArrowRight size={16}/></>}</button>
+      <p className="auth-switch">New to AI Manager? <Link to="/register" data-testid="to-register">Create an account</Link></p>
+    </form>
+  </AuthLayout>;
 }

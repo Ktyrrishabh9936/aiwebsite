@@ -1,0 +1,98 @@
+/* Application-only tokens also reach Radix portals mounted outside the shell. */
+:root[data-app-ui]{
+  --background:228 100% 99%;--foreground:233 46% 12%;
+  --card:0 0% 100%;--card-foreground:233 46% 12%;
+  --popover:0 0% 100%;--popover-foreground:233 46% 12%;
+  --primary:256 84% 60%;--primary-foreground:0 0% 100%;
+  --secondary:245 60% 96%;--secondary-foreground:238 35% 28%;
+  --muted:230 38% 96%;--muted-foreground:224 18% 41%;
+  --accent:248 82% 96%;--accent-foreground:256 65% 42%;
+  --border:241 35% 90%;--input:241 35% 86%;--ring:256 84% 60%;
+  --radius:.75rem;--chart-1:256 84% 60%;--chart-2:211 91% 59%;
+  --chart-3:171 75% 38%;--chart-4:35 90% 52%;--chart-5:282 76% 60%;
+  --app-gradient:linear-gradient(110deg,#7043f5,#9248fa);
+}
+:root.dark[data-app-ui]{
+  --background:218 79% 5%;--foreground:234 100% 97%;
+  --card:224 55% 9%;--card-foreground:234 100% 97%;
+  --popover:224 49% 11%;--popover-foreground:234 100% 97%;
+  --primary:264 100% 76%;--primary-foreground:0 0% 100%;
+  --secondary:228 39% 15%;--secondary-foreground:232 61% 91%;
+  --muted:225 39% 13%;--muted-foreground:222 28% 71%;
+  --accent:251 40% 17%;--accent-foreground:264 100% 85%;
+  --border:237 32% 22%;--input:237 30% 28%;--ring:264 100% 76%;
+  --chart-1:264 100% 76%;--chart-2:204 100% 63%;--chart-3:171 75% 50%;
+  --chart-4:35 95% 63%;--chart-5:282 90% 75%;
+}
+.application-ui{font-family:Manrope,Arial,sans-serif}
+.application-ui :is(h1,h2,h3,h4,.font-display){font-family:Manrope,Arial,sans-serif;letter-spacing:-.035em}
+.application-ui :is(button,a,input,textarea,select):focus-visible{outline:2px solid hsl(var(--ring));outline-offset:3px}
+.app-shell{background:radial-gradient(ellipse at 90% 0%,#8652ff08,transparent 50%),hsl(var(--background))}
+.app-sidebar{background:linear-gradient(180deg,#8550ff06,transparent 65%),hsl(var(--card))!important;box-shadow:4px 0 28px #46329304}
+.app-topbar{background:hsl(var(--card)/.88);backdrop-filter:blur(20px)}
+.app-navigation [aria-current=page]{color:hsl(var(--primary));background:linear-gradient(100deg,hsl(var(--primary)/.14),hsl(var(--chart-2)/.06));box-shadow:inset 3px 0 0 hsl(var(--primary));border-radius:10px}
+.app-navigation nav>div>p{font-size:9px;letter-spacing:.16em;margin-top:10px}
+.app-navigation nav a{min-height:42px;font-size:12px}
+.app-navigation nav a:hover{background:hsl(var(--accent))}
+.app-navigation input{border-color:hsl(var(--border));background:hsl(var(--background));height:38px}
+.app-sidebar>div:first-child{min-height:76px}
+.application-ui :is(button,a)[class~="bg-primary"]{background:var(--app-gradient);color:#fff;box-shadow:0 4px 16px #7e43ef15;border-radius:9px}
+.application-ui :is(button,a)[class~="bg-primary"]:hover:not(:disabled){filter:brightness(1.08);box-shadow:0 5px 20px #7e43ef26}
+.application-ui :is(button,a)[class~="bg-primary"]:disabled{box-shadow:none}
+.application-ui .app-mode-switch{border-radius:12px;background:hsl(var(--muted));border-color:hsl(var(--border));padding:4px}
+.application-ui .app-mode-switch button{border-radius:9px;font-size:11px;min-height:34px}
+.application-ui main :is(div,section,article)[class~="border"][class~="bg-card"]{border-radius:14px;box-shadow:0 6px 25px #42327e04}
+.application-ui main :is(div,section,article)[class~="border"][class~="bg-card"]:has(>table){overflow:hidden}
+.application-ui input:not([type=checkbox]):not([type=radio]):not([type=range]),.application-ui textarea,.application-ui select{border-radius:9px}
+.application-ui table thead{background:hsl(var(--muted)/.7)}
+.application-ui table th{font-size:10px;letter-spacing:.04em;color:hsl(var(--muted-foreground));font-weight:700}
+.application-ui table tbody tr{transition:background-color .15s}
+.application-ui table tbody tr:hover{background:hsl(var(--accent)/.45)}
+:root[data-app-ui] [role=dialog],:root[data-app-ui] [data-radix-popper-content-wrapper]>div{border-color:hsl(var(--border));box-shadow:0 20px 70px #0c082a25}
+:root[data-app-ui] [role=dialog]{border-radius:18px}
+:root[data-app-ui] [role=dialog] :is(h1,h2,h3){font-family:Manrope,Arial,sans-serif;letter-spacing:-.035em}
+:root[data-app-ui] [role=dialog] button[class~="bg-primary"]{background:var(--app-gradient);color:white}
+.app-overview-hero{position:relative;overflow:hidden;display:flex;justify-content:space-between;align-items:center;gap:25px;padding:28px 30px;border:1px solid hsl(var(--border));border-radius:18px;background:radial-gradient(ellipse at 90% 15%,#9854ff18,transparent 65%),linear-gradient(120deg,hsl(var(--card)),hsl(var(--accent)/.4))}
+.app-overview-hero::after{content:"";position:absolute;width:260px;height:100px;right:-55px;bottom:-38px;border:1px solid hsl(var(--primary)/.2);border-radius:50%;transform:rotate(-20deg);box-shadow:0 -12px 0 hsl(var(--primary)/.025),0 -24px 0 hsl(var(--chart-2)/.035);pointer-events:none}
+.app-eyebrow{font-size:9px;font-weight:800;letter-spacing:.17em;text-transform:uppercase;color:hsl(var(--primary));margin-bottom:10px}
+.app-overview-hero h1{font-size:26px;font-weight:800;line-height:1.2}
+.app-overview-hero p:not(.app-eyebrow){font-size:12px;color:hsl(var(--muted-foreground));margin-top:10px;max-width:570px;line-height:1.8}
+.app-overview-hero a{flex-shrink:0;position:relative;z-index:1;display:inline-flex;gap:8px;align-items:center;padding:13px 18px;font-size:12px;font-weight:700;text-decoration:none}
+.app-stat{position:relative;overflow:hidden}
+.app-stat-icon{display:grid;place-items:center;width:32px;height:32px;border-radius:10px;background:hsl(var(--primary)/.09);color:hsl(var(--primary));flex-shrink:0}
+.app-stat:nth-child(4n+2) .app-stat-icon{background:hsl(var(--chart-2)/.1);color:hsl(var(--chart-2))}
+.app-stat:nth-child(4n+3) .app-stat-icon{background:hsl(var(--chart-3)/.1);color:hsl(var(--chart-3))}
+.app-stat:nth-child(4n+4) .app-stat-icon{background:hsl(var(--chart-4)/.1);color:hsl(var(--chart-4))}
+.application-ui .recharts-cartesian-axis-tick-value{fill:hsl(var(--muted-foreground))}
+.application-ui .recharts-default-tooltip{border-radius:12px!important;box-shadow:0 8px 30px #35206515}
+.app-brand{display:inline-flex;align-items:center;gap:10px;font-family:Manrope,Arial,sans-serif;white-space:nowrap;font-weight:800;letter-spacing:-.7px}
+.app-brand-symbol{width:30px;height:30px;display:grid;place-items:center;background:var(--app-gradient,linear-gradient(110deg,#7043f5,#9248fa));border-radius:9px;color:white;font-size:13px;letter-spacing:-1px;box-shadow:0 3px 12px #7849ef28}
+.app-brand-name{font-size:15px;line-height:1.2}.app-brand-name small{display:block;font-size:8px;font-weight:600;letter-spacing:1.8px;text-transform:uppercase;color:hsl(var(--muted-foreground));margin-top:4px}
+@media(max-width:640px){.app-overview-hero{padding:22px;align-items:flex-start;flex-direction:column;gap:18px}.app-overview-hero h1{font-size:23px}.app-topbar>div{gap:10px}.application-ui .app-mode-switch button{padding:8px 10px}.app-brand-name{font-size:14px}}
+@media(prefers-reduced-motion:reduce){.application-ui *,.application-ui *::before,.application-ui *::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+
+/* Agent mode shares the application palette in both themes. */
+.application-ui .agent-space{--space-muted:hsl(var(--muted-foreground));background:hsl(var(--background));color:hsl(var(--foreground))}
+.application-ui .agent-conversation{background:hsl(var(--card));border-color:hsl(var(--border))}
+.application-ui .agent-space-heading h1,.application-ui .agent-welcome h3{font-weight:800}
+.application-ui .agent-node-icon{background:hsl(var(--card));box-shadow:0 4px 22px #6542af12}
+.application-ui .agent-chat-mark{background:hsl(var(--primary)/.1);color:hsl(var(--primary))}
+.application-ui :is(.agent-chat-tag,.agent-focus,.agent-work-panel,.agent-input-box,.agent-suggestions button){border-color:hsl(var(--border))}
+.application-ui :is(.agent-eyebrow,.agent-context-prompt,.agent-message-label,.agent-focus button,.agent-work-panel li a){color:hsl(var(--primary))}
+.application-ui .agent-chat-tag{color:hsl(var(--primary));background:hsl(var(--primary)/.07)}
+.application-ui .agent-input-box,.application-ui .agent-work-panel{background:hsl(var(--card))}
+.application-ui .agent-input-box:focus-within{border-color:hsl(var(--primary));box-shadow:0 0 0 3px hsl(var(--primary)/.08)}
+.application-ui .agent-input-box textarea{color:hsl(var(--foreground));outline:none}
+.application-ui .agent-input-box textarea::placeholder,.application-ui .agent-composer-hint,.application-ui .agent-mic{color:hsl(var(--muted-foreground))}
+.application-ui .agent-message{background:hsl(var(--muted));border:1px solid hsl(var(--border))}
+.application-ui .agent-message.user{background:hsl(var(--primary)/.08);border-color:hsl(var(--primary)/.16)}
+.application-ui .agent-suggestions button{background:hsl(var(--background));color:hsl(var(--foreground))}
+.application-ui .agent-suggestions button:hover{background:hsl(var(--accent));border-color:hsl(var(--primary)/.4)}
+.application-ui .agent-send{background:var(--app-gradient);color:white;box-shadow:0 4px 15px #8048ff25}
+.application-ui .agent-mobile-workspace-control{color:hsl(var(--primary));border-color:hsl(var(--border))}
+.application-ui .agent-error{color:hsl(var(--destructive))}
+:root:not(.dark)[data-app-ui] .agent-universe::before{opacity:.2}
+:root:not(.dark)[data-app-ui] .agent-node-icon{color:color-mix(in srgb,var(--node-color) 48%,#30236a)}
+:root:not(.dark)[data-app-ui] .agent-work-panel header>span,:root:not(.dark)[data-app-ui] .agent-work-panel li[data-status=completed]>svg{color:#087c69}
+:root:not(.dark)[data-app-ui] .agent-work-panel li[data-status=failed]>svg{color:hsl(var(--destructive))}
+.application-ui .app-overview-hero button{flex-shrink:0;position:relative;z-index:1;display:inline-flex;gap:8px;align-items:center;padding:13px 18px;font-size:12px;font-weight:700}

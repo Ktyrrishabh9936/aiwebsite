@@ -1,4 +1,4 @@
-/** @type {import('tailwindcss').Config} */
+﻿/** @type {import('tailwindcss').Config} */
 module.exports = {
     darkMode: ["class"],
     content: [
@@ -8,7 +8,7 @@ module.exports = {
   theme: {
     extend: {
       fontFamily: {
-        display: ['Cabinet Grotesk', 'Manrope', 'sans-serif'],
+        display: ['Manrope', 'sans-serif'],
         sans: ['Manrope', 'sans-serif'],
         mono: ['JetBrains Mono', 'monospace'],
       },

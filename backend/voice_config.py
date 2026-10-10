@@ -126,7 +126,7 @@ def public_config(doc):
     return result
 
 
-async def save_config(db, ws_id, provider, enabled, config, credentials, revision=None):
+async def save_config(db, ws_id, provider, enabled, config, credentials, revision=None, recover_credentials=False):
     validate_provider(provider)
     config = safe_config(provider, config)
     if set(credentials) - SECRET_FIELDS:
@@ -135,7 +135,17 @@ async def save_config(db, ws_id, provider, enabled, config, credentials, revisio
         raise HTTPException(422, "Sarvam callback security is managed automatically")
     query = {"workspace_id": str(ws_id), "provider": provider}
     old = await db.workspace_voice_provider_configs.find_one(query)
-    secrets = decrypt(ws_id, provider, old["encrypted_credentials"]) if old else {}
+    try:
+        secrets = decrypt(ws_id, provider, old["encrypted_credentials"]) if old else {}
+    except HTTPException as error:
+        if not recover_credentials or provider != "sarvam" or error.detail != "Voice credentials cannot be decrypted for this workspace":
+            raise
+        if not credentials.get("api_key", "").strip():
+            raise HTTPException(422, "Enter your Sarvam Voice Agents API key to reconnect") from None
+        if revision is None or revision != old.get("revision", 0):
+            raise HTTPException(409, "Reload the provider configuration before reconnecting") from None
+        # Recovery requires explicit replacement credentials, never a global fallback.
+        secrets = {}
     secrets.update({k: v for k, v in credentials.items() if v})
     if provider == "sarvam" and not secrets.get("callback_token"):
         secrets["callback_token"] = secure_random.token_urlsafe(48)

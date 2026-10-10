@@ -35,7 +35,7 @@ export default function Dashboard() {
       toast.success("Workspace created - training brain");
       setOpen(false);
       setUrl("");
-      nav(`/app/w/${r.data.id}`, { replace: true });
+      nav(`/app/w/${r.data.id}/sales-strategy`, { replace: true });
     } catch (err) {
       toast.error(formatError(err.response?.data?.detail));
     } finally {
@@ -48,8 +48,8 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="h-screen overflow-hidden md:pl-60">
-      <aside className="hidden md:flex fixed inset-y-0 left-0 z-30 flex-col w-60 border-r border-border bg-card">
+    <div className="app-shell h-screen overflow-hidden md:pl-60">
+      <aside className="app-sidebar hidden md:flex fixed inset-y-0 left-0 z-30 flex-col w-60 border-r border-border bg-card">
         <div className="h-16 flex items-center px-5 border-b border-border">
           <Logo className="text-base" to="/app" />
         </div>
@@ -66,7 +66,7 @@ export default function Dashboard() {
       </aside>
 
       <div className="h-screen flex flex-col min-w-0">
-        <header className="sticky top-0 z-20 glass border-b border-border">
+        <header className="app-topbar sticky top-0 z-20 glass border-b border-border">
           <div className="h-16 px-5 flex items-center justify-between gap-3">
             <div className="min-w-0">
               <h2 className="font-display font-bold truncate">Arevei</h2>
@@ -110,3 +110,4 @@ export default function Dashboard() {
     </div>
   );
 }
+

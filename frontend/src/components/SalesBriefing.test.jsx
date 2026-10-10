@@ -1,0 +1,31 @@
+﻿import { act } from "react";
+import { createRoot } from "react-dom/client";
+import SalesBriefing from "./SalesBriefing";
+import LeadSalesInsights from "./LeadSalesInsights";
+import api from "../lib/api";
+jest.mock("react-router-dom", () => ({ Link: ({ to, children, ...props }) => <a href={to} {...props}>{children}</a> }), { virtual: true });
+jest.mock("../lib/api", () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn() } }));
+let root, container;
+beforeEach(() => { global.IS_REACT_ACT_ENVIRONMENT = true; container = document.createElement("div"); document.body.appendChild(container); root=createRoot(container); });
+afterEach(() => { act(() => root.unmount()); container.remove(); jest.clearAllMocks(); });
+const report = { profile_ready:true, active_opportunities:3, overdue_tasks:2, stale_leads:1, known_pipeline_value:null, unpriced_opportunities:3, generated_at:"2026-10-09T08:00:00Z", priorities:[{lead_id:"lead",name:"Sarah",stage:"proposal",owner:"Priya",next_action:"Confirm decision timeline",signals:[{reason:"Proposal has not moved"}]}],questions:["What do customers say about the offer?"],pending_work:[] };
+test("shows grounded risks and only creates tasks after the review action",async()=>{
+ api.get.mockResolvedValue({data:report}); api.post.mockResolvedValue({data:report});
+ await act(async()=>root.render(<SalesBriefing wsId="workspace" expanded/>));
+ expect(container.textContent).toContain("Not configured");
+ expect(container.querySelector('a[href="/app/w/workspace/crm?lead=lead"]')).not.toBeNull();
+ expect(api.post).not.toHaveBeenCalled();
+ const review=[...container.querySelectorAll('button')].find(b=>b.textContent.includes('create missing'));
+ await act(async()=>review.click());
+ expect(api.post).toHaveBeenCalledWith('/workspaces/workspace/sales/review');
+});
+test("lead selection clears previous insights and requests only the selected lead",async()=>{
+ api.get.mockResolvedValue({data:{next_action:'Confirm Sarah’s timeline',signals:[],basis:'Recorded CRM data'}});
+ await act(async()=>root.render(<LeadSalesInsights wsId="workspace" leadId="sarah"/>));
+ expect(container.textContent).toContain('Confirm Sarah');
+ api.get.mockResolvedValue({data:{next_action:'Assign John to a salesperson',signals:[],basis:'Recorded CRM data'}});
+ await act(async()=>root.render(<LeadSalesInsights wsId="workspace" leadId="john"/>));
+ expect(container.textContent).not.toContain('Confirm Sarah');
+ expect(container.textContent).toContain('Assign John');
+ expect(api.get).toHaveBeenLastCalledWith('/workspaces/workspace/sales/leads/john/insights',expect.any(Object));
+});
