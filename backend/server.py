@@ -26,6 +26,7 @@ from auth import build_auth_router, get_current_user, get_current_user_and_works
 from push_notifications import router as push_router, push_scheduler
 from manager_agent import router as manager_agent_router
 from sales_leadership import router as sales_router, leadership_loop, sales_strategy
+from brain_conversation import router as brain_conversation_router
 from coding import build_coding_router
 import agents
 import llm_service
@@ -1306,6 +1307,7 @@ api.include_router(billing_router)
 api.include_router(push_router)
 api.include_router(manager_agent_router)
 api.include_router(sales_router)
+api.include_router(brain_conversation_router)
 api.include_router(build_voice_router(db, manager_service, owned_workspace, require_user))
 
 app.include_router(build_auth_router(db))
