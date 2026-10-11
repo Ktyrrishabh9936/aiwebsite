@@ -5,6 +5,7 @@ import LeadNotes from "../../components/LeadNotes";
 import QualificationSummary from "../../components/QualificationSummary";
 import MetaAttribution from "../../components/MetaAttribution";
 import CrmPipeline from "../../components/CrmPipeline";
+import * as Dialog from "@radix-ui/react-dialog";
 import LeadLabels, { LeadTagBadges } from "../../components/LeadLabels";
 import { moveLeadStateToPosition } from "../../lib/leadStates";
 import CrmReminders from "../../components/CrmReminders";
@@ -917,7 +918,7 @@ export default function CrmInbox() {
               <Link to={`/app/w/${wsId}/qualification`} className="inline-flex items-center min-h-9 underline underline-offset-4 hover:text-foreground">Voice qualification settings</Link>
             </div>
           </div>
-          <div className={`grid gap-6 items-start ${selectedLead ? "xl:grid-cols-[minmax(0,1fr)_560px]" : "grid-cols-1"}`}>
+          <div className={`grid gap-6 items-start ${selectedLead && (recordsLayout !== "kanban" || recordView === "trash") ? "xl:grid-cols-[minmax(0,1fr)_560px]" : "grid-cols-1"}`}>
             <div className="space-y-3 min-w-0">
               {recordsLayout === "kanban" && recordView !== "trash" ? <CrmPipeline tagLibrary={settings.tag_library} wsId={wsId} states={states} filters={debouncedLeadFilters} statusFilter={statusFilter} onSelect={openLead} revision={pipelineRevision} onChanged={(lead) => { setPipelineRevision((v) => v + 1); setSelectedLead((old) => old?.id === lead.id ? lead : old); loadAll(); }} /> : <>
               <LeadTable tagLibrary={settings.tag_library} wsId={wsId} leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} canCallWithAI={hasCallableAgent} onSelect={openLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
@@ -926,6 +927,7 @@ export default function CrmInbox() {
             </div>
             {selectedLead && (
               <LeadDetail
+                drawer={recordsLayout === "kanban" && recordView !== "trash"}
                 key={selectedLead.id}
                 lead={selectedLead}
                 fields={activeFields}
@@ -1192,8 +1194,8 @@ function LeadDetail(props) {
   };
 
 
-  return (
-    <aside aria-label="Lead details" className="fixed inset-0 z-50 overflow-y-auto overscroll-contain bg-background p-4 xl:sticky xl:top-4 xl:z-auto xl:max-h-[calc(100dvh-130px)] xl:bg-transparent xl:p-0">
+  const content = (
+    <aside aria-label="Lead details" className={props.drawer ? "min-h-full bg-card" : "fixed inset-0 z-50 overflow-y-auto overscroll-contain bg-background p-4 xl:sticky xl:top-4 xl:z-auto xl:max-h-[calc(100dvh-130px)] xl:bg-transparent xl:p-0"}>
       <div className="p-5 rounded-xl border bg-card space-y-5 max-w-3xl mx-auto xl:max-w-none">
         <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b pb-4 pt-2 bg-card">
           <div className="min-w-0"><h3 className="font-bold text-lg truncate">{values.full_name || values.phone || values.email || "Unnamed Lead"}</h3><span className="text-xs text-muted-foreground flex items-center gap-1 mt-1"><Calendar className="w-3.5 h-3.5" /> Captured on {formatDateTime(lead.created_at)}</span></div>
@@ -1217,7 +1219,7 @@ function LeadDetail(props) {
         <LeadSmsCompose open={smsOpen} onOpenChange={setSmsOpen} wsId={wsId} lead={lead} />
         {(lead.customer_id || isCustomer || lead.status === "won") && <div className="rounded-lg border p-4 text-sm space-y-2"><Link className="font-semibold text-primary" to={`/app/w/${wsId}/customers`}>View customer lifecycle & LTV</Link>{lead.customer_id && <p className="text-muted-foreground">Linked {lead.opportunity_kind || "repeat"} opportunity · {lead.repeat_request}</p>}</div>}
         {isTrashed && <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs text-destructive">This lead is in trash and can be restored until {formatDate(lead.delete_after)}.</div>}
-        <div className="sticky top-[76px] z-10 flex flex-wrap gap-1 rounded-lg border bg-card p-1" role="group" aria-label="Lead sections">
+        <div className="flex gap-1 overflow-x-auto rounded-lg border bg-card p-1" role="group" aria-label="Lead sections">
           {DETAIL_TABS.map((tab) => <button key={tab} data-update={tab === "AI Insights" ? "lead-insights" : undefined} aria-pressed={detailTab === tab} onClick={() => setDetailTab(tab)} className={`px-3 h-9 rounded-md text-xs font-semibold whitespace-nowrap ${detailTab === tab ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{tab}</button>)}
         </div>
         {detailTab === "AI Insights" && !isTrashed && <LeadSalesInsights wsId={wsId} leadId={lead.id}/> }
@@ -1358,6 +1360,15 @@ function LeadDetail(props) {
       </div>
     </aside>
   );
+  return props.drawer ? <Dialog.Root open onOpenChange={(open) => { if (!open) close(); }}>
+    <Dialog.Portal>
+      <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm" />
+      <Dialog.Content aria-describedby={undefined} className="fixed inset-y-0 right-0 z-50 w-full sm:w-[min(760px,90vw)] overflow-y-auto overscroll-contain bg-card shadow-2xl border-l focus:outline-none">
+        <Dialog.Title className="sr-only">Lead details</Dialog.Title>
+        {content}
+      </Dialog.Content>
+    </Dialog.Portal>
+  </Dialog.Root> : content;
 }
 
 
