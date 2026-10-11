@@ -2,28 +2,49 @@
 import { createRoot } from "react-dom/client";
 import SalesStrategy from "./SalesStrategy";
 import api from "../../lib/api";
-let mockWorkspace = {id:'workspace',name:'Studio',brain_status:'ready',currency:'INR',sales_profile:{organisation:'Studio',offerings:'Consulting',ideal_customer:'Agencies',team_capacity:'Two salespeople',monthly_revenue_target:200000,business_stage:'existing'}};
+const profile = {organisation:'Studio',offerings:'Consulting',ideal_customer:'Agencies',team_capacity:'Two salespeople',monthly_revenue_target:200000,business_stage:'existing'};
+let mockWorkspace;
 const mockRefresh=jest.fn();
-jest.mock('react-router-dom',()=>({Link:({to,children,...props})=><a href={to} {...props}>{children}</a>,useOutletContext:()=>({ws:mockWorkspace,refresh:mockRefresh})}),{virtual:true});
-jest.mock('../../components/SalesBriefing',()=>()=>null);
-jest.mock('sonner',()=>({toast:{success:jest.fn(),error:jest.fn()}}));
-jest.mock('../../lib/api',()=>({__esModule:true,formatError:v=>v,default:{put:jest.fn(),post:jest.fn()}}));
+jest.mock('react-router-dom',()=>({useOutletContext:()=>({ws:mockWorkspace,refresh:mockRefresh})}),{virtual:true});
+jest.mock('sonner',()=>({toast:{success:jest.fn()}}));
+jest.mock('../../lib/api',()=>({__esModule:true,formatError:v=>v,default:{get:jest.fn(),put:jest.fn(),post:jest.fn()}}));
 let root,container;
-beforeEach(()=>{global.IS_REACT_ACT_ENVIRONMENT=true;container=document.createElement('div');document.body.appendChild(container);root=createRoot(container);api.put.mockResolvedValue({data:{}});api.post.mockResolvedValue({data:{}});});
+const ready = {draft:profile,messages:[],revision:4,ready:true,question:null,answered:11,total:11};
+beforeEach(()=>{global.IS_REACT_ACT_ENVIRONMENT=true;mockWorkspace={id:'workspace',name:'Studio',brain_status:'ready',currency:'INR'};container=document.createElement('div');document.body.appendChild(container);root=createRoot(container);api.get.mockResolvedValue({data:ready});api.put.mockResolvedValue({data:{}});api.post.mockResolvedValue({data:{}});});
 afterEach(()=>{act(()=>root.unmount());container.remove();jest.clearAllMocks();});
-test('saves sales context with voice skipped without changing calling configuration',async()=>{
+const button = text => [...container.querySelectorAll('button')].find(b=>b.textContent===text);
+test('asks one question and shows the polished answer without saving an incomplete profile',async()=>{
+ api.get.mockResolvedValue({data:{...ready,ready:false,draft:{organisation:'Studio'},question:{field:'offerings',text:'What do you sell?',optional:false}}});
+ api.post.mockResolvedValue({data:{...ready,ready:false,draft:{organisation:'Studio',offerings:'Website design for local businesses'},messages:[{role:'user',content:'we build websites'},{role:'assistant',content:'Website design for local businesses'}],question:{field:'ideal_customer',text:'Who buys?',optional:false}}});
  await act(async()=>root.render(<SalesStrategy/>));
+ expect(container.textContent).toContain('What do you sell?');
+ const field=container.querySelector('textarea');
+ await act(async()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(field,'we build websites');field.dispatchEvent(new Event('input',{bubbles:true}));});
  await act(async()=>container.querySelector('form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
- expect(api.put).toHaveBeenCalledWith('/workspaces/workspace/sales/profile',expect.objectContaining({organisation:'Studio',voice_setup:'skipped',monthly_revenue_target:200000}));
- expect(api.post).not.toHaveBeenCalled();
- expect(mockRefresh).toHaveBeenCalled();
+ expect(api.post).toHaveBeenCalledWith('/workspaces/workspace/sales/conversation',{answer:'we build websites',field:'offerings',revision:4});
+ expect(container.textContent).toContain('Who buys?');
+ expect(container.textContent).toContain('Website design for local businesses');
+ expect(api.put).not.toHaveBeenCalled();
 });
-test('prepares a sales strategy using saved context and prevents generation before brain training',async()=>{
+test('completes the reviewed context before preparing strategy',async()=>{
  await act(async()=>root.render(<SalesStrategy/>));
- const prepare=[...container.querySelectorAll('button')].find(b=>b.textContent==='Prepare sales strategy');
- await act(async()=>prepare.click());
+ await act(async()=>button('Complete sales strategy').click());
+ expect(api.put).toHaveBeenCalledWith('/workspaces/workspace/sales/profile',expect.objectContaining(profile));
  expect(api.post).toHaveBeenCalledWith('/workspaces/workspace/sales/strategy');
- mockWorkspace={...mockWorkspace,brain_status:'building'};
+ expect(mockRefresh).toHaveBeenCalledTimes(2);
+});
+test('saves context without generating a strategy before Brain training',async()=>{
+ mockWorkspace.brain_status='building';
  await act(async()=>root.render(<SalesStrategy/>));
- expect([...container.querySelectorAll('button')].find(b=>b.textContent==='Prepare sales strategy').disabled).toBe(true);
+ await act(async()=>button('Save sales context').click());
+ expect(api.put).toHaveBeenCalled();expect(api.post).not.toHaveBeenCalled();
+});
+test('failed answers remain in the composer and show the clarification',async()=>{
+ api.get.mockResolvedValue({data:{...ready,ready:false,question:{field:'monthly_revenue_target',text:'Revenue target?',optional:false}}});
+ api.post.mockRejectedValue({response:{data:{detail:'What target amount do you mean?'}}});
+ await act(async()=>root.render(<SalesStrategy/>));
+ const field=container.querySelector('textarea');
+ await act(async()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(field,'a lot');field.dispatchEvent(new Event('input',{bubbles:true}));});
+ await act(async()=>container.querySelector('form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+ expect(field.value).toBe('a lot');expect(container.querySelector('[role="alert"]').textContent).toContain('What target amount');
 });

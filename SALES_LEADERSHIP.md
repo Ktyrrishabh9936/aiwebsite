@@ -8,7 +8,9 @@ Create repeat opportunities from the customer's lifecycle panel. Upsell, cross-s
 
 Per-lead insights and the Agent Mode lead-insights tool include linked customer LTV, payment history and the current product/service request.
 
-Open **Sales Strategy** in a workspace. Review website Brain knowledge, optionally configure the existing voice agent, and save organisation, offer, customer, team capacity, budget, revenue target and feedback context. Strategy generation requires saved context and a ready Brain.
+Open **Sales Strategy** in a workspace to talk with the sales strategist. It asks one missing-context question at a time, uses the selected workspace model to polish each answer, and saves the conversation and draft on the workspace. Existing sales context is retained. Unclear answers get a clarification; optional feedback, sources and constraints can be skipped. The strategy brief supports revising any answer through chat. Review it and choose **Complete sales strategy** to save the profile and generate the plan from Brain knowledge and CRM evidence. If Brain training is incomplete, the context can be saved first. Both frontend and backend must be deployed for the new `/sales/conversation` endpoints.
+
+Draft answers do not update the active sales profile until completion. Chat saves use revisions to prevent overwriting another session's answers. Numeric targets, budgets and all other answers are checked against the existing profile constraints; model failure leaves the previous draft intact. Existing briefing time, timezone and pipeline settings are retained for saved profiles; new profiles use the current timezone and the existing default briefing settings.
 
 The overview briefing refreshes recorded CRM evidence every 60 seconds; selected-lead insights refresh every 30 seconds while the page is visible. These are polling updates, not streaming. Pipeline value uses only an explicitly selected opportunity-value field; lead budgets are never treated as revenue.
 

@@ -17,6 +17,62 @@ PROFILE = {"organisation": "Studio", "offerings": "Consulting", "ideal_customer"
            "business_stage": "existing", "offer_confidence": "validated", "timezone": "UTC"}
 
 
+def test_conversation_resumes_and_preserves_existing_sales_context():
+    ws = {"_id": WS, "name": "Studio", "sales_profile": PROFILE,
+          "sales_conversation": {"draft": {"monthly_sales_budget": 5000}, "messages": [{"role": "user", "content": "5000"}], "revision": 3}}
+    state = sales.conversation_state(ws)
+    assert state["draft"]["offerings"] == "Consulting"
+    assert state["draft"]["monthly_sales_budget"] == 5000
+    assert state["question"]["field"] == "lead_sources"
+    assert state["revision"] == 3
+    assert not state["ready"]
+
+
+def test_polishing_validates_numbers_and_asks_for_clarification(monkeypatch):
+    import llm_service
+    generated = AsyncMock(return_value={"value": 200000})
+    monkeypatch.setattr(llm_service, "generate_json", generated)
+    ws = {"_id": WS, "currency": "INR"}
+    assert asyncio.run(sales.polish_sales_answer(ws, "monthly_revenue_target", "2 lakh", {})) == 200000
+    generated.return_value = {"value": -100}
+    with pytest.raises(HTTPException) as invalid:
+        asyncio.run(sales.polish_sales_answer(ws, "monthly_revenue_target", "negative", {}))
+    assert invalid.value.status_code == 422
+    generated.return_value = {"value": None, "clarification": "What amount should I plan for?"}
+    with pytest.raises(HTTPException) as unclear:
+        asyncio.run(sales.polish_sales_answer(ws, "monthly_revenue_target", "lots", {}))
+    assert unclear.value.detail == "What amount should I plan for?"
+
+
+def test_optional_unknowns_are_not_invented(monkeypatch):
+    import llm_service
+    generated = AsyncMock()
+    monkeypatch.setattr(llm_service, "generate_json", generated)
+    assert asyncio.run(sales.polish_sales_answer({"_id": WS}, "customer_feedback", "skip", {})) == ""
+    generated.assert_not_called()
+
+
+def test_chat_persists_draft_without_changing_profile_and_rejects_stale_answers(monkeypatch):
+    async def run():
+        ws = {"_id": WS, "name": "Studio"}
+        db = SimpleNamespace(workspaces=AsyncMock())
+        db.workspaces.update_one.return_value = SimpleNamespace(matched_count=1)
+        monkeypatch.setattr(sales, "access", AsyncMock(return_value=(db, ws)))
+        monkeypatch.setattr(sales, "polish_sales_answer", AsyncMock(return_value="Website design for local businesses"))
+        body = sales.SalesAnswer(answer="we build websites", field="offerings", revision=0)
+        result = await sales.answer_sales_conversation(str(WS), None, body)
+        assert result["draft"]["offerings"] == "Website design for local businesses"
+        assert result["question"]["field"] == "ideal_customer"
+        query, update = db.workspaces.update_one.call_args.args
+        assert query["sales_conversation"] == {"$exists": False}
+        assert "sales_profile" not in update["$set"]
+        ws["sales_conversation"] = {"draft": result["draft"], "messages": result["messages"], "revision": 1}
+        with pytest.raises(HTTPException) as stale:
+            await sales.answer_sales_conversation(str(WS), None, body)
+        assert stale.value.status_code == 409
+    asyncio.run(run())
+
+
 def lead(**updates):
     return {"_id": LEAD, "workspace_id": str(WS), "field_values": {"full_name": "Sarah"}, "status": "proposal",
             "updated_at": (NOW-timedelta(days=9)).isoformat(), "sales_assignment": {"sales_agent_id": "owner", "sales_agent_name": "Priya"}, **updates}
