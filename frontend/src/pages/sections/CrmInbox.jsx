@@ -4,6 +4,7 @@ import AuthenticatedDocumentLink from "../../components/AuthenticatedDocumentLin
 import LeadNotes from "../../components/LeadNotes";
 import QualificationSummary from "../../components/QualificationSummary";
 import MetaAttribution from "../../components/MetaAttribution";
+import LeadAttribution from "../../components/LeadAttribution";
 import CrmPipeline from "../../components/CrmPipeline";
 import * as Dialog from "@radix-ui/react-dialog";
 import LeadLabels, { LeadTagBadges } from "../../components/LeadLabels";
@@ -1239,6 +1240,7 @@ function LeadDetail(props) {
             {props.leadSaveError && <div role="alert" className="text-sm text-destructive">{props.leadSaveError} <button type="button" onClick={() => saveLead()} className="underline">Retry saving</button></div>}
             <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground uppercase">State</span><select aria-label="Lead state" value={lead.status} onChange={(e) => setStatus(e.target.value)} className="w-full sm:max-w-sm h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary">{states.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}</select></label>
             <LeadLabels wsId={wsId} lead={lead} library={props.tagLibrary} onLibraryUpdated={props.onTagLibraryUpdated} onUpdated={props.onLabelsUpdated} disabled={saving || isTrashed} />
+            <LeadAttribution lead={lead} />
             <MetaAttribution lead={lead} wsId={wsId} onUpdate={setLead} />
             {!isTrashed && <SalesAssignment wsId={wsId} lead={lead} onUpdated={setLead} />}
             {!isTrashed && <ShareLead wsId={wsId} lead={lead} onUpdated={setLead} />}

@@ -71,6 +71,13 @@ async def migrate():
         (db.ai_manager_voice_sessions, "expires_at", {"expireAfterSeconds": 0}),
         (db.ai_manager_voice_sessions, [("workspace_id", 1), ("started_at", -1)], {}),
         (db.ai_manager_voice_sessions, [("caller_phone", 1), ("session_id", 1)], {}),
+        (db.lead_forms, "form_key", {"unique": True}),
+        (db.lead_forms, [("workspace_id", 1), ("created_at", -1)], {}),
+        (db.lead_form_submissions, [("form_id", 1), ("created_at", -1)], {}),
+        (db.lead_form_submissions, "expires_at", {"expireAfterSeconds": 0}),
+        (db.lead_form_rate, "expires_at", {"expireAfterSeconds": 0}),
+        (db.crm_leads, [("workspace_id", 1), ("phone", 1)], {}),
+        (db.crm_leads, [("workspace_id", 1), ("email", 1)], {}),
     ]
     for collection, keys, options in indexes:
         name = await collection.create_index(keys, **options)

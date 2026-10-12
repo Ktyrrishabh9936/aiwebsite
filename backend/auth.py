@@ -19,6 +19,18 @@ from mailer import (
 )
 
 JWT_ALGORITHM = "HS256"
+
+
+def onboarding_out(user):
+    """Users created before guided onboarding are treated as already onboarded."""
+    state = user.get("onboarding")
+    if not state:
+        return {"step": "done", "completed": True, "legacy": True}
+    return {**state, "completed": bool(state.get("completed_at"))}
+
+
+def new_onboarding_state():
+    return {"step": "about", "started_at": datetime.now(timezone.utc).isoformat()}
 RESET_TOKEN_MINUTES = 30
 logger = logging.getLogger("auth")
 
@@ -114,7 +126,8 @@ def build_auth_router(db):
                             samesite="none", max_age=604800, path="/")
         return {
             "token": token,
-            "user": {"id": str(user["_id"]), "name": user.get("name"), "email": user["email"], "role": user.get("role", "user")},
+            "user": {"id": str(user["_id"]), "name": user.get("name"), "email": user["email"], "role": user.get("role", "user"),
+                     "onboarding": onboarding_out(user)},
             "default_workspace_id": await _default_workspace_id(user),
         }
 
@@ -124,7 +137,8 @@ def build_auth_router(db):
         if await db.users.find_one({"email": email}):
             raise HTTPException(status_code=400, detail="Email already registered")
         doc = {"name": body.name, "email": email, "password_hash": await hash_password_async(body.password),
-               "role": "user", "created_at": datetime.now(timezone.utc).isoformat()}
+               "role": "user", "created_at": datetime.now(timezone.utc).isoformat(),
+               "onboarding": new_onboarding_state()}
         res = await db.users.insert_one(doc)
         doc["_id"] = res.inserted_id
         send_email_best_effort(email, "Welcome to Arevei", welcome_email(body.name))
@@ -190,7 +204,7 @@ def build_auth_router(db):
     async def me(request: Request):
         user = await get_current_user(request, db)
         return {"id": str(user["_id"]), "name": user.get("name"), "email": user["email"], "role": user.get("role", "user"),
-                "default_workspace_id": await _default_workspace_id(user)}
+                "onboarding": onboarding_out(user), "default_workspace_id": await _default_workspace_id(user)}
 
     return router
 

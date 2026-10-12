@@ -33,6 +33,8 @@ const Embed = lazy(() => import("./pages/sections/Embed"));
 const PublicBlog = lazy(() => import("./pages/PublicBlog"));
 const Workflows = lazy(() => import("./pages/sections/Workflows"));
 const AdsToCrmWorkflow = lazy(() => import("./pages/sections/AdsToCrmWorkflow"));
+const LandingFormsWorkflow = lazy(() => import("./pages/sections/LandingFormsWorkflow"));
+const AiSetup = lazy(() => import("./pages/sections/AiSetup"));
 const CrmInbox = lazy(() => import("./pages/sections/CrmInbox"));
 const Projects = lazy(() => import("./pages/sections/Projects"));
 const Properties = lazy(() => import("./pages/sections/Properties"));
@@ -88,6 +90,8 @@ function App() {
                   <Route path="embed" element={<Embed />} />
                   <Route path="workflows" element={<Workflows />} />
                   <Route path="workflows/ads-to-crm" element={<AdsToCrmWorkflow />} />
+                  <Route path="workflows/landing-forms" element={<LandingFormsWorkflow />} />
+                  <Route path="setup" element={<AiSetup />} />
                   <Route path="crm" element={<CrmInbox />} />
                 </Route>
               </Route>

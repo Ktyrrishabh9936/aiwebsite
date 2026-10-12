@@ -48,6 +48,8 @@ TOOLS = [
          {"lead_id": ID}, ["lead_id"], agent="Follow-up specialist"),
     tool("start_initial_qualification", "Delegating initial qualification", "AI Agents", "Start initial qualification only when explicitly instructed. Follow-up calls belong to humans. Returns acceptance, not a finished call.",
          {"lead_id": ID}, ["lead_id"], writes=True, agent="Qualification agent"),
+    tool("get_product_help", "Checking Arevei product guide", "Help", "Look up how Arevei features work, why they help and how to set them up (AI Manager, Brain, strategy, CRM, qualification, voice agent, SMS, WhatsApp, Ads to CRM, Landing Page Forms, sales team, properties, notifications, billing). Use for any question about the product itself or what to set up next.",
+         {"question": {"type": "string", "minLength": 1, "maxLength": 500}}, ["question"]),
     tool("get_qualification_status", "Checking qualification progress", "AI Agents", "Read the latest initial qualification session and outcome.",
          {"lead_id": ID}, ["lead_id"], agent="Qualification agent"),
 ]
@@ -184,6 +186,10 @@ class ManagerTools:
                 raise ValueError("Initial qualification was not accepted. Check the lead and voice provider configuration.")
             return {"delegated": True, "job_type": "qualification", "lead_id": args["lead_id"],
                     "session_id": result.get("session_id"), "state": result.get("status", "started"), "provider": result.get("provider"), "message": "Qualification requested; call outcome is pending."}
+        if name == "get_product_help":
+            import product_knowledge
+            matches = product_knowledge.search(args["question"], limit=2) or [product_knowledge.get("getting-started-with-arevei")]
+            return {"docs": [m for m in matches if m], "contact": {"name": "arevei", "email": "admin@arevei.com"}}
         if name == "get_qualification_status":
             lead = await self.lead(args["lead_id"])
             session = await self.db.plivo_call_sessions.find_one({"workspace_id": self.ws_id, "lead_id": args["lead_id"]}, sort=[("created_at", -1)])

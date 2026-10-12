@@ -1,4 +1,5 @@
 import VoiceProviders from "../../components/VoiceProviders";
+import TwilioSmsSettings from "../../components/TwilioSmsSettings";
 import PushNotificationSettings from "../../components/PushNotificationSettings";
 import AIUsageDashboard from "../../components/AIUsageDashboard";
 import BillingDashboard from "../../components/BillingDashboard";
@@ -13,6 +14,13 @@ import TimezoneSettings from "../../components/TimezoneSettings";
 export default function Settings() {
   const { user } = useAuth();
   const { ws, setWs, refresh } = useOutletContext();
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (!hash) return undefined;
+    // Setup checklist links deep-link to #voice and #sms.
+    const timer = setTimeout(() => document.getElementById(hash.slice(1))?.scrollIntoView({ behavior: "smooth", block: "start" }), 300);
+    return () => clearTimeout(timer);
+  }, []);
   const [originsText, setOriginsText] = useState("");
   const [savingOrigins, setSavingOrigins] = useState(false);
   const [rotatingKey, setRotatingKey] = useState(false);
@@ -275,7 +283,8 @@ export default function Settings() {
         <h2 className="font-display text-xl font-bold">Workspace</h2>
         <p className="text-sm text-muted-foreground mt-1">Use the account menu in the top bar to switch website workspaces or create a new one.</p>
       </section>
-      <VoiceProviders workspaceId={ws.id} />
+      <div id="voice" className="scroll-mt-20"><VoiceProviders workspaceId={ws.id} /></div>
+      {(ws.access_role === "owner" || user?.role === "admin") && <div id="sms" className="scroll-mt-20"><TwilioSmsSettings wsId={ws.id} /></div>}
     </div>
   );
 }

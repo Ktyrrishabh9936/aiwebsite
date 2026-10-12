@@ -263,9 +263,14 @@ async def _build_brain_bg(ws_id, url, model_id):
         await db.workspaces.update_one({"_id": oid(ws_id)},
                                        {"$set": {"brain": brain, "brain_status": "ready", "name": name}})
         await notify(ws_id, "success", "Brain trained", f"Analysed {crawl['page_count']} pages from {url}.")
+        from onboarding import run_pending_strategy
+        await run_pending_strategy(db, ws_id)
     except Exception as e:
         logger.exception("brain build failed")
         await db.workspaces.update_one({"_id": oid(ws_id)}, {"$set": {"brain_status": "error"}})
+        # A strategy queued during onboarding can't be built without a Brain; surface that instead of waiting forever.
+        await db.workspaces.update_one({"_id": oid(ws_id), "strategy_pending": True},
+                                       {"$set": {"strategy_status": "error", "strategy_error": "Website training failed"}})
         await notify(ws_id, "error", "Brain training failed", str(e)[:200])
 
 
@@ -273,17 +278,23 @@ async def _build_brain_bg(ws_id, url, model_id):
 async def create_workspace(request: Request, body: dict = Body(...)):
     user = await require_user(request)
     url = (body.get("website_url") or "").strip()
-    if not url:
-        raise HTTPException(400, "website_url required")
+    name = (body.get("name") or "").strip()[:120]
+    if not url and not name:
+        raise HTTPException(400, "Add your website, or a business name if you don't have one yet")
     model_id = body.get("model_id") or llm_service.DEFAULT_MODEL
-    ws = Workspace(user_id=str(user["_id"]), name=body.get("name") or url,
+    # Without a website the Brain starts as "pending" and is built from onboarding answers.
+    ws = Workspace(user_id=str(user["_id"]), name=name or url,
                    website_url=url, public_key=os.urandom(8).hex(), model_id=model_id,
-                   brain_status="building")
+                   brain_status="building" if url else "pending")
     res = await db.workspaces.insert_one(ws.to_mongo())
     ws_id = str(res.inserted_id)
     from crm import ensure_crm_settings
     await ensure_crm_settings(db, ws_id)
-    asyncio.create_task(_build_brain_bg(ws_id, url, model_id))
+    if body.get("modules"):
+        from workspace_modules import clean_modules
+        await db.workspaces.update_one({"_id": res.inserted_id}, {"$set": {"modules": clean_modules(body["modules"])}})
+    if url:
+        asyncio.create_task(_build_brain_bg(ws_id, url, model_id))
     doc = await db.workspaces.find_one({"_id": res.inserted_id})
     return workspace_out(doc)
 
@@ -356,6 +367,8 @@ async def rotate_public_key(ws_id: str, request: Request):
 async def rebrain(ws_id: str, request: Request):
     user = await require_user(request)
     ws = await owned_workspace(ws_id, user)
+    if not ws.get("website_url"):
+        raise HTTPException(400, "Add a website to train the Brain from it")
     asyncio.create_task(_build_brain_bg(ws_id, ws["website_url"], ws.get("model_id")))
     return {"ok": True}
 
@@ -1308,6 +1321,11 @@ api.include_router(push_router)
 api.include_router(manager_agent_router)
 api.include_router(sales_router)
 api.include_router(brain_conversation_router)
+from onboarding import router as onboarding_router
+from lead_forms import router as lead_forms_router, public_router as lead_forms_public_router
+api.include_router(onboarding_router)
+api.include_router(lead_forms_router)
+api.include_router(lead_forms_public_router)
 api.include_router(build_voice_router(db, manager_service, owned_workspace, require_user))
 
 app.include_router(build_auth_router(db))

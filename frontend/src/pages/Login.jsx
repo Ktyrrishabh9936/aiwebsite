@@ -28,9 +28,11 @@ export default function Login() {
       // workspace that was deleted). The login response is authoritative, so
       // enter the current user's workspace first instead of rendering a stale
       // workspace URL as "Workspace not found".
-      if (session?.default_workspace_id) nav(`/app/w/${session.default_workspace_id}`, { replace: true });
+      const onboarding = session?.user?.onboarding;
+      // Resume guided onboarding on any device until it is completed or skipped.
+      if (onboarding && !onboarding.completed) nav("/welcome", { replace: true });
+      else if (session?.default_workspace_id) nav(`/app/w/${session.default_workspace_id}`, { replace: true });
       else if (typeof returnTo === "string" && returnTo.startsWith("/app/") && !returnTo.startsWith("//")) nav(returnTo, { replace: true });
-      else if (!localStorage.getItem("arevei_onboarded")) nav("/welcome");
       else nav("/app");
     } catch (err) {
       toast.error(formatError(err.response?.data?.detail) || "Login failed");

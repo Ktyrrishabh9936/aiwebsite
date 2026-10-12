@@ -54,7 +54,9 @@ export function AuthProvider({ children }) {
   const register = async (name, email, password) => {
     const r = await api.post("/auth/register", { name, email, password });
     persist(r.data);
+    return r.data;
   };
+  const updateOnboarding = (onboarding) => setUser((current) => (current ? { ...current, onboarding: { ...(current.onboarding || {}), ...onboarding } } : current));
   const logout = async () => {
     try { await removeDevicePush(); }
     catch { /* The browser subscription is also removed when the API is unavailable. */ }
@@ -64,7 +66,7 @@ export function AuthProvider({ children }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, ready, connectionError, retryAuth, login, register, logout }}>
+    <AuthContext.Provider value={{ user, ready, connectionError, retryAuth, login, register, logout, updateOnboarding }}>
       {children}
     </AuthContext.Provider>
   );

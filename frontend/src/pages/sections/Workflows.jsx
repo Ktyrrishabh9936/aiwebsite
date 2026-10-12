@@ -1,23 +1,38 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowRight, Sparkles, CheckCircle2, AlertCircle, FileSpreadsheet, PlusCircle } from "lucide-react";
+import { ArrowRight, Sparkles, CheckCircle2, AlertCircle, FileSpreadsheet, PlusCircle, LayoutTemplate } from "lucide-react";
 import api from "../../lib/api";
 
 export default function Workflows() {
   const { wsId } = useParams();
   const [workflows, setWorkflows] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [forms, setForms] = useState([]);
 
   useEffect(() => {
     api.get(`/workspaces/${wsId}/workflows`)
       .then((r) => setWorkflows(r.data))
       .catch(() => {})
       .finally(() => setLoading(false));
+    api.get(`/workspaces/${wsId}/lead-forms`).then((r) => setForms(r.data.items || [])).catch(() => {});
   }, [wsId]);
 
   const adsWorkflow = workflows.find((w) => w.kind === "ads_to_crm") || { status: "draft" };
 
+  const liveForms = forms.filter((f) => f.status === "active").length;
   const availableWorkflows = [
+    {
+      id: "landing-forms",
+      title: "Landing Page Forms",
+      description: liveForms
+        ? `${liveForms} live form${liveForms === 1 ? "" : "s"} capturing leads with UTM tracking from your landing pages.`
+        : "Capture leads from any website or landing page — name, email, phone with country code, requirement and hidden UTM tracking.",
+      kind: "landing_form",
+      status: liveForms ? "published" : "draft",
+      icon: LayoutTemplate,
+      active: true,
+      badge: "New",
+    },
     {
       id: "ads-to-crm",
       title: "Ads to CRM",
@@ -82,7 +97,7 @@ export default function Workflows() {
                   )}
                 </div>
 
-                <h3 className="text-lg font-bold">{w.title}</h3>
+                <h3 className="text-lg font-bold flex items-center gap-2">{w.title}{w.badge && <span className="rounded-full bg-primary px-2 py-0.5 text-[10px] font-bold uppercase text-primary-foreground">{w.badge}</span>}</h3>
                 <p className="text-sm text-muted-foreground mt-2 leading-relaxed">
                   {w.description}
                 </p>

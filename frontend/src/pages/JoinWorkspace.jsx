@@ -20,6 +20,8 @@ export default function JoinWorkspace() {
       if (!user) { if (newAccount) await register(name, invite.email, password); else await login(invite.email, password); }
       const { data } = await api.post(`/membership-invitations/${token}/accept`, {});
       localStorage.setItem("arevei_onboarded", "true");
+      // Invited teammates join an existing workspace and skip owner onboarding.
+      await api.post("/onboarding/complete", { skipped: false }).catch(() => {});
       navigate(`/app/w/${data.workspace_id}/crm`, { replace: true });
     } catch (err) { setError(formatError(err.response?.data?.detail)); }
     finally { setBusy(false); }

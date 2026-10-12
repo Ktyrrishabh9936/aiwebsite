@@ -1,4 +1,5 @@
 import SalesBriefing from "../../components/SalesBriefing";
+import SetupChecklist from "../../components/onboarding/SetupChecklist";
 import { formatDateTime } from "../../lib/timezone";
 import { useCallback, useEffect, useState } from "react";
 import { useOutletContext, useNavigate } from "react-router-dom";
@@ -122,7 +123,7 @@ export default function Overview() {
     }
   };
 
-  const building = ws.brain_status === "building" || ws.brain_status === "pending";
+  const building = ws.brain_status === "building" || (ws.brain_status === "pending" && Boolean(ws.website_url));
   const published = blogs.filter((b) => b.status === "published").length;
   const totals = crmAnalytics.totals || zeroAnalytics.totals;
   const monthTotals = crmAnalytics.this_month_totals || zeroAnalytics.this_month_totals;
@@ -138,6 +139,7 @@ export default function Overview() {
         <div><p className="app-eyebrow">Your AI Native sales workspace</p><h1>Your pipeline. A clearer next move.</h1><p>Keep your leads, conversations, and sales activity connected. Focus on the relationships that move your business forward.</p></div>
         <button type="button" onClick={() => nav("manager")} className="bg-primary text-primary-foreground">Open AI Manager <ArrowRight size={15}/></button>
       </section>
+      <SetupChecklist wsId={ws.id} />
       <SalesBriefing wsId={ws.id}/>
       {building && (
         <div className="border border-border rounded-md bg-card p-6 flex items-center gap-4">
@@ -243,7 +245,7 @@ export default function Overview() {
           <Sparkles className="w-8 h-8 text-primary mx-auto mb-3" />
           <h3 className="font-display text-xl font-bold">Brain is ready. Prepare your sales strategy.</h3>
           <p className="text-muted-foreground mt-1 mb-5">Set your revenue goal, team capacity and business context before preparing your sales plan.</p>
-          <button onClick={() => nav("sales-strategy")} disabled={genning} data-testid="generate-roadmap-btn" className="inline-flex items-center gap-2 px-6 h-11 rounded-full bg-primary text-primary-foreground font-semibold disabled:opacity-60">
+          <button onClick={() => nav("setup")} disabled={genning} data-testid="generate-roadmap-btn" className="inline-flex items-center gap-2 px-6 h-11 rounded-full bg-primary text-primary-foreground font-semibold disabled:opacity-60">
             {genning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
             {genning ? "Generating..." : "Set up sales strategy"}
           </button>

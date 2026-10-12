@@ -4,6 +4,7 @@ import Overview from "./Overview";
 import api from "../../lib/api";
 
 jest.mock("../../components/SalesBriefing", () => () => null);
+jest.mock("../../components/onboarding/SetupChecklist", () => () => null);
 const mockNavigate = jest.fn();
 let mockWorkspace;
 jest.mock("react-router-dom", () => ({
@@ -46,7 +47,7 @@ test("legacy strategy and roadmap are replaced by sales setup", async () => {
   expect(container.textContent).not.toContain("Legacy SEO strategy");
   expect(container.querySelector('[data-testid="stat-roadmap"]').textContent).toContain("0");
   await act(async () => container.querySelector('[data-testid="generate-roadmap-btn"]').click());
-  expect(mockNavigate).toHaveBeenCalledWith("sales-strategy");
+  expect(mockNavigate).toHaveBeenCalledWith("setup");
 });
 
 test("overview uses the saved sales strategy instead of the legacy summary", async () => {

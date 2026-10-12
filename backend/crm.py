@@ -40,6 +40,7 @@ DEFAULT_FIELDS = [
     {"key": "address", "label": "Address", "type": "long_text", "required": False, "system": False, "active": True, "options": []},
     {"key": "source", "label": "Lead Source", "type": "text", "required": False, "system": True, "active": True, "options": []},
     {"key": "assigned_salesperson", "label": "Assigned Salesperson", "type": "text", "required": False, "system": False, "active": True, "options": []},
+    {"key": "requirement", "label": "Requirement / Query", "type": "long_text", "required": False, "system": False, "active": True, "options": []},
 ]
 DEFAULT_STATES = [
     {"key": "new", "label": "New", "color": "blue", "order": 1},
@@ -146,7 +147,7 @@ def normalize_field(field, existing=None):
     key = keyify(field.get("key") or field.get("label") or existing.get("key"))
     if not key:
         raise HTTPException(status_code=400, detail="Field key or label required")
-    if key in META_FIELDS or key.startswith("google_sheet_") or key == "last_google_sheet_sync_at":
+    if key in META_FIELDS or key.startswith(("google_sheet_", "utm_")) or key in {"last_google_sheet_sync_at", "utm", "form_id", "form_name"}:
         raise HTTPException(400, "Source attribution and sync fields are read-only")
     field_type = field.get("type") or existing.get("type") or "text"
     if field_type not in VALID_FIELD_TYPES:

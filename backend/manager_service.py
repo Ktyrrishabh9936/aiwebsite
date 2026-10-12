@@ -61,8 +61,16 @@ class ManagerService:
             audit.extend({"tool": name, "status": "completed"} for name in ("brain_context", "tasks_context", "properties_context"))
         crm = json.dumps({"analytics": analytics, "leads": summaries[:40]}, ensure_ascii=False, default=str)[:9000]
         extra = json.dumps({"sales_profile": ws.get("sales_profile", {}), "workspace": ws.get("name", ""), "tasks": tasks, "properties": properties}, ensure_ascii=False, default=str)[:6000]
+        import product_knowledge
+        product_help = product_knowledge.help_context(message)
+        if audit is not None and product_help:
+            audit.append({"tool": "product_help", "status": "completed"})
+        help_block = (
+            "Arevei product guide (use for questions about Arevei features and setup; cite the menu path; "
+            f"for hands-on help share: arevei, admin@arevei.com):\n{product_help}\n\n"
+        ) if product_help else ""
         prompt = (
-            f"{message}\n\nCRM workspace knowledge JSON:\n{crm}\n\n"
+            f"{message}\n\n{help_block}CRM workspace knowledge JSON:\n{crm}\n\n"
             f"Additional workspace knowledge (limited to 40 tasks and properties):\n{extra}\n\n"
             "Use the CRM data for lead, customer, payment, due amount, daily and monthly analytics. "
             "Lead details are a limited sample; do not treat sample counts as workspace totals. "
