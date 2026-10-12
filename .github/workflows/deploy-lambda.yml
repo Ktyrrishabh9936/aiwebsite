@@ -1,0 +1,64 @@
+name: Deploy backend to Lambda
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/deploy-lambda.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: arevei-backend-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  AWS_ACCOUNT_ID: "437441168264"
+  ECR_REPOSITORY: arevei-backend
+  LAMBDA_FUNCTION_NAME: arevei-backend
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::437441168264:role/arevei-github-lambda-deploy
+          role-session-name: arevei-backend-deploy
+          aws-region: ap-south-1
+          allowed-account-ids: "437441168264"
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, push, and deploy
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          image_uri="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false \
+            --push \
+            -t "$image_uri" \
+            backend
+
+          aws lambda update-function-code \
+            --function-name "$LAMBDA_FUNCTION_NAME" \
+            --image-uri "$image_uri"
+
+          aws lambda wait function-updated \
+            --function-name "$LAMBDA_FUNCTION_NAME"
