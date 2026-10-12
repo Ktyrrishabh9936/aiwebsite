@@ -1,25 +1,37 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, Boxes, Brain, Building2, Code2, FileText, LayoutDashboard, ListChecks, Loader2, Mic, MicOff, Send, Sparkles, Users, Workflow, CheckCircle2, AlertCircle, Clock3, ArrowUpRight } from "lucide-react";
+import { Bot, Boxes, Brain, Building2, FileText, HandCoins, LayoutDashboard, ListChecks, Loader2, Mic, MicOff, PackageOpen, PhoneCall, Send, Settings, Sparkles, Users, Workflow, CheckCircle2, AlertCircle, Clock3, ArrowUpRight } from "lucide-react";
 import { useAiStatus, aiErrorMessage } from "./AiStatus";
 import { ChatText } from "./ChatText";
 import { conversationId, loadManagerConversation, getManagerRun, newManagerId } from "../lib/managerAgent";
 import "./AgentWorkspace.css";
 
-const sections = [
+// Names match the "section" of backend manager tools so the active node lights up while it works.
+const allSections = [
   { name: "Overview", icon: LayoutDashboard, description: "The big picture", prompt: "Give me an overview of this workspace and its priorities.", color: "#a9bfff" },
+  { name: "CRM", icon: Users, description: "Leads and follow-ups", prompt: "Review my CRM leads and suggest who needs attention.", color: "#9edbb1" },
+  { name: "Customers", icon: HandCoins, description: "Payments and receipts", prompt: "Which customers have outstanding dues, and what was collected this month?", color: "#f1c28f" },
+  { name: "Properties", icon: Building2, description: "Your portfolio", prompt: "Summarize my property inventory and what is still available.", color: "#e7b1ee", module: "real_estate" },
+  { name: "Products", icon: PackageOpen, description: "Products & services", prompt: "List my products and services and flag anything inactive or sold out.", color: "#e7b1ee", module: "agency" },
   { name: "Projects", icon: Boxes, description: "Ideas into outcomes", prompt: "Help me plan the next steps for my projects.", color: "#baabff" },
-  { name: "Properties", icon: Building2, description: "Your portfolio", prompt: "Help me work on my properties.", color: "#e7b1ee" },
   { name: "Brain", icon: Brain, description: "Business knowledge", prompt: "Summarize what you know about my business and any knowledge gaps.", color: "#89d8f1" },
-  { name: "AI Agents", icon: Bot, description: "Your specialist team", prompt: "Help me understand which agents can help with my priorities.", color: "#8be2c7" },
+  { name: "AI Agents", icon: Bot, description: "Your sales team", prompt: "Who is on my sales team and how are leads assigned?", color: "#8be2c7" },
+  { name: "Qualification", icon: PhoneCall, description: "AI calling setup", prompt: "Show my qualification profiles and AI calling settings.", color: "#a6efcb" },
   { name: "Tasks", icon: ListChecks, description: "What happens next", prompt: "Help me prioritize my tasks and decide what to do next.", color: "#e8d59b" },
   { name: "Blogs", icon: FileText, description: "Your content studio", prompt: "Help me plan blog content for my business.", color: "#f3b4aa" },
-  { name: "Blog System", icon: Code2, description: "Content on your site", prompt: "Help me integrate the blog system into my website.", color: "#c4aafa" },
-  { name: "Workflows", icon: Workflow, description: "Connected processes", prompt: "Help me improve my business workflows.", color: "#96bffa" },
-  { name: "CRM", icon: Users, description: "Customer relationships", prompt: "Review my CRM leads and suggest who needs attention.", color: "#9edbb1" },
+  { name: "Workflows", icon: Workflow, description: "Forms and automations", prompt: "How are my landing page forms and workflows performing?", color: "#96bffa" },
+  { name: "Settings", icon: Settings, description: "Workspace setup", prompt: "Show my workspace settings, stages and tags.", color: "#c4aafa" },
 ];
+
+export function workspaceSections(modules) {
+  // Matches backend workspace_modules defaults: real estate on, agency off.
+  const enabled = { real_estate: true, agency: false, ...(modules || {}) };
+  return allSections.filter((section) => !section.module || enabled[section.module]);
+}
 
 export function AgentWorkspace({ ws, active }) {
   const status = useAiStatus(ws);
+  const sections = workspaceSections(ws.modules);
+  const step = 360 / sections.length;
   const [selected, setSelected] = useState(null);
   const [showWorkspace, setShowWorkspace] = useState(false);
   const workspaceRef = useRef(null);
@@ -53,7 +65,7 @@ export function AgentWorkspace({ ws, active }) {
     let live = true;
     loadManagerConversation(ws.id, conversation).then((data) => {
       if (!live || pendingRef.current) return;
-      setMessages(data.messages || []);
+      setMessages((data.messages || []).map((message) => ({ ...message, content: (message.content || "").replace(/^(\[(Workspace section|Viewing lead id):[^\]]*\]\s*)+/, "") })));
       setActivity((data.runs || []).flatMap((run) => run.events || []));
       setLastRun(data.runs?.at(-1) || null);
     }).catch(() => { if (live) setActivityError("Saved work could not be loaded. New work will still appear here."); });
@@ -161,7 +173,7 @@ export function AgentWorkspace({ ws, active }) {
             <ellipse cx="400" cy="300" rx="295" ry="230" />
             <ellipse cx="400" cy="300" rx="205" ry="160" />
             {sections.map((section, i) => {
-              const angle = (i * 36 - 90) * Math.PI / 180;
+              const angle = (i * step - 90) * Math.PI / 180;
               return <line key={section.name} x1="400" y1="300" x2={400 + 295 * Math.cos(angle)} y2={300 + 230 * Math.sin(angle)} className={currentSection === section.name ? "is-working" : selected?.name === section.name ? "is-selected" : ""} />;
             })}
           </svg>
@@ -169,7 +181,7 @@ export function AgentWorkspace({ ws, active }) {
             <span className="agent-core-orb"><Sparkles size={30} /></span><strong>AI Manager</strong><span>{busy ? "Thinking…" : "Your point of connection"}</span>
           </button>
           {sections.map((section, i) => {
-            const angle = (i * 36 - 90) * Math.PI / 180;
+            const angle = (i * step - 90) * Math.PI / 180;
             const working = currentSection === section.name;
             const waiting = delegated.some((operation) => operation.section === section.name);
             return <button type="button" key={section.name} className={`agent-node ${selected?.name === section.name ? "is-selected" : ""} ${working ? "is-working" : ""} ${waiting ? "is-waiting" : ""}`} style={{ left: `${50 + 36.875 * Math.cos(angle)}%`, top: `${50 + 38.333 * Math.sin(angle)}%`, "--node-color": section.color }} onClick={() => selectSection(section)} aria-pressed={selected?.name === section.name} aria-label={`${section.name}${working ? " — working" : waiting ? " — waiting for outcome" : ""}`}>
@@ -200,7 +212,7 @@ export function AgentWorkspace({ ws, active }) {
         <header className="agent-chat-heading"><span className="agent-chat-mark"><Sparkles size={20} /></span><div><h2>AI Manager</h2><p role="status">{statusLabel}</p></div><span className="agent-chat-tag">AGENT MODE</span></header>
         <div className="agent-focus"><span>Conversation focus</span><button onClick={() => selectSection(null)} title="Reset to whole workspace">{selected?.name || "Whole workspace"}{selected && " ×"}</button></div>
         <div className="agent-messages" ref={scrollRef} role="log" aria-label="Messages" aria-live="polite" aria-busy={busy}>
-          {!messages.length && <div className="agent-welcome"><span className="agent-eyebrow">LET’S MAKE THINGS HAPPEN</span><h3>What would you like<br />to work on?</h3><p>I’m your AI manager for {ws.name}. Talk to me about your business, explore a section, or tell me what you want to achieve.</p><div className="agent-suggestions">{["What should I focus on today?", "Help me plan my next campaign", "What can Arevei do for my business?"].map((prompt) => <button key={prompt} onClick={() => { setInput(prompt); inputRef.current?.focus(); }}>{prompt}<span>↗</span></button>)}</div></div>}
+          {!messages.length && <div className="agent-welcome"><span className="agent-eyebrow">LET’S MAKE THINGS HAPPEN</span><h3>What would you like<br />to work on?</h3><p>I’m your AI manager for {ws.name}. Talk to me about your business, explore a section, or tell me what you want to achieve.</p><div className="agent-suggestions">{["What should I focus on today?", "Which customers still owe payments?", "What can Arevei do for my business?"].map((prompt) => <button key={prompt} onClick={() => { setInput(prompt); inputRef.current?.focus(); }}>{prompt}<span>↗</span></button>)}</div></div>}
           {messages.map((message, i) => <div key={i} className={`agent-message ${message.role}`}><div className="agent-message-label">{message.role === "user" ? "You" : "AI Manager"}{message.section && ` · ${message.section}`}</div>{message.content ? <ChatText text={message.content} /> : <span className="agent-thinking"><Loader2 size={16} className="animate-spin" /> Thinking…</span>}</div>)}
         </div>
         <form className="agent-composer" onSubmit={send}>

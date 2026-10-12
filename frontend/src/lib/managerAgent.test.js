@@ -41,3 +41,19 @@ test("failed terminal events preserve an explicit failure", async () => {
   fetch.mockResolvedValue(response([{ type: "run_finished", status: "failed", label: "Provider unavailable" }]));
   await expect(streamManagerAgent("workspace", "Save", {}, jest.fn())).rejects.toThrow("Provider unavailable");
 });
+
+test("saved changes name the page that changed so open pages can refresh", async () => {
+  fetch.mockResolvedValue(response([
+    { type: "tool_finished", status: "completed", writes: true, page: "customers", tool: "record_payment" },
+    { type: "tool_finished", status: "completed", writes: false, page: "products-services", tool: "list_products" },
+    { type: "answer", content: "Payment recorded." },
+    { type: "run_finished", status: "completed" },
+  ]));
+  const changed = jest.fn();
+  window.addEventListener("arevei:manager-changed", changed);
+  try {
+    await streamManagerAgent("workspace", "Record it", { conversationId: "conversation", requestId: "request" }, jest.fn());
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(changed.mock.calls[0][0].detail).toEqual({ page: "customers", tool: "record_payment" });
+  } finally { window.removeEventListener("arevei:manager-changed", changed); }
+});

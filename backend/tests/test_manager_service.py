@@ -164,7 +164,8 @@ def test_existing_crm_reader_preserves_workspace_scope_and_real_analytics(monkey
         assert actual_settings == settings
         assert leads[0]["full_name"] == "Rahul"
         assert summaries[0]["name"] == "Rahul"
-        assert analytics == crm.build_crm_analytics(leads)
+        expected = crm.build_crm_analytics(leads)
+        assert {**analytics, "as_of": None} == {**expected, "as_of": None}  # as_of is wall-clock time.
         assert db.crm_leads.queries[0]["workspace_id"] == str(WORKSPACE)
         assert db.crm_leads.queries[0]["deleted_at"] is None  # Excludes trash and includes legacy missing fields.
     asyncio.run(run())

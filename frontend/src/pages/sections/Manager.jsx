@@ -7,14 +7,16 @@ import api from "../../lib/api";
 import { AiStatus, useAiStatus, aiErrorMessage } from "../../components/AiStatus";
 import { ChatText } from "../../components/ChatText";
 import SalesBriefing from "../../components/SalesBriefing";
+import { conversationId, newManagerId } from "../../lib/managerAgent";
 
 export default function Manager() {
   const { ws, refresh } = useOutletContext();
   const nav = useNavigate();
   const aiStatus = useAiStatus(ws);
   const [messages, setMessages] = useState([
-    { role: "assistant", content: `I'm your AI manager for ${ws.name}. Ask me about your business, CRM leads, or growth strategy.` },
+    { role: "assistant", content: `I'm your AI manager for ${ws.name}. Ask about your business, or tell me what to do on any page: leads, customers and payments, products, properties, tasks, Brain, forms or blogs.` },
   ]);
+  const [conversation] = useState(() => conversationId(ws.id));
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [genning, setGenning] = useState(false);
@@ -54,7 +56,7 @@ export default function Manager() {
           copy[copy.length - 1] = { role: "assistant", content: text };
           return copy;
         });
-      });
+      }, { agentMode: true, conversationId: conversation, requestId: newManagerId() });
     } catch (err) {
       const explanation = aiErrorMessage(err);
       toast.error(explanation);

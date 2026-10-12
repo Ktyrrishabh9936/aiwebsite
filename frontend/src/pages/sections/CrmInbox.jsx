@@ -199,11 +199,18 @@ function finalInvoiceDownloadUrl(wsId, leadId) {
   return `${API}/workspaces/${wsId}/crm/leads/${leadId}/final-invoice/pdf`;
 }
 
+// AI Manager links open a specific CRM tab, e.g. ?tab=sales-team.
+const CRM_TABS = ["records", "reminders", "settings", "sales-team", "performance"];
+function linkedCrmTab(search) {
+  const tab = new URLSearchParams(search).get("tab");
+  return CRM_TABS.includes(tab) ? tab : null;
+}
+
 export default function CrmInbox() {
   const { wsId } = useParams();
   const location = useLocation();
-  const [activeTab, setActiveTab] = useState(() => new URLSearchParams(window.location.search).get("tab") === "reminders" ? "reminders" : "records");
-  useEffect(() => { if (new URLSearchParams(location.search).get("tab") === "reminders") setActiveTab("reminders"); }, [location.search]);
+  const [activeTab, setActiveTab] = useState(() => linkedCrmTab(window.location.search) || "records");
+  useEffect(() => { const tab = linkedCrmTab(location.search); if (tab) setActiveTab(tab); }, [location.search]);
   const [recordsLayout, setRecordsLayout] = useState("list");
   const [pipelineRevision, setPipelineRevision] = useState(0);
   const openLead = async (leadOrId) => {

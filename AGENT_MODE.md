@@ -34,9 +34,33 @@ within a run; the same request ID replays its recorded run. Reads refresh actual
 application state. Returning to Agent Mode restores conversation and activity.
 The activity panel polls qualification sessions for actual call outcomes.
 
-This first version exposes CRM operations, business context, task/property reads,
-and existing follow-up/qualification specialists. Other galaxy sections remain
-conversation focus controls; they do not imply tools for every application action.
+The manager operates every workspace page from chat (`manager_tools.py` for leads and
+follow-ups, `manager_page_tools.py` for the rest). Each tool calls the page's own route
+handler, so validation and module gating match Human Mode:
+
+- CRM: leads, stages, notes, tags, follow-ups, assignment, attached offerings, trash/restore.
+- Customers and payments: customer LTV and dues, conversion (single payment or plan),
+  payment plans, payment receipts, final invoices, repeat/upsell opportunities.
+- Products & Services, Properties and flats, Tasks (run, approve, record outcomes),
+  Brain facts, sales setup, strategy and review, sales team, Qualification calling
+  settings and profiles, Landing Page Forms, Workflows, Blogs, settings and notifications.
+
+Not available from chat: permanent deletion, sending SMS/WhatsApp/email, charging
+payments, billing changes, voice provider keys and Google Sheet connection. For those
+the manager answers from the product guide with the menu path.
+
+Writes are refused until the record was read in the same conversation (IDs read are
+remembered across turns in `manager_conversations.known`). Payments require reading
+the lead's payments first; a payment plan without a total defaults to the stage sum.
+Every tool result carries `shown_on`, the exact menu location, and chat links open it.
+The floating chat in Human Mode and the AI Manager page use the same agent and
+conversation; they send the current page (and open lead) as context. After a saved
+change the visible page reloads (CRM refreshes in place).
+
+Try, with a test lead: "Priya closed at 50000 single payment, convert her",
+"She paid 20000 by UPI today", "Which customers owe money?", "Add a service called
+SEO Retainer at 25000", "Add Surat to our locations in the Brain",
+"Add Neha to the sales team and assign Rahul to her", "Switch AI calling to manual".
 Analytics disclose the existing 5,000-lead cap and provide an exact active total.
 Each request is limited to 48 model rounds, 96 operations and five minutes.
 

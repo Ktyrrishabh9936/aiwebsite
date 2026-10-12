@@ -98,3 +98,15 @@ test("voice transcription stays in the draft and stops when Human Mode opens", a
   expect(recognition.abort).toHaveBeenCalled();
   expect(container.querySelector("textarea").value).toBe("Plan my week");
 });
+
+test("galaxy shows every controllable page for the workspace's enabled modules", async () => {
+  const { workspaceSections } = require("./AgentWorkspace");
+  const names = (modules) => workspaceSections(modules).map((section) => section.name);
+  expect(names(undefined)).toEqual(expect.arrayContaining(["CRM", "Customers", "Properties", "Qualification", "Settings"]));
+  expect(names(undefined)).not.toContain("Products");
+  expect(names({ agency: true, real_estate: false })).toContain("Products");
+  expect(names({ agency: true, real_estate: false })).not.toContain("Properties");
+  await act(async () => root.render(<AgentWorkspace ws={{ ...ws, modules: { agency: true } }} active={false} />));
+  expect(container.querySelector('[aria-label="Customers"]')).not.toBeNull();
+  expect(container.querySelector('[aria-label="Products"]')).not.toBeNull();
+});

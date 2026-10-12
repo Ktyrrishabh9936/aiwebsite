@@ -2,7 +2,7 @@ import { getAppTimezone } from "./timezone";
 import api, { API } from "./api";
 
 export function newManagerId() {
-  return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 export function managerConversationKey(wsId) {
@@ -39,7 +39,7 @@ export async function streamManagerAgent(wsId, message, options, onText) {
     options.onEvent?.(event);
     if (event.type === "answer") { answer = event.content; onText(answer); }
     if (event.type === "tool_finished" && event.writes && event.status === "completed")
-      window.dispatchEvent(new Event("arevei:manager-changed"));
+      window.dispatchEvent(new CustomEvent("arevei:manager-changed", { detail: { page: event.page || "", tool: event.tool } }));
     if (event.type === "run_finished") {
       finished = true;
       if (event.status !== "completed") {

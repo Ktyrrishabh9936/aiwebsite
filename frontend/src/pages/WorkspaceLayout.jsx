@@ -97,6 +97,25 @@ export default function WorkspaceLayout() {
     api.get(`/workspaces/${wsId}/notifications`).then((r) => setNotes(r.data)).catch(() => {});
   }, [wsId]);
 
+  // AI Manager saves from chat: reload the workspace and remount the visible page so it shows the change.
+  const [dataVersion, setDataVersion] = useState(0);
+  const sectionRef = useRef(currentSection);
+  sectionRef.current = currentSection;
+  useEffect(() => {
+    let timer;
+    const changed = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        refresh();
+        loadNotes();
+        // CRM refreshes its records in place; the blog editor must keep unsaved edits.
+        if (sectionRef.current !== "crm" && !/\/blogs\/[^/]+$/.test(window.location.pathname)) setDataVersion((value) => value + 1);
+      }, 600);
+    };
+    window.addEventListener("arevei:manager-changed", changed);
+    return () => { clearTimeout(timer); window.removeEventListener("arevei:manager-changed", changed); };
+  }, [refresh, loadNotes]);
+
   const loadWorkspaces = useCallback(() => {
     api.get("/workspaces").then((r) => setWorkspaces(r.data)).catch(() => {});
   }, []);
@@ -291,7 +310,7 @@ export default function WorkspaceLayout() {
         </header>
 
         <main id="workspace-content" tabIndex={-1} hidden={agentMode} className={`${agentMode ? "hidden" : "flex-1"} ${isBlogEditor ? "min-h-0 overflow-hidden" : "min-h-0 overflow-y-auto overscroll-contain"}`}>
-          <Outlet context={{ ws, setWs, refresh, loadNotes }} />
+          <Outlet key={dataVersion} context={{ ws, setWs, refresh, loadNotes }} />
         </main>
         {agentVisited && <div hidden={!agentMode} className={agentMode ? "flex-1 min-h-0 overflow-y-auto" : "hidden"}><AgentWorkspace key={ws.id} ws={ws} active={agentMode} /></div>}
         {!isBlogEditor && !agentMode && <ManagerChatWidget ws={ws} />}
