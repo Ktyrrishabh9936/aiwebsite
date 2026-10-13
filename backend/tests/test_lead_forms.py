@@ -95,9 +95,9 @@ class Db:
         return coll
 
 
-def request(origin=None):
-    headers = {"origin": origin} if origin else {}
-    return SimpleNamespace(headers=headers, client=SimpleNamespace(host="1.2.3.4"))
+def request(origin=None, host="forms.arevei.com"):
+    headers = {"host": host, **({"origin": origin} if origin else {})}
+    return SimpleNamespace(headers=headers, client=SimpleNamespace(host="1.2.3.4"), url=SimpleNamespace(scheme="https", netloc=host))
 
 
 def make_form(**overrides):
@@ -164,10 +164,29 @@ def test_retry_with_same_submission_id_is_idempotent_and_repeat_enquiry_updates_
 def test_origin_allowlist():
     form = make_form(allowed_origins=["example.com"])
     lead_forms.assert_origin_allowed(form, request("https://www.example.com"))
+    lead_forms.assert_origin_allowed(form, request("https://forms.arevei.com"))  # hosted form page
     lead_forms.assert_origin_allowed(form, request())  # server-to-server
     with pytest.raises(HTTPException) as exc:
         lead_forms.assert_origin_allowed(form, request("https://evil.test"))
     assert exc.value.status_code == 403
+
+
+def test_hosted_form_page_is_shareable_and_frame_restricted():
+    form = make_form(allowed_origins=["example.com"])
+    response = lead_forms.hosted_form_page(form, request())
+    body = response.body.decode()
+    assert 'data-arevei-form="lf_test"' in body
+    assert 'src="https://forms.arevei.com/api/embed/form.js"' in body
+    policy = response.headers["content-security-policy"]
+    assert "frame-ancestors https://example.com https://*.example.com" in policy
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_frame_embed_forwards_attribution_and_validates_resize_origin():
+    assert "arevei_page_url" in lead_forms.FRAME_JS
+    assert "utm_campaign" in lead_forms.FRAME_JS
+    assert "event.origin!==frame.__areveiOrigin" in lead_forms.FRAME_JS
+    assert "arevei:resize" in lead_forms.EMBED_JS
 
 
 def test_rate_limit_per_ip():

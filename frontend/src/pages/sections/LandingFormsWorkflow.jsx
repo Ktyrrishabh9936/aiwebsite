@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   ArrowLeft, BarChart3, CheckCircle2, Copy, Eye, FileText, FlaskConical, Inbox, Loader2, Mail, MessageSquareText,
-  Palette, Phone, Plus, Save, Settings2, Sparkles, Tag, Trash2, User, Users, Zap,
+  Palette, Phone, Plus, Save, Settings2, Share2, Sparkles, Tag, Trash2, User, Users,
 } from "lucide-react";
 import { toast } from "sonner";
 import api, { formatError } from "../../lib/api";
 import { formatDateTime } from "../../lib/timezone";
 import { Switch } from "../../components/ui/switch";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../../components/ui/dialog";
 import CountryCodeSelect from "../../components/CountryCodeSelect";
 import FormPreview from "../../components/landingForms/FormPreview";
 import InstallPanel from "../../components/landingForms/InstallPanel";
@@ -23,7 +24,6 @@ const TABS = [
   { key: "fields", label: "Fields", icon: FileText },
   { key: "defaults", label: "Lead defaults", icon: Settings2 },
   { key: "design", label: "Design", icon: Palette },
-  { key: "install", label: "Install", icon: Zap },
   { key: "submissions", label: "Submissions", icon: Inbox },
 ];
 const ACCENTS = ["#4f46e5", "#0057a8", "#0ea5e9", "#059669", "#d97706", "#dc2626", "#db2777", "#111827"];
@@ -109,6 +109,7 @@ export default function LandingFormsWorkflow() {
   const [crm, setCrm] = useState({ states: [], tags: [] });
   const [people, setPeople] = useState([]);
   const [subsKey, setSubsKey] = useState(0);
+  const [installOpen, setInstallOpen] = useState(false);
 
   const selected = useMemo(() => forms?.find((f) => f.id === selectedId) || null, [forms, selectedId]);
   const dirty = useMemo(() => selected && draft && JSON.stringify(pick(selected)) !== JSON.stringify(pick(draft)), [selected, draft]);
@@ -212,6 +213,7 @@ export default function LandingFormsWorkflow() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
+                    <button type="button" onClick={() => setInstallOpen(true)} className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-primary px-3 text-sm font-semibold text-primary-foreground hover:bg-primary/90"><Share2 className="h-4 w-4" /><span className="hidden sm:inline">Share & embed</span></button>
                     <label className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium"><Switch checked={selected.status === "active"} onCheckedChange={toggleStatus} aria-label="Form active" />{selected.status === "active" ? "Live" : "Paused"}</label>
                     <button type="button" onClick={sendTest} disabled={testing} className="inline-flex h-10 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium hover:bg-accent disabled:opacity-60">{testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}<span className="hidden sm:inline">Send test lead</span></button>
                     <button type="button" onClick={remove} aria-label="Delete form" className="grid h-10 w-10 place-items-center rounded-lg border text-muted-foreground hover:border-destructive/40 hover:text-destructive"><Trash2 className="h-4 w-4" /></button>
@@ -305,7 +307,6 @@ export default function LandingFormsWorkflow() {
                     </Section>
                   )}
 
-                  {tab === "install" && <InstallPanel form={draft} onOriginsChange={(origins) => setDraft({ ...draft, allowed_origins: origins })} onRotate={rotate} />}
                   {tab === "submissions" && <Submissions wsId={wsId} formId={selectedId} refreshKey={subsKey} />}
                 </div>
 
@@ -316,6 +317,15 @@ export default function LandingFormsWorkflow() {
                   </aside>
                 )}
               </div>
+              <Dialog open={installOpen} onOpenChange={setInstallOpen}>
+                <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto p-0">
+                  <DialogHeader className="border-b px-6 py-5 pr-12">
+                    <DialogTitle>Share & embed {draft.name}</DialogTitle>
+                    <DialogDescription>Share a hosted page or add the form to any website. Campaign attribution is included automatically.</DialogDescription>
+                  </DialogHeader>
+                  <div className="px-6 pb-6"><InstallPanel form={draft} dirty={dirty} onOriginsChange={(origins) => setDraft({ ...draft, allowed_origins: origins })} onRotate={rotate} /></div>
+                </DialogContent>
+              </Dialog>
             </div>
           )}
         </div>

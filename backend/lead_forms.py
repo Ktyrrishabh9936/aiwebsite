@@ -317,6 +317,10 @@ def assert_origin_allowed(form, request):
     if not allowed or not host:
         # No allowlist, or a server-to-server request (Zapier, Make, backend code).
         return
+    public_host = urlparse(backend_base(request)).netloc.lower()
+    if host == public_host:
+        # The hosted/share page submits to its own public API origin.
+        return
     if any(host == domain or host.endswith("." + domain) for domain in allowed):
         return
     raise HTTPException(403, "This website is not allowed to submit this form")
@@ -545,12 +549,53 @@ def public_config(form):
             "countries": [BY_ISO[iso] for iso, _, _ in COUNTRIES]}
 
 
+def frame_ancestors(form):
+    domains = form.get("allowed_origins") or []
+    if not domains:
+        return "*"
+    sources = []
+    for domain in domains:
+        scheme = "http" if domain.startswith(("localhost", "127.0.0.1")) else "https"
+        sources.append(f"{scheme}://{domain}")
+        if ":" not in domain and not domain.startswith(("localhost", "127.0.0.1")):
+            sources.append(f"https://*.{domain}")
+    return " ".join(dict.fromkeys(sources))
+
+
+def hosted_form_page(form, request):
+    base = backend_base(request)
+    script_url = f"{base}/api/embed/form.js"
+    script_origin = f"{urlparse(script_url).scheme}://{urlparse(script_url).netloc}"
+    title = escape((form.get("appearance") or {}).get("title") or form.get("name") or "Contact form")
+    key = escape(form["form_key"], quote=True)
+    headers = {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": (
+            "default-src 'none'; "
+            f"script-src 'self' {script_origin}; connect-src 'self' {script_origin}; "
+            "style-src 'unsafe-inline'; img-src data:; base-uri 'none'; "
+            f"form-action 'self' {script_origin}; frame-ancestors {frame_ancestors(form)}"
+        ),
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "X-Content-Type-Options": "nosniff",
+    }
+    return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title><style>html,body{{margin:0;min-height:100%;background:transparent}}body{{display:grid;place-items:start center;padding:16px;box-sizing:border-box}}main{{width:min(100%,520px)}}</style></head>
+<body><main><div data-arevei-form="{key}"></div></main><script src="{escape(script_url, quote=True)}" async></script></body></html>""", headers=headers)
+
+
 @public_router.get("/public/forms/{key}")
 async def get_public_form(key: str, request: Request):
     db = db_from(request)
     form = await public_form(db, key)
     assert_origin_allowed(form, request)
     return public_config(form)
+
+
+@public_router.get("/public/forms/{key}/view")
+async def view_public_form(key: str, request: Request):
+    form = await public_form(db_from(request), key)
+    return hosted_form_page(form, request)
 
 
 async def read_payload(request):
@@ -623,8 +668,9 @@ def backend_base(request):
     configured = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
     if configured:
         return configured
-    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    url = getattr(request, "url", None)
+    proto = request.headers.get("x-forwarded-proto") or getattr(url, "scheme", "https")
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or getattr(url, "netloc", "")
     return f"{proto}://{host}"
 
 
@@ -644,7 +690,9 @@ EMBED_JS = r"""
     }
     var current = Object.keys(last).length ? last : (first || {});
     var out = {}; KEYS.forEach(function(k){ if (current[k]) out[k] = current[k]; });
-    out.page_url = location.href; out.referrer = document.referrer || "";
+    var q = null; try { q = new URLSearchParams(location.search); } catch(e) {}
+    out.page_url = (q && q.get("arevei_page_url")) || location.href;
+    out.referrer = (q && q.get("arevei_referrer")) || document.referrer || "";
     if (first) out.first_touch = first;
     return out;
   }
@@ -714,6 +762,9 @@ EMBED_JS = r"""
         .then(function(){ btn.disabled = false; btn.textContent = label; });
     });
     mount.appendChild(style); mount.appendChild(form);
+    function reportHeight(){ try { if (window.parent !== window) window.parent.postMessage({type:"arevei:resize", key:key, height:Math.ceil(document.documentElement.scrollHeight)}, "*"); } catch(e) {} }
+    reportHeight();
+    try { new ResizeObserver(reportHeight).observe(document.documentElement); } catch(e) { setTimeout(reportHeight, 250); }
   }
   function boot(){
     var nodes = document.querySelectorAll("[data-arevei-form]");
@@ -772,6 +823,33 @@ CONNECT_JS = r"""
 })();
 """
 
+FRAME_JS = r"""
+(function(){
+  var KEYS = ["utm_source","utm_medium","utm_campaign","utm_term","utm_content","gclid","fbclid"];
+  var frames = [];
+  function setup(frame){
+    if (frame.__areveiFrame) return; frame.__areveiFrame = true;
+    var source = frame.getAttribute("data-src") || frame.getAttribute("src"); if (!source) return;
+    try {
+      var url = new URL(source, location.href), query = new URLSearchParams(location.search);
+      KEYS.forEach(function(key){ var value=query.get(key); if(value) url.searchParams.set(key,value); });
+      url.searchParams.set("arevei_page_url", location.href);
+      if (document.referrer) url.searchParams.set("arevei_referrer", document.referrer);
+      frame.src = url.toString(); frame.__areveiOrigin = url.origin; frames.push(frame);
+    } catch(e) { frame.src = source; }
+  }
+  function boot(){ Array.prototype.forEach.call(document.querySelectorAll("iframe[data-arevei-frame]"), setup); }
+  window.addEventListener("message", function(event){
+    var data=event.data||{}; if(data.type!=="arevei:resize") return;
+    frames.forEach(function(frame){
+      if(event.source!==frame.contentWindow || event.origin!==frame.__areveiOrigin) return;
+      var height=Math.max(360,Math.min(1600,Number(data.height)||0)); if(height) frame.style.height=height+"px";
+    });
+  });
+  if(document.readyState==="loading") document.addEventListener("DOMContentLoaded",boot); else boot();
+})();
+"""
+
 
 def js_response(source, request):
     return Response(source.replace("__API__", backend_base(request) + "/api"), media_type="application/javascript",
@@ -786,3 +864,8 @@ async def embed_form_js(request: Request):
 @public_router.get("/embed/form-connect.js")
 async def embed_connect_js(request: Request):
     return js_response(CONNECT_JS, request)
+
+
+@public_router.get("/embed/form-frame.js")
+async def embed_frame_js(request: Request):
+    return js_response(FRAME_JS, request)

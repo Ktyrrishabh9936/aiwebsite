@@ -172,15 +172,17 @@ Website leads get the same instant AI qualification call as ad leads, and UTM tr
 ## How to set it up
 1. Open Workflows → Landing Page Forms and click New form.
 2. Choose which fields to show and which are required, and set lead defaults (source label, stage, tags, AI call).
-3. Install it: paste the embed script for a ready-made form, connect your existing form, or post to the API URL from Zapier, Make or your developer.
-4. Add your website domain under Allowed domains, then send a test lead.
+3. Click Share & embed. Copy the hosted form link, use the responsive iframe, connect an existing form, or open the advanced API option.
+4. Add your website domain under Security and access, save the form, then send a test lead.
 ## Tips to get the most out of it
 - Use a separate form per landing page or campaign so you can compare results.
 - Tag ad links with utm_source, utm_medium and utm_campaign; Arevei captures them automatically.
+- The hosted link and responsive iframe both preserve UTM and click-ID attribution.
 - Set the default country code to where most of your customers are.
 ## Questions people ask
 - What if the same person submits twice? Arevei updates the existing lead and notes the repeat enquiry instead of creating a duplicate.
 - Does it work with WordPress or Webflow? Yes. Use "Connect existing form" or the embed script.
+- Can I share the form without a website? Yes. Click Share & embed and copy the hosted page link.
 
 # Sales team and partner portal
 Keywords: team, salesperson, assign, channel partner, portal, members, invite, referral, handover

@@ -1,27 +1,25 @@
 import { useState } from "react";
-import { Check, Code2, Copy, Globe, KeyRound, Link2, Plus, RotateCw, ShieldCheck, Terminal, X } from "lucide-react";
+import { Check, Code2, Copy, ExternalLink, Globe, KeyRound, Link2, Plus, RotateCw, Share2, ShieldAlert, ShieldCheck, Terminal, X } from "lucide-react";
 import { toast } from "sonner";
 import { API } from "../../lib/api";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 
 export function apiBase() {
+  const configured = (process.env.REACT_APP_PUBLIC_FORM_BASE_URL || "").replace(/\/+$/, "");
+  if (configured) return configured;
   return API.startsWith("http") ? API : `${window.location.origin}${API}`;
 }
 
-function CodeBlock({ code, label }) {
+function CopyButton({ value, label = "Copy" }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    try { await navigator.clipboard.writeText(code); setCopied(true); toast.success("Copied to clipboard"); setTimeout(() => setCopied(false), 1500); }
-    catch { toast.error("Copy failed — select the code and copy it manually"); }
+    try { await navigator.clipboard.writeText(value); setCopied(true); toast.success("Copied to clipboard"); setTimeout(() => setCopied(false), 1500); }
+    catch { toast.error("Copy failed — select the text and copy it manually"); }
   };
-  return (
-    <div className="relative overflow-hidden rounded-xl border bg-zinc-950 text-zinc-100">
-      <div className="flex items-center justify-between border-b border-white/10 px-4 py-2 text-[11px] uppercase tracking-wider text-zinc-400"><span>{label}</span>
-        <button type="button" onClick={copy} className="inline-flex items-center gap-1.5 rounded-md bg-white/10 px-2.5 py-1 text-[11px] font-semibold normal-case tracking-normal text-white hover:bg-white/20">{copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}{copied ? "Copied" : "Copy"}</button>
-      </div>
-      <pre className="overflow-x-auto p-4 font-mono text-xs leading-relaxed"><code>{code}</code></pre>
-    </div>
-  );
+  return <button type="button" onClick={copy} className="inline-flex h-9 items-center gap-1.5 rounded-lg border bg-background px-3 text-xs font-semibold hover:bg-accent">{copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}{copied ? "Copied" : label}</button>;
+}
+
+function CodeBlock({ code, label }) {
+  return <div className="relative overflow-hidden rounded-xl border bg-zinc-950 text-zinc-100"><div className="flex items-center justify-between border-b border-white/10 px-4 py-2 text-[11px] uppercase tracking-wider text-zinc-400"><span>{label}</span><CopyButton value={code} /></div><pre className="max-h-72 overflow-auto p-4 font-mono text-xs leading-relaxed"><code>{code}</code></pre></div>;
 }
 
 function DomainInput({ domains, onChange }) {
@@ -33,83 +31,26 @@ function DomainInput({ domains, onChange }) {
     if (!domains.includes(clean)) onChange([...domains, clean]);
     setValue("");
   };
-  return (
-    <div>
-      <div className="flex flex-wrap gap-2">
-        {domains.map((d) => <span key={d} className="inline-flex items-center gap-1.5 rounded-full border bg-background py-1 pl-3 pr-1.5 text-xs font-medium"><Globe className="h-3 w-3 text-muted-foreground" />{d}<button type="button" aria-label={`Remove ${d}`} onClick={() => onChange(domains.filter((x) => x !== d))} className="rounded-full p-0.5 hover:bg-accent"><X className="h-3 w-3" /></button></span>)}
-        {domains.length === 0 && <span className="text-xs text-muted-foreground">Any website can submit. Add your domains to lock it down.</span>}
-      </div>
-      <div className="mt-3 flex gap-2">
-        <input value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }} placeholder="villas.example.com" aria-label="Add allowed domain" className="h-10 flex-1 rounded-lg border bg-background px-3 text-sm" />
-        <button type="button" onClick={add} className="inline-flex h-10 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium hover:bg-accent"><Plus className="h-4 w-4" />Add</button>
-      </div>
-    </div>
-  );
+  return <div><div className="flex flex-wrap gap-2">{domains.map((domain) => <span key={domain} className="inline-flex items-center gap-1.5 rounded-full border bg-background py-1 pl-3 pr-1.5 text-xs font-medium"><Globe className="h-3 w-3 text-muted-foreground" />{domain}<button type="button" aria-label={`Remove ${domain}`} onClick={() => onChange(domains.filter((item) => item !== domain))} className="rounded-full p-0.5 hover:bg-accent"><X className="h-3 w-3" /></button></span>)}{!domains.length && <span className="text-xs text-muted-foreground">Any website can frame or submit this form. Add domains to restrict it.</span>}</div><div className="mt-3 flex gap-2"><input value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); add(); } }} placeholder="example.com" aria-label="Add allowed domain" className="h-10 flex-1 rounded-lg border bg-background px-3 text-sm" /><button type="button" onClick={add} className="inline-flex h-10 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium hover:bg-accent"><Plus className="h-4 w-4" />Add</button></div></div>;
 }
 
-export default function InstallPanel({ form, onOriginsChange, onRotate }) {
+export default function InstallPanel({ form, onOriginsChange, onRotate, dirty = false }) {
   const base = apiBase();
   const key = form.form_key;
+  const shareUrl = `${base}/public/forms/${key}/view`;
   const submitUrl = `${base}/public/forms/${key}/submit`;
+  const rawLambda = /\.lambda-url\.[^.]+\.on\.aws/i.test(base);
+  const iframe = `<!-- Responsive Arevei form; UTMs are forwarded automatically -->\n<iframe data-arevei-frame\n  data-src="${shareUrl}"\n  src="${shareUrl}"\n  title="${form.name.replaceAll('"', '&quot;')}"\n  loading="lazy"\n  referrerpolicy="strict-origin-when-cross-origin"\n  style="width:100%;min-height:640px;border:0"></iframe>\n<script src="${base}/embed/form-frame.js" async></script>`;
   const embed = `<!-- Arevei landing page form: ${form.name} -->\n<div data-arevei-form="${key}"></div>\n<script src="${base}/embed/form.js" async></script>`;
-  const connect = `<!-- 1. Add data-arevei to your existing form -->\n<form data-arevei>\n  <input name="name" required>\n  <input name="email" type="email">\n  <input name="country_code" value="+91" type="hidden">\n  <input name="phone" required>\n  <textarea name="message"></textarea>\n  <button type="submit">Send</button>\n</form>\n\n<!-- 2. Paste before </body>. UTM fields are added automatically. -->\n<script src="${base}/embed/form-connect.js"\n  data-form-key="${key}"\n  data-map='{"full_name":"name","requirement":"message"}'></script>`;
-  const htmlOnly = `<form action="${submitUrl}" method="POST">\n  <input name="full_name" placeholder="Name" required>\n  <input name="email" type="email" placeholder="Email">\n  <select name="country_code"><option value="IN">+91</option><option value="AE">+971</option></select>\n  <input name="phone" placeholder="Phone" required>\n  <textarea name="requirement" placeholder="Your requirement"></textarea>\n  <input name="utm_source" type="hidden"><input name="utm_campaign" type="hidden">\n  <input name="_hp" style="display:none" tabindex="-1" autocomplete="off">\n  <button type="submit">Submit</button>\n</form>`;
-  const curl = `curl -X POST "${submitUrl}" \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "full_name": "Priya Sharma",\n    "email": "priya@example.com",\n    "country_code": "+91",\n    "phone": "9876543210",\n    "requirement": "3BHK under 1.2 Cr",\n    "utm_source": "facebook",\n    "utm_medium": "paid_social",\n    "utm_campaign": "diwali_launch",\n    "page_url": "https://villas.example.com/launch"\n  }'`;
+  const connect = `<!-- Keep your existing design and send a copy to Arevei -->\n<form data-arevei>\n  <input name="name" required>\n  <input name="email" type="email">\n  <input name="country_code" value="+91" type="hidden">\n  <input name="phone" required>\n  <textarea name="message"></textarea>\n  <button type="submit">Send</button>\n</form>\n<script src="${base}/embed/form-connect.js"\n  data-form-key="${key}"\n  data-map='{"full_name":"name","requirement":"message"}'></script>`;
+  const curl = `curl -X POST "${submitUrl}" \\\n+  -H "Content-Type: application/json" \\\n+  -d '{"full_name":"Priya Sharma","phone":"9876543210","country_code":"IN","utm_source":"facebook","utm_campaign":"launch"}'`;
 
-  return (
-    <div className="space-y-6">
-      <section className="rounded-2xl border bg-card p-5">
-        <h3 className="flex items-center gap-2 font-semibold"><ShieldCheck className="h-4 w-4 text-primary" />Allowed domains</h3>
-        <p className="mb-4 mt-1 text-sm text-muted-foreground">Only these websites (and their subdomains) can submit from a browser. Server tools like Zapier still work.</p>
-        <DomainInput domains={form.allowed_origins || []} onChange={onOriginsChange} />
-      </section>
-
-      <section className="rounded-2xl border bg-card p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h3 className="flex items-center gap-2 font-semibold"><KeyRound className="h-4 w-4 text-primary" />Form key</h3>
-            <p className="mt-1 font-mono text-sm">{key}</p>
-          </div>
-          <button type="button" onClick={onRotate} className="inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-xs font-medium hover:bg-accent"><RotateCw className="h-3.5 w-3.5" />Rotate key</button>
-        </div>
-      </section>
-
-      <Tabs defaultValue="embed">
-        <TabsList className="grid h-auto w-full grid-cols-3">
-          <TabsTrigger value="embed" className="gap-1.5 py-2"><Code2 className="h-4 w-4" /><span className="hidden sm:inline">Embed script</span><span className="sm:hidden">Embed</span></TabsTrigger>
-          <TabsTrigger value="connect" className="gap-1.5 py-2"><Link2 className="h-4 w-4" /><span className="hidden sm:inline">Connect existing form</span><span className="sm:hidden">Connect</span></TabsTrigger>
-          <TabsTrigger value="api" className="gap-1.5 py-2"><Terminal className="h-4 w-4" /><span className="hidden sm:inline">API / Webhook</span><span className="sm:hidden">API</span></TabsTrigger>
-        </TabsList>
-        <TabsContent value="embed" className="mt-4 space-y-3">
-          <p className="text-sm text-muted-foreground">Paste where the form should appear. It renders your design with a country-code picker and captures UTM parameters automatically.</p>
-          <CodeBlock label="HTML" code={embed} />
-          <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
-            {[["WordPress / Elementor", "Add an HTML widget and paste the code."], ["Webflow", "Add an Embed element and paste the code."], ["Framer", "Insert → Embed → HTML, then paste."], ["Wix / Squarespace", "Add a Custom Code / Embed block."]].map(([t, d]) => <div key={t} className="rounded-lg border bg-background p-3"><p className="font-semibold text-foreground">{t}</p><p className="mt-0.5">{d}</p></div>)}
-          </div>
-        </TabsContent>
-        <TabsContent value="connect" className="mt-4 space-y-3">
-          <p className="text-sm text-muted-foreground">Keep your own form design. The script sends a copy of each submission to Arevei, with UTM data. Map your input names with <code className="rounded bg-muted px-1">data-map</code> if they differ from name / email / phone / message.</p>
-          <CodeBlock label="HTML" code={connect} />
-          <details className="rounded-xl border bg-background p-4 text-sm">
-            <summary className="cursor-pointer font-semibold">No JavaScript allowed? Post the form directly</summary>
-            <p className="my-3 text-muted-foreground">A plain HTML form works too. Visitors see your thank-you message or are redirected to your page. Hidden UTM inputs are only filled if your page sets them, so prefer the script above for campaign tracking.</p>
-            <CodeBlock label="HTML" code={htmlOnly} />
-          </details>
-        </TabsContent>
-        <TabsContent value="api" className="mt-4 space-y-3">
-          <p className="text-sm text-muted-foreground">Send leads from Zapier, Make, n8n or your backend. Accepts JSON or form-encoded data.</p>
-          <div className="rounded-xl border bg-background p-3 text-sm"><span className="mr-2 rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-xs font-bold text-emerald-600">POST</span><span className="break-all font-mono text-xs">{submitUrl}</span></div>
-          <CodeBlock label="cURL" code={curl} />
-          <div className="overflow-hidden rounded-xl border text-xs">
-            <table className="w-full">
-              <thead className="bg-muted/50 text-left"><tr><th className="p-2.5">Field</th><th className="p-2.5">Description</th></tr></thead>
-              <tbody className="divide-y">
-                {[["full_name", "Visitor name"], ["email", "Email address"], ["phone", "Phone number (local or with +code)"], ["country_code", "ISO (IN) or dial code (+91). Defaults to the form's country"], ["requirement", "Requirement or query"], ["utm_source … utm_content", "Campaign tracking (hidden)"], ["page_url, referrer", "Where the lead came from"], ["submission_id", "Optional idempotency key — retries won't duplicate"]].map(([k, d]) => <tr key={k}><td className="p-2.5 font-mono">{k}</td><td className="p-2.5 text-muted-foreground">{d}</td></tr>)}
-              </tbody>
-            </table>
-          </div>
-        </TabsContent>
-      </Tabs>
-    </div>
-  );
+  return <div className="space-y-5">
+    {dirty && <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">Save your changes before sharing so visitors see the latest fields and design.</div>}
+    {rawLambda && <div className="flex gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4"><ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" /><div><p className="text-sm font-semibold">A raw AWS Lambda URL is currently used</p><p className="mt-1 text-xs leading-5 text-muted-foreground">It works, and the URL is not a secret, but a branded API domain is safer to operate and easier to trust. Set <code className="rounded bg-background px-1">PUBLIC_BASE_URL</code> on the backend and <code className="rounded bg-background px-1">REACT_APP_PUBLIC_FORM_BASE_URL</code> on the frontend after putting API Gateway or CloudFront/WAF in front.</p></div></div>}
+    <section className="rounded-2xl border bg-gradient-to-br from-primary/10 via-card to-card p-5"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="flex items-center gap-2 font-semibold"><Share2 className="h-4 w-4 text-primary" />Share this form as a page</p><p className="mt-1 text-sm text-muted-foreground">Send this link in email, WhatsApp, ads or social posts. UTM parameters in the shared link are captured automatically.</p></div><div className="flex gap-2"><CopyButton value={shareUrl} label="Copy link" /><a href={shareUrl} target="_blank" rel="noreferrer" className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-primary px-3 text-xs font-semibold text-primary-foreground"><ExternalLink className="h-3.5 w-3.5" />Open</a></div></div><div className="mt-4 break-all rounded-xl border bg-background p-3 font-mono text-xs">{shareUrl}</div></section>
+    <section className="space-y-3 rounded-2xl border bg-card p-5"><div><h3 className="flex items-center gap-2 font-semibold"><Code2 className="h-4 w-4 text-primary" />Embed with an iframe</h3><p className="mt-1 text-sm text-muted-foreground">Paste once on WordPress, Webflow, Framer, Wix, Squarespace or custom HTML. The helper forwards campaign UTMs and automatically adjusts the frame height.</p></div><CodeBlock label="Responsive iframe" code={iframe} /></section>
+    <details className="rounded-2xl border bg-card p-5"><summary className="flex cursor-pointer list-none items-center gap-2 font-semibold [&::-webkit-details-marker]:hidden"><Link2 className="h-4 w-4 text-primary" />Other integration options <span className="ml-auto text-xs font-normal text-muted-foreground">Advanced</span></summary><div className="mt-5 space-y-5"><div><p className="mb-2 text-sm font-semibold">JavaScript-rendered form</p><p className="mb-3 text-xs text-muted-foreground">Use this when you want the form rendered directly into the page instead of an iframe.</p><CodeBlock label="HTML" code={embed} /></div><div><p className="mb-2 text-sm font-semibold">Connect your existing form</p><p className="mb-3 text-xs text-muted-foreground">Keep your design and send a copy of each submission to Arevei.</p><CodeBlock label="HTML" code={connect} /></div><div><p className="mb-2 flex items-center gap-2 text-sm font-semibold"><Terminal className="h-4 w-4" />API / webhook</p><p className="mb-3 break-all rounded-lg border bg-background p-3 font-mono text-xs"><span className="mr-2 font-bold text-emerald-600">POST</span>{submitUrl}</p><CodeBlock label="cURL" code={curl} /></div></div></details>
+    <details className="rounded-2xl border bg-card p-5"><summary className="flex cursor-pointer list-none items-center gap-2 font-semibold [&::-webkit-details-marker]:hidden"><ShieldCheck className="h-4 w-4 text-primary" />Security and access <span className="ml-auto text-xs font-normal text-muted-foreground">Domains & key</span></summary><div className="mt-5 space-y-5"><div><p className="text-sm font-semibold">Allowed websites</p><p className="mb-3 mt-1 text-xs text-muted-foreground">These domains may frame and submit the form. Server tools such as Zapier and Make can still post directly.</p><DomainInput domains={form.allowed_origins || []} onChange={onOriginsChange} /></div><div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4"><div><p className="flex items-center gap-2 text-sm font-semibold"><KeyRound className="h-4 w-4 text-primary" />Public form key</p><p className="mt-1 font-mono text-xs">{key}</p></div><button type="button" onClick={onRotate} className="inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-xs font-medium hover:bg-accent"><RotateCw className="h-3.5 w-3.5" />Rotate key</button></div></div></details>
+  </div>;
 }

@@ -91,14 +91,31 @@ Gateway. It needs outbound internet access for MongoDB Atlas and web push.
 The application keeps its own user authentication. The scheduled invocation is
 protected by an AWS IAM execution role, not a public endpoint.
 
+The Function URL is an acceptable bootstrap endpoint, but it is public and must
+not be treated as a secret. For production form sharing, put an **API Gateway
+HTTP API** with an ACM-backed custom domain such as `forms.arevei.com` in front
+of this Lambda. HTTP API is the preferred default here because it is lower-cost
+and lower-latency than REST API. If you need AWS WAF, per-client API keys/usage
+plans, or gateway request validation, use a Regional **REST API** instead (or
+CloudFront + WAF in front of the Function URL).
+
+Keep the application controls even after adding a front door: exact CORS
+origins, form-domain allowlists, request-size validation, honeypot checks and
+per-IP/per-form rate limits. Hiding the Lambda hostname alone is not security.
+
 ## 6. Switch the Vercel frontend
 
 In the Vercel project that hosts `ainativemanager.vercel.app`:
 
 1. Open **Settings** > **Environment Variables**.
 2. Set `REACT_APP_BACKEND_URL` to the Lambda Function URL (no trailing slash).
-3. Apply it to **Production**.
-4. Redeploy the frontend.
+3. After the custom forms domain is ready, set backend `PUBLIC_BASE_URL` to its
+   origin (for example `https://forms.arevei.com`) and frontend
+   `REACT_APP_PUBLIC_FORM_BASE_URL` to its API base (for example
+   `https://forms.arevei.com/api`). Share links and embed snippets will then use
+   the branded domain instead of the Function URL.
+4. Apply the frontend values to **Production**.
+5. Redeploy the frontend.
 
 Test normal sign-in and CRM operations before changing the scheduler.
 
