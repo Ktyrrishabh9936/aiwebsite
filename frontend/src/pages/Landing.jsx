@@ -1,10 +1,53 @@
 ﻿import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { ArrowRight, PhoneCall, MessageSquare, Database, CalendarDays, Brain, Smartphone, Plug, Target, ChartNoAxesCombined, Check, Play, Menu, X, Users, Clock, TrendingUp } from "lucide-react";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { useAuth } from "../context/AuthContext";
+import api, { formatError } from "../lib/api";
 import "./Landing.css";
 import PipelineLandscape from "../components/PipelineLandscape";
+
+const MAIN_LANDING_FORM_KEY = process.env.REACT_APP_MAIN_LANDING_FORM_KEY || "lf_LoZNTme6VpmS9k1xg2t3F5d";
+const ATTRIBUTION_KEYS = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid"];
+
+function LeadCaptureForm({ compact = false }) {
+  const [status, setStatus] = useState({ state: "idle", message: "" });
+  const submit = async (event) => {
+    event.preventDefault();
+    setStatus({ state: "submitting", message: "" });
+    const form = event.currentTarget;
+    const fields = new FormData(form);
+    const query = new URLSearchParams(window.location.search);
+    const payload = {
+      full_name: fields.get("full_name"),
+      email: fields.get("email"),
+      phone: fields.get("phone"),
+      requirement: fields.get("requirement") || "",
+      page_url: window.location.href,
+      referrer: document.referrer || "",
+      submission_id: window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    };
+    ATTRIBUTION_KEYS.forEach((key) => { payload[key] = query.get(key) || ""; });
+    try {
+      const { data } = await api.post(`/public/forms/${MAIN_LANDING_FORM_KEY}/submit`, payload);
+      form.reset();
+      setStatus({ state: "success", message: data?.message || "Thank you! Our team will contact you shortly." });
+    } catch (error) {
+      setStatus({ state: "error", message: formatError(error.response?.data?.detail || error.message) });
+    }
+  };
+  return <form className="am-form" onSubmit={submit}>
+    <h3>{compact ? "Talk to our team" : "Plan your AI sales workflow"}</h3>
+    <div className="am-form-fields">
+      <label>Your name<input name="full_name" autoComplete="name" placeholder="Sarah Mitchell" required /></label>
+      <label>Email address<input name="email" autoComplete="email" type="email" placeholder="you@company.com" required /></label>
+      <label>Phone number<input name="phone" autoComplete="tel" type="tel" placeholder="+91 98765 43210" required /></label>
+      {!compact && <label className="am-company">How can we help? <span>(optional)</span><input name="requirement" placeholder="Tell us about your sales workflow"/></label>}
+    </div>
+    <button className="am-button" type="submit" disabled={status.state === "submitting"}>{status.state === "submitting" ? "SENDING…" : "SEND ENQUIRY"} <ArrowRight size={16}/></button>
+    {status.message ? <p className="am-fine" role={status.state === "error" ? "alert" : "status"}>{status.message}</p> : <p className="am-fine">Your details go securely to the Arevei CRM so our team can follow up.</p>}
+  </form>;
+}
 
 const features = [
   [PhoneCall, "AI Voice Agents", "Qualify leads automatically", "Ask your qualification questions, capture budgets and timelines, and give your team a useful briefing before the first conversation."],
@@ -35,7 +78,6 @@ function Wave({ className = "" }) {
 function Heading({ eyebrow, title, text }) { return <div className="am-heading"><p className="am-eyebrow">{eyebrow}</p><h2>{title}</h2>{text && <p>{text}</p>}</div>; }
 export default function Landing() {
   const { user } = useAuth();
-  const navigate = useNavigate();
   const [menu, setMenu] = useState(false);
   const [annual, setAnnual] = useState(false);
   const [leads, setLeads] = useState(250);
@@ -45,9 +87,7 @@ export default function Landing() {
   const tracked = (path, content) => `${path}?utm_source=manager.areveiagents.com&utm_medium=landing_page&utm_campaign=launch_v1&utm_content=${content}`;
   const cta = tracked(user ? "/app" : "/register", "trial");
   const demo = tracked("/check-demo", "demo");
-  const start = (event) => { event.preventDefault(); const fields = new FormData(event.currentTarget); navigate(cta, { state: { name: fields.get("name"), email: fields.get("email") } }); };
   const Button = ({ children, secondary = false, to = cta, ...props }) => <Link to={to} className={`am-button ${secondary ? "am-secondary" : ""}`} {...props}>{children}<ArrowRight size={16}/></Link>;
-  const Form = ({ compact = false }) => <form className="am-form" onSubmit={start}><h3>{compact ? "Start your AI journey" : "Get started with AI Manager"}</h3><div className="am-form-fields"><label>Your name<input name="name" autoComplete="name" placeholder="Sarah Mitchell" required /></label><label>Email address<input name="email" autoComplete="email" type="email" placeholder="you@company.com" required /></label>{!compact && <label className="am-company">Company name <span>(optional)</span><input name="company" autoComplete="organization" placeholder="Your company"/></label>}</div><button className="am-button" type="submit">START MY FREE AI JOURNEY <ArrowRight size={16}/></button><p className="am-fine">Continue to account setup. Your name and email will be prefilled.</p></form>;
   const extraRevenue = leads * (conversion / 100) * .5 * dealValue * 12;
   return <div className="am-landing">
     <header className="am-header"><div className="am-container am-nav"><Link className="am-logo" to="/" aria-label="Arevei AI Manager home"><span>AI</span> Manager<small>by Arevei</small></Link><nav id="mobile-nav" className={menu ? "am-nav-links is-open" : "am-nav-links"} aria-label="Main navigation">{[["Features", "features"], ["How it works", "how-it-works"], ["Case studies", "stories"], ["Pricing", "pricing"]].map(([label, id]) => <a href={`#${id}`} key={id} onClick={() => setMenu(false)}>{label}</a>)}</nav><div className="am-nav-actions"><ThemeToggle/><Link to={tracked("/login", "navigation")} className="am-signin" data-testid="nav-login">Sign in</Link><Button to={demo} data-testid="nav-get-started">Book a Demo</Button><button className="am-menu" aria-label={menu ? "Close navigation" : "Open navigation"} aria-expanded={menu} aria-controls="mobile-nav" onClick={() => setMenu(!menu)}>{menu ? <X/> : <Menu/>}</button></div></div></header>
@@ -62,8 +102,8 @@ export default function Landing() {
       <section className="am-section" id="stories"><div className="am-container"><Heading eyebrow="An example of what's possible" title="More Conversations. More Deals. Better Cashflow."/><p className="am-example-note">Illustrative customer story from the launch copy. Results are examples, not verified customer outcomes.</p><div className="am-results">{[[TrendingUp,"3x","More demos booked"],[Clock,"40 hours","Saved per week"],[Database,"$2M","Closed in 6 months"],[Target,"8% → 18%","Conversion rate"]].map(([Icon,value,label]) => <div className="am-card" key={label}><Icon/><div><strong>{value}</strong><span>{label}</span></div></div>)}</div><article className="am-story am-card"><div><p className="am-eyebrow">Sarah's story · illustrative</p><h3>From Burnout to $2M in 6 Months</h3><p>Sarah was working 60-hour weeks, drowning in manual follow-ups. Her conversion rate? Just 8%. She introduced AI qualification, follow-up planning, and chat-driven CRM updates.</p><blockquote>“AI Manager gave me my life back. I close more deals in 30 hours than I used to in 60. And I actually enjoy selling again.”</blockquote><strong>Sarah Mitchell</strong><p className="am-fine">Real Estate Team Lead · Austin, TX · Example persona</p></div><div className="am-story-visual"><span>SM</span><div><TrendingUp/><strong>Focus on selling.</strong><p>AI handles the busy work.</p></div></div></article><div className="am-three-col am-testimonials">{[["JC","James Chen","Agency Owner","The AI handles qualification and keeps my follow-up context in one place."],["MR","Maria Rodriguez","Real Estate Broker","Every inquiry gets attention, even when I'm busy with clients."],["DP","David Park","Sales Director","The chat-driven CRM makes it easier for the whole team to get started."]].map(([initial,name,role,quote]) => <article className="am-card" key={name}><p className="am-eyebrow">Example testimonial</p><blockquote>“{quote}”</blockquote><div className="am-person"><span>{initial}</span><div><strong>{name}</strong><small>{role} · Example persona</small></div></div></article>)}</div></div></section>
       <section className="am-section" id="pricing"><div className="am-container"><Heading eyebrow="Find your fit" title="Simple, Transparent Pricing" text="Explore the proposed launch plans. Final prices, feature allowances, and trial terms will be confirmed before purchase."/><div className="am-billing-toggle"><button onClick={() => setAnnual(false)} aria-pressed={!annual}>Monthly</button><button onClick={() => setAnnual(true)} aria-pressed={annual}>Yearly <span>Save ~17%</span></button></div><div className="am-three-col am-pricing">{plans.map((plan,i) => <article className={`am-card ${i===1 ? "am-popular" : ""}`} key={plan.name}>{i===1 && <span className="am-badge">Most Popular</span>}<p className="am-eyebrow">{plan.caption}</p><h3>{plan.name}</h3><div className="am-price">{plan.price ? `$${annual ? plan.annual.toLocaleString() : plan.price}` : "Custom"}{plan.price && <small>/{annual ? "year" : "month"}</small>}</div><p className="am-fine">Proposed launch plan</p><ul>{plan.items.map(t => <li key={t}><Check/>{t}</li>)}</ul><Button to={demo} secondary={i!==1}>{i===2 ? "Talk to Sales" : "Discuss This Plan"}</Button></article>)}</div><div className="am-roi am-card" id="roi"><div><p className="am-eyebrow">Make the numbers yours</p><h3>See Your Potential ROI</h3><p>An estimate based on a hypothetical 50% relative improvement in conversion and the proposed Professional price. Actual results vary.</p>{[["Monthly leads",leads,setLeads,50,1000,10,""],["Current conversion rate",conversion,setConversion,5,20,1,"%"],["Hours saved per week",hours,setHours,10,80,1,"h"]].map(([label,value,set,min,max,step,suffix]) => <label className="am-slider" key={label}>{label}<strong>{value}{suffix}</strong><input type="range" aria-label={label} min={min} max={max} step={step} value={value} onChange={e => set(Number(e.target.value))}/></label>)}<label className="am-deal-value">Average revenue per closed deal ($)<input type="number" min="1" max="10000000" value={dealValue} onChange={e => setDealValue(Math.max(1,Math.min(10000000,Number(e.target.value)||1)))}/></label></div><div className="am-roi-output" aria-live="polite"><span>Estimated additional revenue</span><strong>${Math.round(extraRevenue).toLocaleString()}<small>/year</small></strong><span>Potential time saved</span><strong>{Math.round(hours*52/12)}<small> hours/month</small></strong><span>Revenue-based ROI estimate</span><strong>{Math.round((extraRevenue-197*12)/(197*12)*100).toLocaleString()}%</strong><Button to={demo}>Discuss My ROI</Button></div></div></div></section>
       <section className="am-section am-faq" id="faq"><div className="am-container"><Heading eyebrow="A little more clarity" title="Frequently Asked Questions"/><div className="am-faq-list">{faqs.map(([q,a]) => <details key={q}><summary>{q}<span>+</span></summary><p>{a}</p></details>)}</div></div></section>
-      <section className="am-section am-final"><Wave className="final"/><div className="am-container am-two-col"><div><p className="am-eyebrow">Ready to improve your pipeline?</p><h2>Start Running Your Sales Pipeline the <span className="am-gradient">Superintelligence</span> Way</h2><p className="am-lead">Qualify your leads. Keep your pipeline moving. Give your sales team more time to close.</p><div className="am-actions"><Button to={demo}>Book a Demo</Button><Button secondary>Get Started</Button></div></div><Form compact/></div></section>
-      <section className="am-playbook am-container"><Form/><div><p className="am-eyebrow">Your next chapter starts here</p><h2>Meet Your New<br/><span className="am-gradient">Sales Superpower.</span></h2><p>Get a connected workspace for qualification, conversations, and clearer next actions.</p><div className="am-trust-pills"><span><Brain/>AI-Powered</span><span><Clock/>Fast Qualification</span><span><Users/>Real Estate & Agencies</span></div></div></section>
+      <section className="am-section am-final"><Wave className="final"/><div className="am-container am-two-col"><div><p className="am-eyebrow">Ready to improve your pipeline?</p><h2>Start Running Your Sales Pipeline the <span className="am-gradient">Superintelligence</span> Way</h2><p className="am-lead">Qualify your leads. Keep your pipeline moving. Give your sales team more time to close.</p><div className="am-actions"><Button to={demo}>Book a Demo</Button><Button secondary>Get Started</Button></div></div><LeadCaptureForm compact/></div></section>
+      <section className="am-playbook am-container"><LeadCaptureForm/><div><p className="am-eyebrow">Your next chapter starts here</p><h2>Meet Your New<br/><span className="am-gradient">Sales Superpower.</span></h2><p>Get a connected workspace for qualification, conversations, and clearer next actions.</p><div className="am-trust-pills"><span><Brain/>AI-Powered</span><span><Clock/>Fast Qualification</span><span><Users/>Real Estate & Agencies</span></div></div></section>
     </main><footer className="am-footer"><div className="am-container"><div className="am-footer-grid"><div><Link className="am-logo" to="/"><span>AI</span> Manager<small>by Arevei</small></Link><p>Your sales, managed by AI.</p></div>{[["Product",[["Features","#features"],["Pricing","#pricing"],["How it works","#how-it-works"]]],["Company",[["Book a demo",demo],["Customer stories","#stories"]]],["Resources",[["FAQ","#faq"],["ROI calculator","#roi"],["Your workspace",cta]]]].map(([title,links]) => <div key={title}><h3>{title}</h3>{links.map(([label,to]) => to.startsWith("#") ? <a key={label} href={to}>{label}</a> : <Link key={label} to={to}>{label}</Link>)}</div>)}</div><div className="am-footer-bottom"><span>© {new Date().getFullYear()} Arevei. All rights reserved.</span><span>Built for human relationships. Powered by AI.</span></div></div></footer>
   </div>;
 }
