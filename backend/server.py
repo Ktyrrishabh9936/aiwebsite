@@ -1250,28 +1250,15 @@ async def scheduler_loop():
 
 
 async def google_sheets_poller_loop():
-    from google_sheets import retry_sheet_statuses, ensure_drive_watch
+    from google_sheets import retry_sheet_statuses, sync_active_sheet_connections
     await asyncio.sleep(15)
     while True:
         try:
-            workflow_query = {"kind": "ads_to_crm", "status": "published"}
             workspace_scope = [value.strip() for value in os.environ.get("BACKGROUND_WORKSPACE_IDS", "").split(",") if value.strip()]
-            if workspace_scope:
-                workflow_query["workspace_id"] = {"$in": workspace_scope}
             await retry_sheet_statuses(db, workspace_scope)
-            cursor = db.workflows.find(workflow_query)
-            async for wf in cursor:
-                ws_id = wf["workspace_id"]
-                conn = await db.google_sheet_connections.find_one({"workspace_id": ws_id})
-                if not conn or not conn.get("spreadsheet_id") or not conn.get("sheet_name"):
-                    continue
-                try:
-                    # Imports are triggered by Google webhooks. This only renews
-                    # Google's expiring channel and retries CRM-to-Sheet writes.
-                    await ensure_drive_watch(db, conn)
-                except Exception as error:
-                    logger.warning("Sheet webhook renewal failed workspace=%s error_type=%s", ws_id, type(error).__name__)
-                    continue
+            # Webhooks provide the fast path. Polling is the recovery path for
+            # delayed, coalesced, or missed Google Drive notifications.
+            await sync_active_sheet_connections(db, workspace_scope)
                     
         except Exception:
             logger.exception("google sheets poller tick failed")

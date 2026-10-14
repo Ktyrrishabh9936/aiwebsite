@@ -23,6 +23,7 @@ export default function AdsToCrmWorkflow() {
   const [mappingNotice, setMappingNotice] = useState("");
   const [savingMap, setSavingMap] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [workflow, setWorkflow] = useState({ status: "draft" });
   const [selectedSpreadsheetId, setSelectedSpreadsheetId] = useState("");
   const [sheetTabName, setSheetTabName] = useState("");
@@ -214,12 +215,31 @@ export default function AdsToCrmWorkflow() {
       } else {
         const r = await api.post(`/workspaces/${wsId}/workflows/ads-to-crm/publish`);
         setWorkflow(r.data);
-        toast.success("Workflow active");
+        await loadStatus();
+        toast.success("Live sync active. Existing Sheet rows were skipped.");
       }
     } catch (e) {
       toast.error(formatError(e.response?.data?.detail));
     } finally {
       setPublishing(false);
+    }
+  };
+
+  const handleSyncNow = async () => {
+    try {
+      setSyncing(true);
+      const r = await api.post(`/google/workspaces/${wsId}/sync`);
+      await loadStatus();
+      window.dispatchEvent(new Event("arevei:sheet-synced"));
+      if (r.data.status === "busy") {
+        toast.info("A Sheet sync is already running");
+      } else {
+        toast.success(r.data.created ? `${r.data.created} new lead${r.data.created === 1 ? "" : "s"} added to CRM` : "Sheet is up to date");
+      }
+    } catch (e) {
+      toast.error(formatError(e.response?.data?.detail));
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -244,7 +264,7 @@ export default function AdsToCrmWorkflow() {
         <div>
           <h1 className="text-2xl font-bold">Ads to CRM</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Map Google Sheet columns into your CRM. Active workflows receive Google change webhooks and import new rows automatically.
+            Map Google Sheet columns into your CRM. Activation skips existing rows; every new row is sent to CRM automatically.
           </p>
         </div>
         {connStatus.connected && connStatus.spreadsheet_id && (
@@ -412,6 +432,29 @@ export default function AdsToCrmWorkflow() {
                 </div>
               </div>
             </div>
+            {workflow.status === "published" && (
+              <div className="space-y-3 border-t pt-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold uppercase text-muted-foreground">Live sync</div>
+                    <div className={`mt-1 text-xs ${connStatus.webhook_status === "active" ? "text-emerald-500" : "text-amber-500"}`}>
+                      {connStatus.webhook_status === "active" ? "Webhook active + automatic recovery" : "Automatic recovery active"}
+                    </div>
+                  </div>
+                  <button type="button" onClick={handleSyncNow} disabled={syncing} className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold hover:bg-accent disabled:opacity-50">
+                    <RefreshCw className={`h-3.5 w-3.5 ${syncing ? "animate-spin" : ""}`} /> Check now
+                  </button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {connStatus.last_sheet_check_at
+                    ? `Last checked ${new Date(connStatus.last_sheet_check_at).toLocaleString()}`
+                    : "Waiting for the first new row."}
+                </p>
+                <p className="text-xs text-muted-foreground">Only rows added after activation are imported.</p>
+                {connStatus.webhook_error && <p className="text-xs text-amber-600 dark:text-amber-400">{connStatus.webhook_error}</p>}
+                {connStatus.last_sheet_error && <p className="text-xs text-destructive">{connStatus.last_sheet_error}</p>}
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -158,10 +158,12 @@ Ad leads are contacted within minutes instead of sitting in a spreadsheet, and y
 1. Open Workflows → Ads to CRM.
 2. Connect your Google account and choose the spreadsheet and tab your Meta leads go to.
 3. Map the columns to CRM fields (Phone is required) and click Activate Webhook.
+   Activation starts from the next row and does not import leads already present in the Sheet.
 ## Tips to get the most out of it
 - Include the Meta lead ID column so leads are never duplicated.
+- If a lead appears delayed, use Check now in the workflow. Automatic recovery also checks active Sheets periodically.
 ## Questions people ask
-- How fast are leads imported? Usually within a minute of the sheet updating.
+- How fast are leads imported? The Google webhook normally imports them within seconds; the recovery check handles delayed or missed notifications.
 
 # Landing Page Forms
 Keywords: landing page, website form, form, embed, utm, webflow, wordpress, elementor, framer, webhook, zapier, capture leads, website leads

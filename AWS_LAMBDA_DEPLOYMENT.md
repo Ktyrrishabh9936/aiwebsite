@@ -119,10 +119,10 @@ In the Vercel project that hosts `ainativemanager.vercel.app`:
 
 Test normal sign-in and CRM operations before changing the scheduler.
 
-## 7. Schedule follow-up push delivery
+## 7. Schedule background maintenance
 
 1. Open **EventBridge Scheduler** > **Create schedule**.
-2. Name: `arevei-followup-push-dispatch`.
+2. Name: `arevei-background-maintenance`.
 3. Select a recurring rate schedule: **1 minute**; flexible time window: **Off**.
 4. Target: **AWS Lambda Invoke**.
 5. Select the `arevei-backend` Lambda function.
@@ -138,6 +138,9 @@ Test normal sign-in and CRM operations before changing the scheduler.
 
 This direct AWS-to-AWS invocation is protected by IAM. Do not use a public
 HTTP scheduler target and do not put any scheduler secret in the browser.
+The same invocation delivers due follow-up notifications, renews Google Drive
+watch channels, retries CRM-to-Sheet status writes, and polls active Sheets as
+a recovery path when Google delays or coalesces a webhook.
 
 ## 8. Verify end-to-end
 

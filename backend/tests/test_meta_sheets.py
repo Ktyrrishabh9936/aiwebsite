@@ -187,6 +187,7 @@ def test_drive_webhook_rejects_bad_token_and_imports_for_active_workflow(monkeyp
             "drive_watch_channel_id": "channel",
             "drive_watch_resource_id": "resource",
             "drive_watch_token": "proof",
+            "import_start_row": 2,
         }
         inserted = await db.google_sheet_connections.insert_one(conn)
         conn["_id"] = inserted.inserted_id
@@ -285,6 +286,96 @@ def test_sheet_poll_overlap_imports_late_row_behind_cursor(monkeypatch):
         stored_conn = await db.google_sheet_connections.find_one({"workspace_id": ws})
         assert stored_conn["cursor"] == 5
         scheduled.assert_awaited_once_with(db, ws, str(lead["_id"]))
+
+    asyncio.run(isolated(run))
+
+
+def test_activation_boundary_skips_existing_rows_and_imports_next_row(monkeypatch):
+    scheduled = AsyncMock()
+    monkeypatch.setattr("plivo_calls.schedule_first_qualification_call", scheduled)
+
+    async def run(db):
+        ws = str(ObjectId())
+        await ensure_crm_settings(db, ws)
+        headers = ["ID", "Phone", "Name"]
+        conn = {
+            "workspace_id": ws,
+            "spreadsheet_id": "file",
+            "sheet_name": "Leads",
+            "tokens": {},
+            "cursor": 1,
+            "header_row": headers,
+            "column_map": {"meta_lead_id": "ID", "phone": "Phone", "full_name": "Name"},
+        }
+        inserted = await db.google_sheet_connections.insert_one(conn)
+        conn["_id"] = inserted.inserted_id
+
+        async def request(db, active_conn, method, cells, **kwargs):
+            if cells == "B2:B":
+                return {"values": [["111"], ["222"], ["333"]]}
+            if cells == "1:1":
+                return {"values": [headers]}
+            assert cells == "A5:C254"
+            return {"values": [["new-lead", "444", "Only New Lead"]]}
+
+        monkeypatch.setattr(sheets, "sheet_request", request)
+        active = await sheets.establish_live_import_boundary(db, conn)
+        result = await sheets.poll_sheet_connection(db, ws, active)
+        assert result == {"created": 1, "reviewed": 1, "cursor": 5}
+        assert await db.crm_leads.count_documents({"workspace_id": ws}) == 1
+        lead = await db.crm_leads.find_one({"workspace_id": ws})
+        assert lead["meta_lead_id"] == "new-lead"
+        assert lead["google_sheet_row_number"] == 5
+        stored = await db.google_sheet_connections.find_one({"_id": inserted.inserted_id})
+        assert stored["import_start_row"] == 5
+        scheduled.assert_awaited_once()
+
+    asyncio.run(isolated(run))
+
+
+def test_recovery_sync_polls_active_connections(monkeypatch):
+    watch = AsyncMock(side_effect=lambda db, conn: conn)
+    drain = AsyncMock(return_value={"created": 1, "reviewed": 1, "cursor": 8})
+    monkeypatch.setattr(sheets, "ensure_drive_watch", watch)
+    monkeypatch.setattr(sheets, "drain_with_lease", drain)
+
+    async def run(db):
+        await db.workflows.insert_one({"workspace_id": "active", "kind": "ads_to_crm", "status": "published"})
+        await db.workflows.insert_one({"workspace_id": "paused", "kind": "ads_to_crm", "status": "draft"})
+        await db.google_sheet_connections.insert_one({
+            "workspace_id": "active", "spreadsheet_id": "file", "sheet_name": "Leads"
+        })
+        result = await sheets.sync_active_sheet_connections(db)
+        assert result == {"connections": 1, "created": 1, "reviewed": 1, "failed": 0}
+        watch.assert_awaited_once()
+        drain.assert_awaited_once()
+
+    asyncio.run(isolated(run))
+
+
+def test_legacy_untouched_connection_is_baselined_before_recovery(monkeypatch):
+    drained = AsyncMock(return_value={"created": 0, "reviewed": 0, "cursor": 4})
+    monkeypatch.setattr(sheets, "drain_sheet_connection", drained)
+
+    async def request(db, conn, method, cells, **kwargs):
+        assert cells == "B2:B"
+        return {"values": [["111"], ["222"], ["333"]]}
+
+    monkeypatch.setattr(sheets, "sheet_request", request)
+
+    async def run(db):
+        conn = {
+            "workspace_id": "legacy", "spreadsheet_id": "file", "sheet_name": "Leads",
+            "cursor": 1, "header_row": ["ID", "Phone"], "column_map": {"phone": "Phone"},
+        }
+        inserted = await db.google_sheet_connections.insert_one(conn)
+        conn["_id"] = inserted.inserted_id
+        await sheets.drain_with_lease(db, "legacy", conn)
+        active_conn = drained.await_args.args[2]
+        assert active_conn["cursor"] == 4
+        assert active_conn["import_start_row"] == 5
+        stored = await db.google_sheet_connections.find_one({"_id": inserted.inserted_id})
+        assert stored["import_start_row"] == 5
 
     asyncio.run(isolated(run))
 

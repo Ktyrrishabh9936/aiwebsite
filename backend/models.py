@@ -120,6 +120,8 @@ class GoogleSheetConnection(BaseDocument):
     header_row: List[str] = Field(default_factory=list)
     column_map: dict = Field(default_factory=dict)  # maps standard keys to headers
     cursor: int = 1  # processed rows cursor
+    import_start_row: int = 2  # hard lower bound established when live sync starts
+    live_import_started_at: Optional[str] = None
     tokens: dict = Field(default_factory=dict)  # access_token, refresh_token, etc.
     drive_watch_channel_id: Optional[str] = None
     drive_watch_resource_id: Optional[str] = None

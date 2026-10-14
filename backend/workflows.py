@@ -49,9 +49,16 @@ async def publish_workflow(ws_id: str, request: Request):
     if not col_map or not col_map.get("phone"):
         raise HTTPException(status_code=400, detail="Please map the spreadsheet Phone column before publishing.")
 
-    from google_sheets import ensure_drive_watch
+    from google_sheets import (
+        drain_with_lease, ensure_drive_watch, establish_live_import_boundary,
+        sheet_live_tail_row,
+    )
     try:
+        # Activation is intentionally forward-only: rows already present in the
+        # Sheet are the baseline and are not imported into CRM.
+        tail_row = await sheet_live_tail_row(db, conn)
         await ensure_drive_watch(db, conn, force=True)
+        conn = await establish_live_import_boundary(db, conn, tail_row)
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from None
         
@@ -64,6 +71,15 @@ async def publish_workflow(ws_id: str, request: Request):
         }},
         upsert=True
     )
+
+    # Close the small race between taking the baseline and registering the
+    # Drive watch. Any row appended during activation is imported here.
+    try:
+        await drain_with_lease(db, ws_id, conn)
+    except Exception:
+        # The active webhook and scheduled recovery will retry without making a
+        # successfully registered workflow appear inactive.
+        pass
     
     doc = await db.workflows.find_one({"workspace_id": ws_id, "kind": "ads_to_crm"})
     return doc_out(doc)

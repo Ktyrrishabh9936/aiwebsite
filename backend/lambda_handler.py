@@ -5,6 +5,7 @@ import asyncio
 from mangum import Mangum
 
 from push_notifications import dispatch_due
+from google_sheets import retry_sheet_statuses, sync_active_sheet_connections
 from server import app, db
 
 
@@ -17,7 +18,7 @@ app.state.voice_storage_ready = True
 asgi_handler = Mangum(app, lifespan="off")
 
 
-def _run_dispatch_due():
+def _run_scheduled_maintenance():
     """Run the scheduled coroutine without closing Lambda's shared event loop.
 
     Mangum reuses the current thread's event loop for Function URL requests.
@@ -36,7 +37,13 @@ def _run_dispatch_due():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    return loop.run_until_complete(dispatch_due(db))
+    async def run():
+        push = await dispatch_due(db)
+        await retry_sheet_statuses(db)
+        sheets = await sync_active_sheet_connections(db)
+        return {"push": push, "google_sheets": sheets}
+
+    return loop.run_until_complete(run())
 
 
 def handler(event, context):
@@ -48,5 +55,5 @@ def handler(event, context):
     Mangum.
     """
     if isinstance(event, dict) and event.get("action") == "dispatch_due_followups":
-        return _run_dispatch_due()
+        return _run_scheduled_maintenance()
     return asgi_handler(event, context)

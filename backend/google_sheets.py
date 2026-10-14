@@ -400,6 +400,11 @@ async def get_connection_status(ws_id: str, request: Request):
         "webhook_status": conn.get("drive_watch_status", "inactive"),
         "webhook_error": conn.get("drive_watch_error"),
         "webhook_expires_at": conn.get("drive_watch_expiration"),
+        "live_import_started_at": conn.get("live_import_started_at"),
+        "import_start_row": conn.get("import_start_row"),
+        "last_sheet_check_at": conn.get("last_sheet_check_at"),
+        "last_sheet_import_at": conn.get("last_sheet_import_at"),
+        "last_sheet_error": conn.get("last_sheet_error"),
     }
 
 @router.delete("/workspaces/{ws_id}")
@@ -526,7 +531,9 @@ async def bind_sheet(ws_id: str, request: Request, body: dict):
         }, "$unset": {
             "drive_watch_channel_id": "", "drive_watch_token": "",
             "drive_watch_resource_id": "", "drive_watch_expiration": "",
-            "pending_drive_watch_channel_id": "", "pending_drive_watch_token": ""
+            "pending_drive_watch_channel_id": "", "pending_drive_watch_token": "",
+            "import_start_row": "", "live_import_started_at": "",
+            "last_sheet_check_at": "", "last_sheet_import_at": "", "last_sheet_error": ""
         }}
     )
     
@@ -674,11 +681,19 @@ async def poll_sheet_connection(db, ws_id, conn):
     if not headers:
         raise ValueError("The bound Sheet does not contain a header row.")
     current_cursor = max(1, int(conn.get("cursor") or 1))
-    start_row = max(2, current_cursor + 1 - SHEET_POLL_LOOKBACK_ROWS)
+    # Never let the overlap cross the activation boundary. Existing rows are a
+    # snapshot, not new leads; only rows created after the workflow went live
+    # may enter CRM.
+    import_start_row = max(2, int(conn.get("import_start_row") or 2))
+    start_row = max(import_start_row, current_cursor + 1 - SHEET_POLL_LOOKBACK_ROWS)
     end_row = start_row + SHEET_POLL_BATCH_ROWS - 1
     cells = f"A{start_row}:{column_letter(max(len(headers) - 1, 0))}{end_row}"
     rows = (await sheet_request(db, conn, "GET", cells)).get("values") or []
     if not rows:
+        await db.google_sheet_connections.update_one(
+            {"workspace_id": ws_id},
+            {"$set": {"last_sheet_check_at": now_iso(), "last_sheet_error": None}},
+        )
         return {"created": 0, "reviewed": 0, "cursor": current_cursor}
 
     settings = await ensure_crm_settings(db, ws_id)
@@ -696,11 +711,45 @@ async def poll_sheet_connection(db, ws_id, conn):
             created_count += 1
 
     new_cursor = max(current_cursor, start_row + len(rows) - 1)
+    checked_at = now_iso()
+    updates = {"cursor": new_cursor, "updated_at": checked_at,
+               "last_sheet_check_at": checked_at, "last_sheet_error": None}
+    if created_count:
+        updates["last_sheet_import_at"] = checked_at
     await db.google_sheet_connections.update_one(
         {"workspace_id": ws_id},
-        {"$set": {"cursor": new_cursor, "updated_at": now_iso()}},
+        {"$set": updates},
     )
     return {"created": created_count, "reviewed": reviewed_count, "cursor": new_cursor}
+
+
+async def sheet_live_tail_row(db, conn):
+    """Return the last existing lead row using the required Phone column."""
+    headers = conn.get("header_row") or []
+    phone_header = (conn.get("column_map") or {}).get("phone")
+    if not headers or not phone_header:
+        raise ValueError("Map the spreadsheet Phone column before activating the workflow.")
+    phone_column = column_letter(header_index(headers, phone_header))
+    values = (await sheet_request(db, conn, "GET", f"{phone_column}2:{phone_column}")).get("values") or []
+    return len(values) + 1
+
+
+async def establish_live_import_boundary(db, conn, tail_row=None):
+    """Snapshot existing rows so activation starts with the next lead only."""
+    if tail_row is None:
+        tail_row = await sheet_live_tail_row(db, conn)
+    activated_at = now_iso()
+    await db.google_sheet_connections.update_one(
+        {"_id": conn["_id"]},
+        {"$set": {
+            "cursor": tail_row,
+            "import_start_row": tail_row + 1,
+            "live_import_started_at": activated_at,
+            "updated_at": activated_at,
+        }},
+    )
+    return {**conn, "cursor": tail_row, "import_start_row": tail_row + 1,
+            "live_import_started_at": activated_at, "updated_at": activated_at}
 
 
 async def drain_sheet_connection(db, ws_id, conn, max_batches=20):
@@ -718,6 +767,76 @@ async def drain_sheet_connection(db, ws_id, conn, max_batches=20):
     return {"created": total_created, "reviewed": total_reviewed, "cursor": cursor}
 
 
+async def drain_with_lease(db, ws_id, conn):
+    """Serialize webhook and recovery imports for one Sheet connection."""
+    lock_token = uuid4().hex
+    now = datetime.now(timezone.utc)
+    lease = await db.google_sheet_connections.update_one(
+        {"_id": conn["_id"], "$or": [
+            {"sheet_import_lock_until": {"$exists": False}},
+            {"sheet_import_lock_until": {"$lt": now.isoformat()}},
+        ]},
+        {"$set": {
+            "sheet_import_lock": lock_token,
+            "sheet_import_lock_until": (now + timedelta(minutes=2)).isoformat(),
+        }},
+    )
+    if not lease.modified_count:
+        return None
+    try:
+        fresh = await db.google_sheet_connections.find_one({"_id": conn["_id"]})
+        if not (fresh or {}).get("import_start_row"):
+            # Upgrade connections activated before the live-boundary field was
+            # introduced. A cursor beyond row 1 has already reviewed its older
+            # rows; an untouched cursor must baseline the current Sheet first.
+            if int((fresh or conn).get("cursor") or 1) > 1:
+                await db.google_sheet_connections.update_one(
+                    {"_id": conn["_id"]},
+                    {"$set": {"import_start_row": 2, "live_import_started_at": now_iso()}},
+                )
+                fresh = {**(fresh or conn), "import_start_row": 2}
+            else:
+                fresh = await establish_live_import_boundary(db, fresh or conn)
+        return await drain_sheet_connection(db, ws_id, fresh or conn)
+    finally:
+        await db.google_sheet_connections.update_one(
+            {"_id": conn["_id"], "sheet_import_lock": lock_token},
+            {"$unset": {"sheet_import_lock": "", "sheet_import_lock_until": ""}},
+        )
+
+
+async def sync_active_sheet_connections(db, workspace_ids=None, max_connections=100):
+    """Recover missed/coalesced Drive notifications and renew expiring watches."""
+    query = {"kind": "ads_to_crm", "status": "published"}
+    if workspace_ids:
+        query["workspace_id"] = {"$in": workspace_ids}
+    summary = {"connections": 0, "created": 0, "reviewed": 0, "failed": 0}
+    async for workflow in db.workflows.find(query).limit(max_connections):
+        ws_id = workflow["workspace_id"]
+        conn = await db.google_sheet_connections.find_one({"workspace_id": ws_id})
+        if not conn or not conn.get("spreadsheet_id") or not conn.get("sheet_name"):
+            continue
+        try:
+            conn = await ensure_drive_watch(db, conn)
+            result = await drain_with_lease(db, ws_id, conn)
+            if result is None:
+                continue
+            summary["connections"] += 1
+            summary["created"] += result["created"]
+            summary["reviewed"] += result["reviewed"]
+        except Exception as error:
+            summary["failed"] += 1
+            await db.google_sheet_connections.update_one(
+                {"workspace_id": ws_id},
+                {"$set": {"last_sheet_error": "Google Sheet sync failed. It will retry automatically.",
+                          "updated_at": now_iso()}},
+            )
+            logging.getLogger(__name__).warning(
+                "Sheet recovery sync failed workspace=%s error_type=%s", ws_id, type(error).__name__
+            )
+    return summary
+
+
 @router.post("/workspaces/{ws_id}/sync")
 async def sync_sheet_now(ws_id: str, request: Request):
     """Serverless-safe authenticated poll used by the dashboard and manual recovery."""
@@ -732,9 +851,11 @@ async def sync_sheet_now(ws_id: str, request: Request):
     if not conn or not conn.get("spreadsheet_id") or not conn.get("sheet_name"):
         raise HTTPException(409, "Connect and bind a Google Sheet before syncing.")
     try:
-        result = await poll_sheet_connection(db, ws_id, conn)
+        result = await drain_with_lease(db, ws_id, conn)
     except ValueError as error:
         raise HTTPException(409, str(error)) from None
+    if result is None:
+        return {"status": "busy", "created": 0, "reviewed": 0}
     return {"status": "synced", **result}
 
 
@@ -766,23 +887,9 @@ async def google_drive_webhook(request: Request):
     workflow = await db.workflows.find_one({"workspace_id": ws_id, "kind": "ads_to_crm", "status": "published"})
     if not workflow:
         return Response(status_code=204)
-    lock_token = uuid4().hex
-    now = datetime.now(timezone.utc)
-    lease = await db.google_sheet_connections.update_one(
-        {"_id": conn["_id"], "$or": [
-            {"webhook_import_lock_until": {"$exists": False}},
-            {"webhook_import_lock_until": {"$lt": now.isoformat()}},
-        ]},
-        {"$set": {
-            "webhook_import_lock": lock_token,
-            "webhook_import_lock_until": (now + timedelta(minutes=2)).isoformat(),
-        }},
-    )
-    if not lease.modified_count:
-        return Response(status_code=204)
     try:
-        result = await drain_sheet_connection(db, ws_id, conn)
-        if result["created"]:
+        result = await drain_with_lease(db, ws_id, conn)
+        if result and result["created"]:
             from models import Notification
             notification = Notification(
                 workspace_id=ws_id,
@@ -794,11 +901,6 @@ async def google_drive_webhook(request: Request):
     except Exception:
         logging.getLogger(__name__).exception("Drive webhook import failed workspace=%s", ws_id)
         raise HTTPException(503, "Sheet import temporarily failed") from None
-    finally:
-        await db.google_sheet_connections.update_one(
-            {"_id": conn["_id"], "webhook_import_lock": lock_token},
-            {"$unset": {"webhook_import_lock": "", "webhook_import_lock_until": ""}},
-        )
     return Response(status_code=204)
 
 
