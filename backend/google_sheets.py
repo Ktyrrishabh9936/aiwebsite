@@ -264,12 +264,31 @@ async def ensure_drive_watch(db, conn, force=False):
     return {**conn, **updates}
 
 def get_redirect_uri(request: Request):
-    env_uri = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI")
+    def is_loopback(host):
+        return str(host or "").strip().lower() in {"127.0.0.1", "localhost", "::1"}
+
+    env_uri = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+    forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    request_host = urllib.parse.urlparse(f"//{forwarded_host}").hostname
     if env_uri:
-        return env_uri
+        configured = urllib.parse.urlparse(env_uri)
+        # A local callback is valid for local development only. Never send a
+        # production user's browser to their own 127.0.0.1 after Google login.
+        if not (is_loopback(configured.hostname) and not is_loopback(request_host)):
+            return env_uri
+    public_base = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    public = urllib.parse.urlparse(public_base)
+    if public.scheme == "https" and public.netloc and not is_loopback(public.hostname):
+        return f"{public_base}/api/google/oauth/callback"
+    if env_uri:
+        raise HTTPException(
+            status_code=503,
+            detail=("Google OAuth is configured with a localhost callback. Set GOOGLE_OAUTH_REDIRECT_URI "
+                    "and PUBLIC_BASE_URL to this backend's public HTTPS origin, then add the same callback "
+                    "URL in Google Cloud Console."),
+        )
     proto = request.headers.get("x-forwarded-proto", "http")
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
-    return f"{proto}://{host}/api/google/oauth/callback"
+    return f"{proto}://{forwarded_host}/api/google/oauth/callback"
 
 async def refresh_access_token(conn: dict, request: Request) -> str:
     client_id, client_secret = get_google_creds()

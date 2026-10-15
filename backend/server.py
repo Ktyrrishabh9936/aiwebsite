@@ -1319,6 +1319,15 @@ app.include_router(build_auth_router(db))
 app.include_router(build_coding_router(db))
 app.include_router(api)
 
+# API Gateway can forward OPTIONS through a greedy/default Lambda route.  It
+# adds the configured CORS headers itself, but still needs a successful status
+# from the integration.  Keep this response header-free so Function URL and
+# API Gateway CORS layers do not produce duplicate allow-origin headers.
+if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+    @app.options("/{path:path}", include_in_schema=False)
+    async def lambda_cors_preflight(path: str):
+        return Response(status_code=204)
+
 # Lambda Function URLs add CORS headers themselves.  Do not also add them in
 # FastAPI there: duplicate Access-Control-Allow-Origin values are rejected by
 # browsers.  Local/Uvicorn deployments keep the application-level middleware.

@@ -176,6 +176,39 @@ def test_drive_watch_registration_uses_authenticated_https_webhook(monkeypatch):
     assert request["json"]["type"] == "web_hook"
 
 
+def test_public_oauth_never_redirects_to_localhost(monkeypatch):
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_URI", "http://127.0.0.1:8000/api/google/oauth/callback")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://api.arevei.example")
+    public_request = SimpleNamespace(
+        headers={"host": "api.arevei.example", "x-forwarded-proto": "https"},
+        url=SimpleNamespace(netloc="api.arevei.example"),
+    )
+    assert sheets.get_redirect_uri(public_request) == "https://api.arevei.example/api/google/oauth/callback"
+
+
+def test_local_oauth_keeps_local_callback(monkeypatch):
+    callback = "http://127.0.0.1:8000/api/google/oauth/callback"
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_URI", callback)
+    local_request = SimpleNamespace(
+        headers={"host": "127.0.0.1:8000"},
+        url=SimpleNamespace(netloc="127.0.0.1:8000"),
+    )
+    assert sheets.get_redirect_uri(local_request) == callback
+
+
+def test_public_oauth_reports_misconfigured_local_callback(monkeypatch):
+    monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_URI", "http://127.0.0.1:8000/api/google/oauth/callback")
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+    public_request = SimpleNamespace(
+        headers={"host": "api.arevei.example", "x-forwarded-proto": "https"},
+        url=SimpleNamespace(netloc="api.arevei.example"),
+    )
+    with pytest.raises(HTTPException) as caught:
+        sheets.get_redirect_uri(public_request)
+    assert caught.value.status_code == 503
+    assert "localhost callback" in caught.value.detail
+
+
 def test_drive_webhook_rejects_bad_token_and_imports_for_active_workflow(monkeypatch):
     imported = AsyncMock(return_value={"created": 1, "reviewed": 1, "cursor": 2})
     monkeypatch.setattr(sheets, "drain_sheet_connection", imported)

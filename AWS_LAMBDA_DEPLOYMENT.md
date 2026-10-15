@@ -71,6 +71,20 @@ CORS_ORIGINS=https://ainativemanager.vercel.app
 DISABLE_BACKGROUND_JOBS=true
 ```
 
+Configure Google OAuth with the same public backend origin:
+
+```text
+PUBLIC_BASE_URL=https://api.arevei.com
+GOOGLE_OAUTH_REDIRECT_URI=https://api.arevei.com/api/google/oauth/callback
+```
+
+Replace `api.arevei.com` with the actual API Gateway/custom-domain origin. In
+Google Cloud Console, open the OAuth 2.0 Web client and add that exact callback
+under **Authorized redirect URIs**. Do not use `localhost` or `127.0.0.1` for
+the production Lambda environment. A Lambda Function URL can be used until the
+custom domain is ready, but the exact Function URL callback must then be added
+to Google as well.
+
 The active configuration totals about 2 KB without those unused integrations,
 which is within Lambda's 4 KB environment-variable limit.
 
