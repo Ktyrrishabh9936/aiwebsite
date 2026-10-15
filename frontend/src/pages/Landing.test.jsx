@@ -47,6 +47,8 @@ test('switches annual prices and expands mobile navigation', () => {
   act(() => container.querySelector('.am-menu').click());
   expect(container.querySelector('.am-menu').getAttribute('aria-expanded')).toBe('true');
   expect(container.querySelector('#mobile-nav').classList.contains('is-open')).toBe(true);
+  expect(container.querySelector('[data-testid="mobile-nav-login"]').getAttribute('href')).toContain('/login');
+  expect(container.querySelector('[data-testid="mobile-nav-signup"]').getAttribute('href')).toContain('/register');
 });
 test('submits the landing form to CRM with UTM and click attribution', async () => {
   const form = container.querySelector('.am-form');
