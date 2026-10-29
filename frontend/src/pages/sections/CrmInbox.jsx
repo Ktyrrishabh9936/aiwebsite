@@ -8,7 +8,7 @@ import LeadAttribution from "../../components/LeadAttribution";
 import CrmPipeline from "../../components/CrmPipeline";
 import * as Dialog from "@radix-ui/react-dialog";
 import LeadLabels, { LeadTagBadges } from "../../components/LeadLabels";
-import { moveLeadStateToPosition } from "../../lib/leadStates";
+import { moveLeadStateToPosition, STATE_CLASSES as stateClasses } from "../../lib/leadStates";
 import CrmReminders from "../../components/CrmReminders";
 import FollowUpAction, { FollowUpSnapshot, useFollowUpSnapshots } from "../../components/FollowUpAction";
 import LeadWhatsAppCompose from "../../components/LeadWhatsAppCompose";
@@ -18,6 +18,8 @@ import SalesTeam, { SalesAssignment, useSalesPeople } from "../../components/Sal
 import ShareLead from "../../components/ShareLead";
 import OpportunitySelector from "../../components/OpportunitySelector";
 import LeadQualificationPanel from "../../components/LeadQualificationPanel";
+import DynamicField from "../../components/LeadField";
+import ReferralLeadDialog from "../../components/ReferralLeadDialog";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import {
@@ -81,13 +83,6 @@ function nextSelectedAgentId(current, agentState) {
 }
 
 const today = () => appDate();
-const stateClasses = {
-  blue: "bg-blue-500/10 text-blue-500 border-blue-500/20",
-  amber: "bg-amber-500/10 text-amber-500 border-amber-500/20",
-  emerald: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20",
-  red: "bg-destructive/10 text-destructive border-destructive/20",
-  slate: "bg-muted text-muted-foreground border-border"
-};
 
 function valuesFrom(lead, fields) {
   const values = { ...(lead?.field_values || {}) };
@@ -191,13 +186,16 @@ function titleStatus(status) {
   return String(status || "pending").toLowerCase() === "paid" ? "Paid" : "Pending";
 }
 
-function receiptDownloadUrl(wsId, leadId, receiptId) {
-  return `${API}/workspaces/${wsId}/crm/leads/${leadId}/receipts/${receiptId}/pdf`;
+function receiptUrl(apiBase, leadId, receiptId, kind = "html") {
+  return `${API}${apiBase}/leads/${leadId}/receipts/${receiptId}/${kind}`;
 }
 
-function finalInvoiceDownloadUrl(wsId, leadId) {
-  return `${API}/workspaces/${wsId}/crm/leads/${leadId}/final-invoice/pdf`;
+function finalInvoiceUrl(apiBase, leadId, kind = "html") {
+  return `${API}${apiBase}/leads/${leadId}/final-invoice/${kind}`;
 }
+
+// Shared-member endpoints wrap a lead as { lead, reminders }; owner endpoints return the lead itself.
+const leadOf = (data) => data?.lead?.id ? data.lead : data;
 
 // AI Manager links open a specific CRM tab, e.g. ?tab=sales-team.
 const CRM_TABS = ["records", "reminders", "settings", "sales-team", "performance"];
@@ -206,17 +204,22 @@ function linkedCrmTab(search) {
   return CRM_TABS.includes(tab) ? tab : null;
 }
 
-export default function CrmInbox() {
-  const { wsId } = useParams();
+// member: the shared workspace shell for sales agents and channel partners. The same CRM then works on
+// their permitted leads through the sales portal API, without owner-only administration.
+export default function CrmInbox({ member } = {}) {
+  const params = useParams();
+  const wsId = member?.id || params.wsId;
+  const base = member ? `/workspaces/${wsId}/sales-portal` : `/workspaces/${wsId}/crm`;
   const location = useLocation();
-  const [activeTab, setActiveTab] = useState(() => linkedCrmTab(window.location.search) || "records");
-  useEffect(() => { const tab = linkedCrmTab(location.search); if (tab) setActiveTab(tab); }, [location.search]);
+  const [activeTab, setActiveTab] = useState(() => (!member && linkedCrmTab(window.location.search)) || "records");
+  useEffect(() => { const tab = !member && linkedCrmTab(location.search); if (tab) setActiveTab(tab); }, [location.search, member]);
+  const [accessError, setAccessError] = useState("");
   const [recordsLayout, setRecordsLayout] = useState("list");
   const [pipelineRevision, setPipelineRevision] = useState(0);
   const openLead = async (leadOrId) => {
     const id = typeof leadOrId === "object" ? leadOrId?.id : leadOrId;
     if (!id) return;
-    try { const { data } = await api.get(`/workspaces/${wsId}/crm/leads/${encodeURIComponent(id)}`); selectLead(data); }
+    try { const { data } = await api.get(`${base}/leads/${encodeURIComponent(id)}`); selectLead(leadOf(data)); }
     catch (e) { toast.error(formatError(e.response?.data?.detail)); }
   };
   const [recordView, setRecordView] = useState("active");
@@ -232,7 +235,7 @@ export default function CrmInbox() {
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [salesFilters, setSalesFilters] = useState({});
-  const salesPeople = useSalesPeople(wsId);
+  const salesPeople = useSalesPeople(member ? null : wsId);
   const [createdFrom, setCreatedFrom] = useState("");
   const [createdBefore, setCreatedBefore] = useState("");
   const [debouncedLeadFilters, setDebouncedLeadFilters] = useState({});
@@ -312,8 +315,8 @@ export default function CrmInbox() {
     const id = new URLSearchParams(location.search).get("lead");
     if (!id || loading) return;
     let active = true;
-    api.get(`/workspaces/${wsId}/crm/leads/${encodeURIComponent(id)}`).then(({ data }) => {
-      if (active) { selectLead(data); setActiveTab("records"); }
+    api.get(`${base}/leads/${encodeURIComponent(id)}`).then(({ data }) => {
+      if (active) { selectLead(leadOf(data)); setActiveTab("records"); }
     }).catch((error) => { if (active) toast.error(formatError(error.response?.data?.detail)); });
     return () => { active = false; };
     // Load the full lead once bootstrap fields are available, including leads on other pages.
@@ -363,11 +366,26 @@ export default function CrmInbox() {
     const requestSignal = signal || controller.signal;
     const revision = ++leadRequestRevision.current;
     try {
-      const { data } = await api.get(`/workspaces/${wsId}/crm/leads?${leadListParams().toString()}`, { signal: requestSignal });
-      if (revision === leadRequestRevision.current) applyLeadPage(data);
+      const { data } = await api.get(`${base}/leads?${leadListParams().toString()}`, { signal: requestSignal });
+      if (revision === leadRequestRevision.current) { applyLeadPage(data); setAccessError(""); }
     } catch (e) {
-      if (e.code !== "ERR_CANCELED") toast.error(formatError(e.response?.data?.detail));
+      if (e.code === "ERR_CANCELED") return;
+      if (member) revokeAccess(e);
+      else toast.error(formatError(e.response?.data?.detail));
     }
+  };
+
+  // A revoked membership or reassigned lead must not stay visible from an earlier load.
+  const revokeAccess = (error) => {
+    setLeads([]);
+    setSelectedLead(null);
+    setAccessError(formatError(error.response?.data?.detail || error.message));
+  };
+
+  const loadBootstrap = async (params, signal) => {
+    if (!member) return (await api.get(`${base}/bootstrap?${params.toString()}`, { signal })).data;
+    const [config, page] = await Promise.all([api.get(`${base}/settings`, { signal }), api.get(`${base}/leads?${params.toString()}`, { signal })]);
+    return { settings: { templates: [], organization: {}, ...config.data }, leads: page.data };
   };
 
   const loadAll = async (signal) => {
@@ -375,7 +393,8 @@ export default function CrmInbox() {
     try {
       setLoading(true);
       const params = leadListParams();
-      const { data } = await api.get(`/workspaces/${wsId}/crm/bootstrap?${params.toString()}`, { signal });
+      const data = await loadBootstrap(params, signal);
+      setAccessError("");
       if (revision !== leadRequestRevision.current) return;
       setSettings(data.settings);
       const nextPlivoAgents = data.agents || { agents: [], selected_agent_config_id: "", legacy_environment_agent: null };
@@ -393,7 +412,8 @@ export default function CrmInbox() {
       }
     } catch (e) {
       if (e.code === "ERR_CANCELED") return;
-      toast.error(formatError(e.response?.data?.detail));
+      if (member) revokeAccess(e);
+      else toast.error(formatError(e.response?.data?.detail));
     } finally {
       if (revision === leadRequestRevision.current) setLoading(false);
     }
@@ -451,13 +471,14 @@ export default function CrmInbox() {
       if (document.hidden || pendingLeadSaves.current) return;
       const revision = leadSaveRevision.current;
       try {
-        const r = await api.get(`/workspaces/${wsId}/crm/leads/${selectedLead.id}`);
+        const lead = leadOf((await api.get(`${base}/leads/${selectedLead.id}`)).data);
         if (!cancelled && revision === leadSaveRevision.current && !pendingLeadSaves.current) {
-          setLeads((prev) => prev.map((lead) => lead.id === r.data.id ? r.data : lead));
-          refreshSelectedLead(r.data);
+          setLeads((prev) => prev.map((item) => item.id === lead.id ? lead : item));
+          refreshSelectedLead(lead);
         }
-      } catch {
+      } catch (error) {
         clearInterval(interval);
+        if (member && !cancelled) { setSelectedLead(null); toast.error(formatError(error.response?.data?.detail || "This lead is no longer shared with you")); }
       }
     }, 6000);
     return () => { cancelled = true; clearInterval(interval); };
@@ -529,7 +550,8 @@ export default function CrmInbox() {
   const saveLead = (patch) => {
     if (!selectedLead) return;
     const id = selectedLead.id;
-    const payload = patch || { status: selectedLead.status, field_values: fieldValues };
+    const editable = member ? Object.fromEntries(Object.entries(fieldValues).filter(([key]) => activeFields.some((field) => field.key === key && field.editable !== false))) : fieldValues;
+    const payload = patch || { status: selectedLead.status, field_values: editable };
     pendingLeadSaves.current += 1;
     leadSaveRevision.current += 1;
     leadSaveQueue.current = leadSaveQueue.current.catch(() => {}).then(async () => {
@@ -539,7 +561,7 @@ export default function CrmInbox() {
       const effective = { ...previous, ...payload };
       if (previous.field_values || payload.field_values) effective.field_values = { ...previous.field_values, ...payload.field_values };
       try {
-        const { data } = await api.patch(`/workspaces/${wsId}/crm/leads/${id}`, effective);
+        const data = leadOf((await api.patch(`${base}/leads/${id}`, effective)).data);
         delete failedLeadPatches.current[id];
         setLeads((current) => current.map((lead) => lead.id === id ? data : lead));
         if (activeLeadId.current === id) {
@@ -576,8 +598,8 @@ export default function CrmInbox() {
 
   const changeStatus = async (lead, status) => {
     try {
-      const r = await api.patch(`/workspaces/${wsId}/crm/leads/${lead.id}`, { status });
-      mergeLead(r.data);
+      const r = await api.patch(`${base}/leads/${lead.id}`, { status });
+      mergeLead(leadOf(r.data));
     } catch (e) {
       toast.error(formatError(e.response?.data?.detail));
     }
@@ -587,9 +609,9 @@ export default function CrmInbox() {
     if (!selectedLead) return;
     try {
       setSaving(true);
-      const r = await api.post(`/workspaces/${wsId}/crm/leads/${selectedLead.id}/convert`, { conversion_type: conversionType, payment_plan: paymentPlan });
+      const r = await api.post(`${base}/leads/${selectedLead.id}/convert`, { conversion_type: conversionType, payment_plan: paymentPlan });
       toast.success(conversionType === "single_payment" ? "Customer ready for final invoice" : "Payment plan created");
-      mergeLead(r.data);
+      mergeLead(leadOf(r.data));
     } catch (e) {
       toast.error(formatError(e.response?.data?.detail));
     } finally {
@@ -601,9 +623,9 @@ export default function CrmInbox() {
     if (!selectedLead) return;
     try {
       setSaving(true);
-      const r = await api.patch(`/workspaces/${wsId}/crm/leads/${selectedLead.id}/payment-plan`, paymentPlan);
+      const r = await api.patch(`${base}/leads/${selectedLead.id}/payment-plan`, paymentPlan);
       toast.success("Payment plan saved");
-      mergeLead(r.data);
+      mergeLead(leadOf(r.data));
     } catch (e) {
       toast.error(formatError(e.response?.data?.detail));
     } finally {
@@ -613,8 +635,8 @@ export default function CrmInbox() {
 
   const refreshSelected = async () => {
     if (!selectedLead) return;
-    const r = await api.get(`/workspaces/${wsId}/crm/leads/${selectedLead.id}`);
-    mergeLead(r.data);
+    const r = await api.get(`${base}/leads/${selectedLead.id}`);
+    mergeLead(leadOf(r.data));
   };
 
   const createReceipt = async (receiptPayload = null) => {
@@ -622,10 +644,10 @@ export default function CrmInbox() {
     try {
       setSaving(true);
       const payload = receiptPayload && !receiptPayload.preventDefault ? receiptPayload : receiptForm;
-      const r = await api.post(`/workspaces/${wsId}/crm/leads/${selectedLead.id}/receipts`, payload);
+      const lead = leadOf((await api.post(`${base}/leads/${selectedLead.id}/receipts`, payload)).data);
       toast.success("Receipt generated");
-      mergeLead(r.data);
-      return r.data;
+      mergeLead(lead);
+      return lead;
     } catch (e) {
       toast.error(formatError(e.response?.data?.detail));
     } finally {
@@ -638,7 +660,7 @@ export default function CrmInbox() {
     if (!selectedLead) return;
     try {
       setSaving(true);
-      await api.post(`/workspaces/${wsId}/crm/leads/${selectedLead.id}/final-invoice`, {});
+      await api.post(`${base}/leads/${selectedLead.id}/final-invoice`, {});
       toast.success("Final invoice generated");
       await refreshSelected();
     } catch (e) {
@@ -653,10 +675,10 @@ export default function CrmInbox() {
     try {
       setSaving(true);
       const note = typeof body === "string" ? { body } : body;
-      const r = await api.post(`/workspaces/${wsId}/crm/leads/${selectedLead.id}/notes`, note);
+      const lead = leadOf((await api.post(`${base}/leads/${selectedLead.id}/notes`, note)).data);
       toast.success(note.source === "manual_whatsapp" ? "WhatsApp message marked sent" : "Note added");
-      mergeLead(r.data);
-      return r.data;
+      mergeLead(lead);
+      return lead;
     } catch (e) {
       toast.error(formatError(e.response?.data?.detail));
     } finally {
@@ -851,16 +873,17 @@ export default function CrmInbox() {
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h1 className="font-display text-3xl sm:text-4xl font-bold tracking-tight">CRM</h1>
-          <p className="text-sm text-muted-foreground mt-2">Move leads forward. Keep every follow-up and payment in view.</p>
+          <p className="text-sm text-muted-foreground mt-2">{member ? `Leads ${member.organization || member.name} shared with you. Stages, follow-ups, payments, receipts and invoices you record here update the owner's CRM.` : "Move leads forward. Keep every follow-up and payment in view."}</p>
         </div>
-        <div className="flex rounded-lg border bg-card p-1 w-fit max-w-full overflow-x-auto" role="group" aria-label="CRM sections">
+        {!member && <div className="flex rounded-lg border bg-card p-1 w-fit max-w-full overflow-x-auto" role="group" aria-label="CRM sections">
           <TabButton active={activeTab === "records"} onClick={() => setActiveTab("records")} icon={Users} label="Records" />
           <TabButton active={activeTab === "reminders"} onClick={() => { setActiveTab("reminders"); setSelectedLead(null); }} icon={Calendar} label="Follow-up" />
           <TabButton active={activeTab === "settings"} onClick={() => setActiveTab("settings")} icon={Settings} label="Settings" />
           <TabButton active={activeTab === "sales-team"} onClick={() => setActiveTab("sales-team")} icon={Users} label="Sales team" />
           <TabButton active={activeTab === "performance"} onClick={() => setActiveTab("performance")} icon={CheckCircle2} label="Performance" />
-        </div>
+        </div>}
       </div>
+      {accessError && <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{accessError}<button type="button" onClick={() => loadAll()} className="ml-3 underline">Retry</button></div>}
 
       {activeTab === "sales-team" ? <SalesTeam wsId={wsId} /> : activeTab === "reminders" ? <CrmReminders wsId={wsId} onOpenLead={async (id) => { await openLead(id); setActiveTab("records"); }} /> : activeTab === "performance" ? <Suspense fallback={<div className="rounded-xl border bg-card p-8 text-sm text-muted-foreground">Loading performance…</div>}><CrmPerformance wsId={wsId} states={states} /></Suspense> : activeTab === "settings" ? (
         <SettingsPanel
@@ -895,10 +918,10 @@ export default function CrmInbox() {
             <div className="flex flex-wrap gap-1.5 w-full sm:w-auto">
               <FilterButton active={recordView === "active" && statusFilter === "all"} onClick={() => { setRecordView("active"); setStatusFilter("all"); setPage(1); }}>All Leads</FilterButton>
               {states.map((state) => <FilterButton key={state.key} active={recordView === "active" && statusFilter === state.key} onClick={() => { setRecordView("active"); setStatusFilter(state.key); setPage(1); }}>{state.label}</FilterButton>)}
-              <FilterButton active={recordView === "trash"} onClick={() => { setRecordView("trash"); setStatusFilter("all"); setPage(1); }}><Trash2 className="w-3.5 h-3.5" /> Trash</FilterButton>
+              {!member && <FilterButton active={recordView === "trash"} onClick={() => { setRecordView("trash"); setStatusFilter("all"); setPage(1); }}><Trash2 className="w-3.5 h-3.5" /> Trash</FilterButton>}
             </div>
             <div className="flex shrink-0 lg:justify-end">
-              <button onClick={openCreateLead} className="inline-flex items-center justify-center gap-2 px-5 h-11 rounded-lg bg-primary text-primary-foreground text-sm font-semibold whitespace-nowrap"><Plus className="w-4 h-4" /> New Lead</button>
+              <button onClick={member ? () => setShowCreateLead(true) : openCreateLead} className="inline-flex items-center justify-center gap-2 px-5 h-11 rounded-lg bg-primary text-primary-foreground text-sm font-semibold whitespace-nowrap"><Plus className="w-4 h-4" /> {member ? "Referral / marketing lead" : "New Lead"}</button>
             </div>
           </div>
 
@@ -916,20 +939,20 @@ export default function CrmInbox() {
           </div>
           {dateFilters.error && <p role="alert" className="text-sm text-destructive">{dateFilters.error} The date filter has not been applied.</p>}
 
-          <div className="grid sm:grid-cols-3 gap-3">
+          {!member && <div className="grid sm:grid-cols-3 gap-3">
             {[["sales_agent_id", "Sales agent", "sales_agent"], ["channel_partner_id", "Channel partner", "channel_partner"], ["introduced_by_id", "Lead brought by", null]].map(([key, label, role]) => <label key={key} className="text-xs font-medium text-muted-foreground">{label}<select value={salesFilters[key] || ""} onChange={(event) => { setSalesFilters({ ...salesFilters, [key]: event.target.value }); setPage(1); }} className="mt-1 h-10 w-full rounded-lg border bg-background px-3 text-sm text-foreground"><option value="">All</option>{salesPeople.filter((person) => !role || person.role === role).map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></label>)}
-          </div>
+          </div>}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-1 rounded-lg bg-muted p-1" role="group" aria-label="Record views">{["list", "kanban"].map((view) => <button key={view} aria-pressed={recordsLayout === view} onClick={() => { setRecordsLayout(view); if (view === "kanban") setRecordView("active"); }} className={`min-h-9 px-4 rounded-md text-sm font-medium ${recordsLayout === view ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>{view === "list" ? "List" : "Pipeline"}</button>)}</div>
-            <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-muted-foreground">
+            {!member && <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-muted-foreground">
               <Link to={`/app/w/${wsId}/workflows/ads-to-crm`} className="inline-flex items-center min-h-9 underline underline-offset-4 hover:text-foreground">Lead source mapping</Link>
               <Link to={`/app/w/${wsId}/qualification`} className="inline-flex items-center min-h-9 underline underline-offset-4 hover:text-foreground">Voice qualification settings</Link>
-            </div>
+            </div>}
           </div>
           <div className={`grid gap-6 items-start ${selectedLead && (recordsLayout !== "kanban" || recordView === "trash") ? "xl:grid-cols-[minmax(0,1fr)_560px]" : "grid-cols-1"}`}>
             <div className="space-y-3 min-w-0">
-              {recordsLayout === "kanban" && recordView !== "trash" ? <CrmPipeline tagLibrary={settings.tag_library} wsId={wsId} states={states} filters={debouncedLeadFilters} statusFilter={statusFilter} onSelect={openLead} revision={pipelineRevision} onChanged={(lead) => { setPipelineRevision((v) => v + 1); setSelectedLead((old) => old?.id === lead.id ? lead : old); loadAll(); }} /> : <>
-              <LeadTable tagLibrary={settings.tag_library} wsId={wsId} leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} canCallWithAI={hasCallableAgent} onSelect={openLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
+              {recordsLayout === "kanban" && recordView !== "trash" ? <CrmPipeline tagLibrary={settings.tag_library} wsId={wsId} apiBase={base} states={states} filters={debouncedLeadFilters} statusFilter={statusFilter} onSelect={openLead} revision={pipelineRevision} onChanged={(lead) => { setPipelineRevision((v) => v + 1); setSelectedLead((old) => old?.id === lead.id ? lead : old); loadAll(); }} /> : <>
+              <LeadTable tagLibrary={settings.tag_library} wsId={wsId} apiBase={base} member={member} leads={leads} fields={activeFields} states={states} selectedLead={selectedLead} loading={loading} trashed={recordView === "trash"} callingLeadId={callingLeadId} canCallWithAI={hasCallableAgent} onSelect={openLead} onStatus={changeStatus} onTrash={trashLead} onRestore={restoreLead} onCall={callLead} />
               <Pagination page={page} totalPages={totalPages} total={pagination.total} onPage={setPage} />
               </>}
             </div>
@@ -977,11 +1000,14 @@ export default function CrmInbox() {
                 restoreLead={restoreLead}
                 close={() => setSelectedLead(null)}
                 wsId={wsId}
+                apiBase={base}
+                member={member}
                 onOpportunityUpdated={(lead) => { mergeLead(lead); setPipelineRevision((value) => value + 1); }}
               />
             )}
           </div>
-          {showCreateLead && (
+          {showCreateLead && member && <ReferralLeadDialog apiBase={base} onClose={() => setShowCreateLead(false)} onCreated={async (lead) => { setShowCreateLead(false); setRecordView("active"); setStatusFilter("all"); setPage(1); await loadAll(); openLead(lead.id); }} />}
+          {showCreateLead && !member && (
             <CreateLeadDialog
               wsId={wsId}
               people={salesPeople}
@@ -1039,9 +1065,9 @@ function AgentCallSelector({ agents, selectedAgentId, setSelectedAgentId }) {
   );
 }
 
-function LeadTable({ wsId, leads, fields, states, selectedLead, loading, trashed, callingLeadId, canCallWithAI, onSelect, onStatus, onTrash, onRestore, onCall, tagLibrary }) {
+function LeadTable({ wsId, apiBase, member, leads, fields, states, selectedLead, loading, trashed, callingLeadId, canCallWithAI, onSelect, onStatus, onTrash, onRestore, onCall, tagLibrary }) {
   const primaryFields = fields.slice(0, 4);
-  const snapshots = useFollowUpSnapshots(wsId, trashed ? [] : leads.map((lead) => lead.id));
+  const snapshots = useFollowUpSnapshots(wsId, trashed ? [] : leads.map((lead) => lead.id), apiBase);
   return (
     <div className={`rounded-xl border bg-card overflow-hidden ${loading ? "opacity-60" : ""}`}>
       <div className="overflow-x-auto">
@@ -1083,7 +1109,7 @@ function LeadTable({ wsId, leads, fields, states, selectedLead, loading, trashed
                         {canCallWithAI && <button onClick={() => onCall(lead)} disabled={!values.phone || callingLeadId === lead.id || isJunk} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40" title={isJunk ? "Junk leads cannot be called" : values.phone ? "Call with AI" : "Phone number required"} aria-label={`Call ${values.full_name || values.phone || "lead"} with AI`}>
                           {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
                         </button>}
-                        <button onClick={() => onTrash(lead)} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-foreground/70 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title="Move lead to trash" aria-label={`Move ${values.full_name || values.phone || "lead"} to trash`}><Trash2 className="w-4 h-4" /></button>
+                        {!member && <button onClick={() => onTrash(lead)} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-foreground/70 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title="Move lead to trash" aria-label={`Move ${values.full_name || values.phone || "lead"} to trash`}><Trash2 className="w-4 h-4" /></button>}
                       </div>
                     )}
                   </td>
@@ -1092,7 +1118,7 @@ function LeadTable({ wsId, leads, fields, states, selectedLead, loading, trashed
                   <td colSpan="4" className="px-4 py-2.5">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0 flex-1"><p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Follow-up</p><FollowUpSnapshot snapshot={snapshots[lead.id]} /></div>
-                      <FollowUpAction wsId={wsId} lead={lead} snapshot={snapshots[lead.id]} compact />
+                      <FollowUpAction wsId={wsId} apiBase={apiBase} lead={lead} snapshot={snapshots[lead.id]} compact />
                     </div>
                   </td>
                 </tr>}
@@ -1107,7 +1133,7 @@ function LeadTable({ wsId, leads, fields, states, selectedLead, loading, trashed
 }
 
 function LeadDetail(props) {
-  const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, addLeadNote, deleteLeadNote, callingLeadId, canCallWithAI, cancellingCallId, callLead, cancelScheduledCall, trashLead, restoreLead, close, wsId, onOpportunityUpdated } = props;
+  const { lead, fields, states, values, setValues, setLead, saving, saveLead, conversionType, setConversionType, convertLead, paymentPlan, setPaymentPlan, savePlan, receiptForm, setReceiptForm, createReceipt, createInvoice, addLeadNote, deleteLeadNote, callingLeadId, canCallWithAI, cancellingCallId, callLead, cancelScheduledCall, trashLead, restoreLead, close, wsId, apiBase, member, onOpportunityUpdated } = props;
   const [detailTab, setDetailTab] = useState("Details");
   const [activeStageId, setActiveStageId] = useState("");
   const [whatsappOpen, setWhatsappOpen] = useState(false);
@@ -1217,22 +1243,22 @@ function LeadDetail(props) {
                 {canCallWithAI && <button onClick={() => callLead(lead)} disabled={saving || !values.phone || callingLeadId === lead.id || isJunkLead} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-accent text-muted-foreground disabled:opacity-50" title={isJunkLead ? "Junk leads cannot be called" : values.phone ? "Call with AI" : "Phone number required"}>
                   {callingLeadId === lead.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneCall className="w-4 h-4" />}
                 </button>}
-                <button onClick={() => trashLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-50" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>
+                {!member && <button onClick={() => trashLead(lead)} disabled={saving} className="grid place-items-center w-9 h-9 rounded-lg border bg-background hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-50" title="Move lead to trash"><Trash2 className="w-4 h-4" /></button>}
               </>
             )}
             <button onClick={close} className="p-1 rounded-lg hover:bg-accent text-muted-foreground" title="Close details"><XCircle className="w-5 h-5" /></button>
           </div>
         </div>
         <LeadWhatsAppCompose open={whatsappOpen} onOpenChange={setWhatsappOpen} phone={values.phone || lead.phone} leadName={values.full_name || lead.full_name} onMarkSent={addLeadNote} />
-        <LeadSmsCompose open={smsOpen} onOpenChange={setSmsOpen} wsId={wsId} lead={lead} />
-        {(lead.customer_id || isCustomer || lead.status === "won") && <div className="rounded-lg border p-4 text-sm space-y-2"><Link className="font-semibold text-primary" to={`/app/w/${wsId}/customers`}>View customer lifecycle & LTV</Link>{lead.customer_id && <p className="text-muted-foreground">Linked {lead.opportunity_kind || "repeat"} opportunity · {lead.repeat_request}</p>}</div>}
+        <LeadSmsCompose open={smsOpen} onOpenChange={setSmsOpen} wsId={wsId} lead={lead} apiBase={member ? `${apiBase}/sms` : undefined} />
+        {!member && (lead.customer_id || isCustomer || lead.status === "won") && <div className="rounded-lg border p-4 text-sm space-y-2"><Link className="font-semibold text-primary" to={`/app/w/${wsId}/customers`}>View customer lifecycle & LTV</Link>{lead.customer_id && <p className="text-muted-foreground">Linked {lead.opportunity_kind || "repeat"} opportunity · {lead.repeat_request}</p>}</div>}
         {isTrashed && <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs text-destructive">This lead is in trash and can be restored until {formatDate(lead.delete_after)}.</div>}
         <div className="flex gap-1 overflow-x-auto rounded-lg border bg-card p-1" role="group" aria-label="Lead sections">
           {DETAIL_TABS.map((tab) => <button key={tab} data-update={tab === "AI Insights" ? "lead-insights" : undefined} aria-pressed={detailTab === tab} onClick={() => setDetailTab(tab)} className={`px-3 h-9 rounded-md text-xs font-semibold whitespace-nowrap ${detailTab === tab ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{tab}</button>)}
         </div>
-        {detailTab === "AI Insights" && !isTrashed && <LeadSalesInsights wsId={wsId} leadId={lead.id}/> }
-        {detailTab === "Qualification" && <>{lead.auto_qualification_enabled === false && <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">Automatic AI call was skipped when this lead was added. You can still use Call with AI when needed.</p>}<LeadQualificationPanel key={lead.id} lead={lead} /><QualificationSummary communication={communication} qualification={qualification} saving={saving || cancellingCallId === lead.id} onCancel={() => cancelScheduledCall(lead)} /></>}
-        {detailTab === "Follow-up" && (isTrashed ? <p className="text-sm text-muted-foreground">Restore this lead to plan follow-ups.</p> : <CrmReminders wsId={wsId} leadId={lead.id} />)}
+        {detailTab === "AI Insights" && !isTrashed && <LeadSalesInsights wsId={wsId} leadId={lead.id} apiBase={member ? apiBase : undefined} /> }
+        {detailTab === "Qualification" && <>{lead.auto_qualification_enabled === false && <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">{member ? "Automatic AI call was skipped when this lead was added." : "Automatic AI call was skipped when this lead was added. You can still use Call with AI when needed."}</p>}<LeadQualificationPanel key={lead.id} lead={lead} readOnly={Boolean(member)} apiBase={member ? `${apiBase}/qualification` : undefined} /><QualificationSummary communication={communication} qualification={qualification} saving={saving || cancellingCallId === lead.id} onCancel={member ? undefined : () => cancelScheduledCall(lead)} /></>}
+        {detailTab === "Follow-up" && (isTrashed ? <p className="text-sm text-muted-foreground">Restore this lead to plan follow-ups.</p> : <CrmReminders key={lead.id} wsId={wsId} leadId={lead.id} apiBase={member ? apiBase : undefined} notifications={!member} />)}
         {detailTab === "Payments" && !isCustomer && <p className="text-sm text-muted-foreground">Convert this lead to a customer in Details to manage payments.</p>}
 
         {detailTab === "Details" && (
@@ -1241,13 +1267,15 @@ function LeadDetail(props) {
               {!isCustomer ? <><select aria-label="Payment mode" value={conversionType} onChange={(e) => setConversionType(e.target.value)} className="h-9 px-3 rounded-lg border bg-background text-sm"><option value="single_payment">Single Payment</option><option value="payment_plan">Payment Plan</option></select><button onClick={convertLead} disabled={saving} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-accent hover:bg-accent/80 text-sm font-semibold disabled:opacity-50"><CheckCircle2 className="w-4 h-4" /> Convert Lead</button></> : <p className="text-xs text-muted-foreground">Customer · {lead.conversion_type === "single_payment" ? "Single Payment" : "Payment Plan"}</p>}
             </div>
             <div className="grid sm:grid-cols-2 gap-3">
-              {fields.map((field) => field.key === "assigned_salesperson" && lead.sales_assignment && "sales_agent_id" in lead.sales_assignment ? <ReadOnlyValue key={field.key} label={field.label} value={lead.sales_assignment.sales_agent_id ? lead.sales_assignment.sales_agent_name || "Assigned agent" : "Unassigned"} /> : <DynamicField key={field.key} field={field} value={values[field.key] || ""} onChange={(v) => setField(field.key, v)} onBlur={() => props.saveField(field.key, values[field.key] ?? "")} />)}
+              {fields.map((field) => field.editable === false ? <ReadOnlyValue key={field.key} label={field.label} value={values[field.key] || "Not provided"} /> : field.key === "assigned_salesperson" && lead.sales_assignment && "sales_agent_id" in lead.sales_assignment ? <ReadOnlyValue key={field.key} label={field.label} value={lead.sales_assignment.sales_agent_id ? lead.sales_assignment.sales_agent_name || "Assigned agent" : "Unassigned"} /> : <DynamicField key={field.key} field={field} value={values[field.key] || ""} onChange={(v) => setField(field.key, v)} onBlur={() => props.saveField(field.key, values[field.key] ?? "")} />)}
             </div>
-            <p role="status" className="text-xs text-muted-foreground">{saving ? "Saving changes..." : "Core details save automatically when you leave a field."}</p>
+            {member && <div className="grid sm:grid-cols-2 gap-3">{[["Assigned salesperson", lead.assigned_salesperson || "Unassigned"], ["Channel partner", lead.sales_assignment?.channel_partner_name], ["Source", lead.source], ["Property", lead.property_name]].map(([label, value]) => <ReadOnlyValue key={label} label={label} value={value || "Not provided"} />)}</div>}
+            <p role="status" className="text-xs text-muted-foreground">{saving ? "Saving changes..." : member ? "Contact details save automatically when you leave a field. Phone, source and assignment are managed by the workspace owner." : "Core details save automatically when you leave a field."}</p>
             {props.leadSaveError && <div role="alert" className="text-sm text-destructive">{props.leadSaveError} <button type="button" onClick={() => saveLead()} className="underline">Retry saving</button></div>}
             <label className="block space-y-1.5"><span className="text-xs font-semibold text-muted-foreground uppercase">State</span><select aria-label="Lead state" value={lead.status} onChange={(e) => setStatus(e.target.value)} className="w-full sm:max-w-sm h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary">{states.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}</select></label>
-            <LeadLabels wsId={wsId} lead={lead} library={props.tagLibrary} onLibraryUpdated={props.onTagLibraryUpdated} onUpdated={props.onLabelsUpdated} disabled={saving || isTrashed} />
+            {member ? lead.tags?.length > 0 && <LeadTagBadges tags={lead.tags} library={props.tagLibrary} /> : <LeadLabels wsId={wsId} lead={lead} library={props.tagLibrary} onLibraryUpdated={props.onTagLibraryUpdated} onUpdated={props.onLabelsUpdated} disabled={saving || isTrashed} />}
             <LeadAttribution lead={lead} />
+            {!member && <>
             <MetaAttribution lead={lead} wsId={wsId} onUpdate={setLead} />
             {!isTrashed && <SalesAssignment wsId={wsId} lead={lead} onUpdated={setLead} />}
             {!isTrashed && <ShareLead wsId={wsId} lead={lead} onUpdated={setLead} />}
@@ -1256,6 +1284,7 @@ function LeadDetail(props) {
               <span><span className="block text-sm font-semibold">Test lead</span><span className="block text-xs text-muted-foreground mt-1">{saving ? "Saving..." : lead.is_test_lead ? "Saved as a test lead. Excluded from performance reports, sales metrics and pipeline value." : "Select to exclude this lead from performance reports, sales metrics and pipeline value. Saves automatically."} Uncheck to include it again.</span></span>
             </label>
             {!isTrashed && <OpportunitySelector wsId={wsId} lead={lead} onUpdated={onOpportunityUpdated} />}
+            </>}
           </section>
         )}
 
@@ -1304,8 +1333,8 @@ function LeadDetail(props) {
                     <textarea value={activeStage.description || ""} onChange={(e) => updateStage(activeStageIndex, "description", e.target.value)} placeholder="Transaction description" rows={2} className="w-full px-3 py-2 rounded-lg border bg-background text-sm" />
                     <div className="flex flex-wrap gap-2">
                       <button onClick={() => makeStageReceipt(activeStage)} disabled={saving || activeStage.status === "paid" || (activeStageIndex > 0 && paymentPlan.stages[activeStageIndex - 1]?.status !== "paid") || !numericAmount(activeStage.amount) || numericAmount(activeStage.amount) > activeBalance} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><ReceiptText className="w-4 h-4" /> Generate Receipt & Continue</button>
-                      {activeStageReceipt && <AuthenticatedDocumentLink href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${activeStageReceipt.id}/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Receipt</AuthenticatedDocumentLink>}
-                      {activeStageReceipt && <AuthenticatedDocumentLink href={receiptDownloadUrl(wsId, lead.id, activeStageReceipt.id)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download Receipt</AuthenticatedDocumentLink>}
+                      {activeStageReceipt && <AuthenticatedDocumentLink href={receiptUrl(apiBase, lead.id, activeStageReceipt.id)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Receipt</AuthenticatedDocumentLink>}
+                      {activeStageReceipt && <AuthenticatedDocumentLink href={receiptUrl(apiBase, lead.id, activeStageReceipt.id, "pdf")} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download Receipt</AuthenticatedDocumentLink>}
                     </div>
                   </div>
                 )}
@@ -1332,8 +1361,8 @@ function LeadDetail(props) {
             <textarea value={receiptForm.description} onChange={(e) => setReceiptForm({ ...receiptForm, description: e.target.value })} placeholder="Payment description" rows={2} className="w-full px-3 py-2 rounded-lg border bg-background text-sm" />
             <div className="flex flex-wrap gap-2">
               <button onClick={() => createReceipt({ ...receiptForm, amount: receiptForm.paid_amount, payment_stage: "Single Payment" })} disabled={saving || !numericAmount(receiptForm.total_amount) || !numericAmount(receiptForm.paid_amount) || numericAmount(receiptForm.paid_amount) > numericAmount(receiptForm.total_amount) - numericAmount(receiptForm.existing_paid)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><ReceiptText className="w-4 h-4" /> Generate Receipt</button>
-              {singlePaymentReceipt && <AuthenticatedDocumentLink href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${singlePaymentReceipt.id}/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Receipt</AuthenticatedDocumentLink>}
-              {singlePaymentReceipt && <AuthenticatedDocumentLink href={receiptDownloadUrl(wsId, lead.id, singlePaymentReceipt.id)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download Receipt</AuthenticatedDocumentLink>}
+              {singlePaymentReceipt && <AuthenticatedDocumentLink href={receiptUrl(apiBase, lead.id, singlePaymentReceipt.id)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Receipt</AuthenticatedDocumentLink>}
+              {singlePaymentReceipt && <AuthenticatedDocumentLink href={receiptUrl(apiBase, lead.id, singlePaymentReceipt.id, "pdf")} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download Receipt</AuthenticatedDocumentLink>}
             </div>
           </section>
         )}
@@ -1341,23 +1370,23 @@ function LeadDetail(props) {
         {detailTab === "Receipts" && isCustomer && (
           <section className="space-y-3">
             <h4 className="font-bold flex items-center gap-2"><ReceiptText className="w-4 h-4 text-primary" /> Receipt History</h4>
-            <div className="grid gap-2">{(lead.receipts || []).length === 0 ? <div className="text-xs text-muted-foreground p-3 rounded-lg border border-dashed">No payment transactions yet.</div> : (lead.receipts || []).map((receipt) => <div key={receipt.id} className="flex items-center justify-between gap-3 p-3 rounded-lg border bg-background hover:bg-accent text-sm"><AuthenticatedDocumentLink href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${receipt.id}/html`} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate"><span>{receipt.receipt_number} - {receipt.transaction_id || "No transaction ID"} - {receipt.payment_stage}</span></AuthenticatedDocumentLink><div className="flex items-center gap-2"><AuthenticatedDocumentLink href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/receipts/${receipt.id}/html`} target="_blank" rel="noreferrer" className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Open receipt"><ExternalLink className="w-4 h-4" /></AuthenticatedDocumentLink><AuthenticatedDocumentLink href={receiptDownloadUrl(wsId, lead.id, receipt.id)} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Download receipt"><Download className="w-4 h-4" /></AuthenticatedDocumentLink></div></div>)}</div>
+            <div className="grid gap-2">{(lead.receipts || []).length === 0 ? <div className="text-xs text-muted-foreground p-3 rounded-lg border border-dashed">No payment transactions yet.</div> : (lead.receipts || []).map((receipt) => <div key={receipt.id} className="flex items-center justify-between gap-3 p-3 rounded-lg border bg-background hover:bg-accent text-sm"><AuthenticatedDocumentLink href={receiptUrl(apiBase, lead.id, receipt.id)} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate"><span>{receipt.receipt_number} - {receipt.transaction_id || "No transaction ID"} - {receipt.payment_stage}</span></AuthenticatedDocumentLink><div className="flex items-center gap-2"><AuthenticatedDocumentLink href={receiptUrl(apiBase, lead.id, receipt.id)} target="_blank" rel="noreferrer" className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Open receipt"><ExternalLink className="w-4 h-4" /></AuthenticatedDocumentLink><AuthenticatedDocumentLink href={receiptUrl(apiBase, lead.id, receipt.id, "pdf")} className="grid place-items-center w-8 h-8 rounded-lg border bg-background hover:bg-accent text-muted-foreground" title="Download receipt"><Download className="w-4 h-4" /></AuthenticatedDocumentLink></div></div>)}</div>
           </section>
         )}
 
-        {detailTab === "Notes" && <LeadNotes key={lead.id} notes={lead.lead_notes || []} saving={saving} onAdd={addLeadNote} onDelete={deleteLeadNote} />}
+        {detailTab === "Notes" && <LeadNotes key={lead.id} notes={lead.lead_notes || []} saving={saving} onAdd={addLeadNote} onDelete={member ? undefined : deleteLeadNote} />}
 
         {detailTab === "Invoice" && isCustomer && (
           <section className="space-y-3">
             <h4 className="font-bold flex items-center gap-2"><FileText className="w-4 h-4 text-primary" /> Final Invoice</h4>
             <div className="text-xs text-muted-foreground rounded-lg border bg-background p-3">{canInvoice ? "All payment stages are paid. Final invoice can be generated." : "Generate receipts and mark every payment stage paid to enable final invoice."}</div>
-            <div className="flex flex-wrap gap-2"><button onClick={createInvoice} disabled={saving || !canInvoice} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><FileText className="w-4 h-4" /> Generate Final Invoice</button>{lead.final_invoice?.id && <AuthenticatedDocumentLink href={`${API}/workspaces/${wsId}/crm/leads/${lead.id}/final-invoice/html`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Invoice</AuthenticatedDocumentLink>}{lead.final_invoice?.id && <AuthenticatedDocumentLink href={finalInvoiceDownloadUrl(wsId, lead.id)} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download PDF</AuthenticatedDocumentLink>}</div>
+            <div className="flex flex-wrap gap-2"><button onClick={createInvoice} disabled={saving || !canInvoice} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50"><FileText className="w-4 h-4" /> Generate Final Invoice</button>{lead.final_invoice?.id && <AuthenticatedDocumentLink href={finalInvoiceUrl(apiBase, lead.id)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><ExternalLink className="w-4 h-4" /> Open Invoice</AuthenticatedDocumentLink>}{lead.final_invoice?.id && <AuthenticatedDocumentLink href={finalInvoiceUrl(apiBase, lead.id, "pdf")} className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border bg-background hover:bg-accent text-sm font-semibold"><Download className="w-4 h-4" /> Download PDF</AuthenticatedDocumentLink>}</div>
             {lead.final_invoice?.id && (
               <div className="grid gap-2">
                 {invoiceReceipts.map((receipt) => (
                   <div key={receipt.id} className="flex items-center justify-between gap-3 p-3 rounded-lg border bg-background text-sm">
                     <span className="min-w-0 flex-1 truncate">{receipt.receipt_number} - {receipt.payment_stage}</span>
-                    <AuthenticatedDocumentLink href={receiptDownloadUrl(wsId, lead.id, receipt.id)} className="inline-flex items-center gap-2 px-3 h-8 rounded-lg border bg-background hover:bg-accent text-xs font-semibold"><Download className="w-4 h-4" /> Download Receipt</AuthenticatedDocumentLink>
+                    <AuthenticatedDocumentLink href={receiptUrl(apiBase, lead.id, receipt.id, "pdf")} className="inline-flex items-center gap-2 px-3 h-8 rounded-lg border bg-background hover:bg-accent text-xs font-semibold"><Download className="w-4 h-4" /> Download Receipt</AuthenticatedDocumentLink>
                   </div>
                 ))}
               </div>
@@ -1425,15 +1454,6 @@ export function CreateLeadDialog({ wsId, fields, values, setValues, saving, onCr
   );
 }
 
-function DynamicField({ field, value, onChange, onBlur }) {
-  const common = "w-full h-10 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary";
-  const label = <span className="text-xs font-semibold text-muted-foreground uppercase">{field.label}{field.required && <span className="text-destructive"> *</span>}</span>;
-  if (field.type === "long_text" || field.type === "json") return <label onBlur={onBlur} className="space-y-1.5 sm:col-span-2">{label}<textarea aria-label={field.label} value={value} onChange={(e) => onChange(e.target.value)} rows={3} className="w-full px-3 py-2 rounded-lg border bg-background text-sm" /></label>;
-  if (field.type === "boolean") return <label onBlur={onBlur} className="space-y-1.5">{label}<select aria-label={field.label} value={value ? "true" : "false"} onChange={(e) => onChange(e.target.value === "true")} className={common}><option value="false">No</option><option value="true">Yes</option></select></label>;
-  if (field.type === "select") return <label onBlur={onBlur} className="space-y-1.5">{label}<select aria-label={field.label} value={value} onChange={(e) => onChange(e.target.value)} className={common}><option value="">Select</option>{(field.options || []).map((o) => <option key={o} value={o}>{o}</option>)}</select></label>;
-  const type = field.type === "email" ? "email" : field.type === "phone" ? "tel" : field.type === "number" || field.type === "currency" ? "number" : field.type === "date" ? "date" : field.type === "datetime" ? "datetime-local" : field.type === "url" ? "url" : "text";
-  return <label onBlur={onBlur} className="space-y-1.5">{label}<input aria-label={field.label} type={type} value={value} onChange={(e) => onChange(e.target.value)} className={common} /></label>;
-}
 function SmallInput({ label, value, onChange }) {
   return <label className="space-y-1 block"><span className="text-[11px] font-semibold text-muted-foreground uppercase">{label}</span><input value={value} onChange={(e) => onChange(e.target.value)} className="h-9 px-2 text-xs w-full rounded-lg border bg-background focus:outline-none focus:ring-1 focus:ring-primary" /></label>;
 }

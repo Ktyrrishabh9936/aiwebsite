@@ -22,6 +22,16 @@ const allSections = [
   { name: "Settings", icon: Settings, description: "Workspace setup", prompt: "Show my workspace settings, stages and tags.", color: "#c4aafa" },
 ];
 
+// Shared sales members work only on the leads shared with them.
+const memberSections = [
+  { name: "CRM", icon: Users, description: "Your shared leads", prompt: "Which of my leads need attention today, and why?", color: "#9edbb1" },
+  { name: "Customers", icon: HandCoins, description: "Payments and receipts", prompt: "Which of my customers still have payments due?", color: "#f1c28f" },
+  { name: "Performance", icon: LayoutDashboard, description: "Your sales results", prompt: "How am I doing on my assigned leads and sales?", color: "#a9bfff" },
+  { name: "Help", icon: Sparkles, description: "How Arevei works", prompt: "How do I record a payment and generate a receipt?", color: "#c4aafa" },
+];
+
+export const isSharedMember = (ws) => Boolean(ws?.access_role) && ws.access_role !== "owner";
+
 export function workspaceSections(modules) {
   // Matches backend workspace_modules defaults: real estate on, agency off.
   const enabled = { real_estate: true, agency: false, ...(modules || {}) };
@@ -30,7 +40,8 @@ export function workspaceSections(modules) {
 
 export function AgentWorkspace({ ws, active }) {
   const status = useAiStatus(ws);
-  const sections = workspaceSections(ws.modules);
+  const shared = isSharedMember(ws);
+  const sections = shared ? memberSections : workspaceSections(ws.modules);
   const step = 360 / sections.length;
   const [selected, setSelected] = useState(null);
   const [showWorkspace, setShowWorkspace] = useState(false);
@@ -210,9 +221,9 @@ export function AgentWorkspace({ ws, active }) {
 
       <section ref={conversationRef} className="agent-conversation" aria-label="AI manager conversation">
         <header className="agent-chat-heading"><span className="agent-chat-mark"><Sparkles size={20} /></span><div><h2>AI Manager</h2><p role="status">{statusLabel}</p></div><span className="agent-chat-tag">AGENT MODE</span></header>
-        <div className="agent-focus"><span>Conversation focus</span><button onClick={() => selectSection(null)} title="Reset to whole workspace">{selected?.name || "Whole workspace"}{selected && " ×"}</button></div>
+        <div className="agent-focus"><span>Conversation focus</span><button onClick={() => selectSection(null)} title={shared ? "Reset to all your leads" : "Reset to whole workspace"}>{selected?.name || (shared ? "All your shared leads" : "Whole workspace")}{selected && " ×"}</button></div>
         <div className="agent-messages" ref={scrollRef} role="log" aria-label="Messages" aria-live="polite" aria-busy={busy}>
-          {!messages.length && <div className="agent-welcome"><span className="agent-eyebrow">LET’S MAKE THINGS HAPPEN</span><h3>What would you like<br />to work on?</h3><p>I’m your AI manager for {ws.name}. Talk to me about your business, explore a section, or tell me what you want to achieve.</p><div className="agent-suggestions">{["What should I focus on today?", "Which customers still owe payments?", "What can Arevei do for my business?"].map((prompt) => <button key={prompt} onClick={() => { setInput(prompt); inputRef.current?.focus(); }}>{prompt}<span>↗</span></button>)}</div></div>}
+          {!messages.length && <div className="agent-welcome"><span className="agent-eyebrow">LET’S MAKE THINGS HAPPEN</span><h3>What would you like<br />to work on?</h3><p>{shared ? `I’m your AI assistant for the leads ${ws.organization || ws.name} shared with you. I can update stages, notes, follow-ups, payments, receipts and invoices on those leads.` : `I’m your AI manager for ${ws.name}. Talk to me about your business, explore a section, or tell me what you want to achieve.`}</p><div className="agent-suggestions">{(shared ? ["Which of my leads should I call today?", "Which of my customers still owe payments?", "Plan follow-ups for my overdue leads"] : ["What should I focus on today?", "Which customers still owe payments?", "What can Arevei do for my business?"]).map((prompt) => <button key={prompt} onClick={() => { setInput(prompt); inputRef.current?.focus(); }}>{prompt}<span>↗</span></button>)}</div></div>}
           {messages.map((message, i) => <div key={i} className={`agent-message ${message.role}`}><div className="agent-message-label">{message.role === "user" ? "You" : "AI Manager"}{message.section && ` · ${message.section}`}</div>{message.content ? <ChatText text={message.content} /> : <span className="agent-thinking"><Loader2 size={16} className="animate-spin" /> Thinking…</span>}</div>)}
         </div>
         <form className="agent-composer" onSubmit={send}>

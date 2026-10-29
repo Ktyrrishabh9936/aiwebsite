@@ -83,25 +83,34 @@ class ManagerTools(PageTools):
         if not row: raise HTTPException(404, "Active lead not found in this workspace")
         return row
 
+    registry = REGISTRY
+
+    async def authorize(self):
+        """Re-checked before every tool call so revoked access stops a running request."""
+        from auth import get_current_user_and_workspace
+        await get_current_user_and_workspace(self.request, self.db, self.ws_id)
+
     async def execute(self, name, args):
-        if name not in REGISTRY: raise ValueError("Unknown manager tool")
-        schema = REGISTRY[name]["schema"]["function"]["parameters"]
+        if name not in self.registry: raise ValueError("Unknown manager tool")
+        schema = self.registry[name]["schema"]["function"]["parameters"]
         # Models often send null for omitted optional fields; drop them unless the field accepts null.
         args = {key: value for key, value in args.items() if value is not None or "null" in str(schema["properties"].get(key, {}).get("type", ""))}
         validate(args, schema)
-        from auth import get_current_user_and_workspace
-        await get_current_user_and_workspace(self.request, self.db, self.ws_id)
-        from crm import doc_out, ensure_crm_settings
-        from crm_workspace import ReminderInput, ReminderStatus
+        await self.authorize()
         if "lead_id" in args:
             await self.lead(args["lead_id"])
-            if REGISTRY[name]["writes"] and args["lead_id"] not in self.known_leads:
+            if self.registry[name]["writes"] and args["lead_id"] not in self.known_leads:
                 raise ValueError("Read or search this lead before changing or delegating it")
         if "reminder_id" in args and args["reminder_id"] not in self.known_reminders:
             raise ValueError("Read follow-ups to identify this reminder before changing it")
         if name in {"create_lead", "update_lead"} and "field_values" in args:
             if self.field_keys is None: raise ValueError("Read CRM configuration before writing lead fields")
             if set(args["field_values"]) - self.field_keys: raise ValueError("Use only configured active lead fields")
+        return await self.dispatch(name, args)
+
+    async def dispatch(self, name, args):
+        from crm import doc_out, ensure_crm_settings
+        from crm_workspace import ReminderInput, ReminderStatus
         if name == "get_sales_briefing":
             from sales_leadership import snapshot
             return await snapshot(self.db, self.workspace)

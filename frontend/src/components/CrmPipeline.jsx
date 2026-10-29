@@ -4,19 +4,19 @@ import { formatMoneyMinor } from "../lib/currency";
 import FollowUpAction, { FollowUpSnapshot, useFollowUpSnapshots } from "./FollowUpAction";
 import { LeadTagBadges } from "./LeadLabels";
 
-function Column({ stage, wsId, filters, states, onSelect, onChanged, revision, tagLibrary, singleStage }) {
+function Column({ stage, wsId, apiBase, filters, states, onSelect, onChanged, revision, tagLibrary, singleStage }) {
   const [items, setItems] = useState([]), [total, setTotal] = useState(0), [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false), [error, setError] = useState("");
-  const snapshots = useFollowUpSnapshots(wsId, items.map((lead) => lead.id));
+  const snapshots = useFollowUpSnapshots(wsId, items.map((lead) => lead.id), apiBase);
   useEffect(() => { setPage(0); }, [filters, revision]);
   useEffect(() => {
     let live = true; setLoading(true); setError("");
-    api.get(`/workspaces/${wsId}/crm/pipeline`, { params: { status: stage.key, ...filters, offset: page * 30, limit: 30 } }).then(({ data }) => { if (live) { setItems(data.items); setTotal(data.total); } }).catch((e) => { if (live) setError(formatError(e.response?.data?.detail || e.message)); }).finally(() => { if (live) setLoading(false); });
+    api.get(`${apiBase}/pipeline`, { params: { status: stage.key, ...filters, offset: page * 30, limit: 30 } }).then(({ data }) => { if (live) { setItems(data.items); setTotal(data.total); } }).catch((e) => { if (live) setError(formatError(e.response?.data?.detail || e.message)); }).finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
-  }, [wsId, stage.key, filters, page, revision]);
+  }, [apiBase, stage.key, filters, page, revision]);
   const move = async (lead, status) => {
     setBusy(true); setError("");
-    try { const { data } = await api.patch(`/workspaces/${wsId}/crm/pipeline/leads/${lead.id}`, { status }); onChanged(data); }
+    try { const { data } = await api.patch(`${apiBase}/pipeline/leads/${lead.id}`, { status }); onChanged(data?.lead?.id ? data.lead : data); }
     catch (e) { setError(formatError(e.response?.data?.detail || e.message)); }
     finally { setBusy(false); }
   };
@@ -29,20 +29,20 @@ function Column({ stage, wsId, filters, states, onSelect, onChanged, revision, t
         <FollowUpSnapshot snapshot={snapshots[lead.id]} compact />
         {lead.customer_status === "customer" && <p className="text-xs text-emerald-600 dark:text-emerald-400">Customer</p>}
         {lead.opportunity_kind && <span className="inline-block rounded-full bg-primary/15 text-primary px-2 py-1 text-xs font-bold">{lead.opportunity_kind === "upsell" ? "UPSELL" : lead.opportunity_kind.replaceAll("_", " ").toUpperCase()}</span>}<LeadTagBadges tags={lead.tags} library={tagLibrary} />
-        <div className="flex gap-2 items-center"><select aria-label={`Move ${values.full_name || lead.full_name || "lead"} to stage`} disabled={busy} value={lead.status} onChange={(e) => move(lead, e.target.value)} className="min-w-0 flex-1 border rounded-md bg-background p-1.5 text-xs">{states.map((state) => <option key={state.key} value={state.key}>{state.label}</option>)}</select><FollowUpAction wsId={wsId} lead={lead} snapshot={snapshots[lead.id]} compact /></div>
+        <div className="flex gap-2 items-center"><select aria-label={`Move ${values.full_name || lead.full_name || "lead"} to stage`} disabled={busy} value={lead.status} onChange={(e) => move(lead, e.target.value)} className="min-w-0 flex-1 border rounded-md bg-background p-1.5 text-xs">{states.map((state) => <option key={state.key} value={state.key}>{state.label}</option>)}</select><FollowUpAction wsId={wsId} apiBase={apiBase} lead={lead} snapshot={snapshots[lead.id]} compact /></div>
       </article>; })}</>}
     </div>
     {total > 30 && <footer className="p-3 flex justify-between text-xs border-t"><button disabled={!page || loading} onClick={() => setPage((v) => v - 1)}>Previous</button><span>{page + 1} / {Math.ceil(total / 30)}</span><button disabled={(page + 1) * 30 >= total || loading} onClick={() => setPage((v) => v + 1)}>Next</button></footer>}
   </section>;
 }
 
-export default function CrmPipeline({ wsId, states, filters, onSelect, onChanged, statusFilter, revision, tagLibrary }) {
+export default function CrmPipeline({ wsId, apiBase = `/workspaces/${wsId}/crm`, states, filters, onSelect, onChanged, statusFilter, revision, tagLibrary }) {
   const visibleStages = states.filter((stage) => statusFilter === "all" || stage.key === statusFilter);
   const [pipelineValue, setPipelineValue] = useState({ value_minor: 0, currency: "INR" });
   useEffect(() => {
     let live = true;
-    api.get(`/workspaces/${wsId}/crm/pipeline-value`, { params: { ...filters, status: statusFilter } }).then(({ data }) => { if (live) setPipelineValue(data); }).catch(() => {});
+    api.get(`${apiBase}/pipeline-value`, { params: { ...filters, status: statusFilter } }).then(({ data }) => { if (live) setPipelineValue(data); }).catch(() => {});
     return () => { live = false; };
-  }, [wsId, filters, statusFilter, revision]);
-  return <div><div className="mb-3 flex flex-wrap items-end justify-between gap-3 rounded-xl border bg-card p-4"><div><p className="text-xs text-muted-foreground">Open pipeline value</p><p className="font-display text-2xl font-black">{formatMoneyMinor(pipelineValue.value_minor, pipelineValue.currency)}</p></div><p className="max-w-xs text-xs text-muted-foreground sm:text-right">Total value of linked opportunities in this view.</p></div><p className="text-xs text-muted-foreground mb-3">Open a card to view the lead. Use its stage menu to move it through your pipeline.</p><div className="flex gap-4 overflow-x-auto snap-x snap-proximity pb-4" aria-label="CRM Kanban board">{visibleStages.map((stage) => <Column key={stage.key} singleStage={visibleStages.length === 1} {...{ stage, wsId, filters, states, onSelect, onChanged, revision, tagLibrary }} />)}</div></div>;
+  }, [apiBase, filters, statusFilter, revision]);
+  return <div><div className="mb-3 flex flex-wrap items-end justify-between gap-3 rounded-xl border bg-card p-4"><div><p className="text-xs text-muted-foreground">Open pipeline value</p><p className="font-display text-2xl font-black">{formatMoneyMinor(pipelineValue.value_minor, pipelineValue.currency)}</p></div><p className="max-w-xs text-xs text-muted-foreground sm:text-right">Total value of linked opportunities in this view.</p></div><p className="text-xs text-muted-foreground mb-3">Open a card to view the lead. Use its stage menu to move it through your pipeline.</p><div className="flex gap-4 overflow-x-auto snap-x snap-proximity pb-4" aria-label="CRM Kanban board">{visibleStages.map((stage) => <Column key={stage.key} singleStage={visibleStages.length === 1} {...{ stage, wsId, apiBase, filters, states, onSelect, onChanged, revision, tagLibrary }} />)}</div></div>;
 }

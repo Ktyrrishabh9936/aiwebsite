@@ -6,7 +6,9 @@ import api from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 
 const mockNavigate = jest.fn();
-jest.mock("react-router-dom", () => ({ useNavigate: () => mockNavigate, useParams: () => ({ token: "token" }), useLocation: () => ({ search: "?lead=lead" }) }), { virtual: true });
+jest.mock("react-router-dom", () => ({ useNavigate: () => mockNavigate, useParams: () => ({ token: "token" }), useLocation: () => ({ search: "?lead=lead" }), Link: ({ to, children, ...props }) => <a href={to} {...props}>{children}</a> }), { virtual: true });
+jest.mock("../components/LeadQualificationPanel", () => () => null);
+jest.mock("../components/ThemeToggle", () => ({ ThemeToggle: () => null }));
 jest.mock("../context/AuthContext", () => ({ useAuth: jest.fn() }));
 jest.mock("../lib/api", () => ({ __esModule: true, formatError: (value) => value, default: { get: jest.fn(), post: jest.fn() } }));
 jest.mock("sonner", () => ({ toast: { error: jest.fn(), success: jest.fn() } }));
@@ -42,19 +44,20 @@ test("member portal clears lead details when workspace access is revoked", async
   api.get.mockImplementation(async (url) => {
     if (revoked) throw { response: { data: { detail: "Workspace access revoked" } } };
     if (url.endsWith("/performance")) return { data: { currency: "INR", item: { assigned_leads: 1, sales: 0, sales_minor: 0, introduced_leads: 0 } } };
-    if (url.endsWith("/properties")) return { data: { items: [] } };
+    if (url.endsWith("/settings")) return { data: { states: [{ key: "new", label: "New", color: "blue" }], fields: [{ key: "full_name", label: "Name", type: "text", editable: true }] } };
+    if (url.endsWith("/follow-ups/snapshots")) return { data: { lead: lead.follow_up } };
     if (url.endsWith("/leads/lead")) return { data: { lead, reminders: [] } };
     return { data: { items: [lead], total: 1 } };
   });
   await act(async () => root.render(<SalesPortal workspace={{ id: "workspace", name: "Project", access_role: "sales_agent" }} workspaces={[]} />));
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 450)));
   expect(container.textContent).toContain("Assigned lead");
   expect(container.textContent).not.toContain("Twilio");
   expect(container.textContent).toContain("Current agent");
   expect(container.textContent).toContain("Shared brochure");
   expect(container.textContent).toContain("Confirm visit");
   const tabs = container.querySelector('[aria-label="Lead sections"]');
-  expect(tabs.textContent).toBe("DetailsQualificationFollow-upNotes");
+  expect(tabs.textContent).toBe("AI InsightsDetailsQualificationFollow-upPaymentsReceiptsInvoiceNotes");
   revoked = true;
   await act(async () => window.dispatchEvent(new Event("focus")));
   expect(container.textContent).toContain("Workspace access revoked");

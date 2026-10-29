@@ -3,7 +3,10 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from typing import Literal
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, EmailStr
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -14,6 +17,9 @@ from workspace_access import MEMBER_ROLES, member_context, permitted_leads
 owner_router = APIRouter(prefix="/workspaces/{ws_id}/members", dependencies=[Depends(require_workspace_access)])
 invite_router = APIRouter(prefix="/membership-invitations")
 portal_router = APIRouter(prefix="/workspaces/{ws_id}/sales-portal")
+# Deal and payment state a shared member works with on their permitted leads.
+DEAL_KEYS = ("conversion_type", "payment_plan", "payment_summary", "receipts", "final_invoice", "converted_at", "customer_id",
+             "opportunity", "opportunity_kind", "repeat_request", "tags", "qualification_status", "is_test_lead")
 
 
 class InvitationInput(BaseModel):
@@ -127,12 +133,23 @@ async def accept_invitation(token: str, request: Request):
     return {"workspace_id": doc["workspace_id"], "role": doc["role"]}
 
 
+def visible_notes(lead):
+    from qualification_service import audit_payload
+    return [audit_payload(note) for note in (lead.get("lead_notes") or []) if isinstance(note, dict) and note.get("source") not in {"private", "internal_private"}]
+
+
+def member_view(lead):
+    """The lead as a shared member sees it: private notes removed."""
+    return {**lead, "lead_notes": visible_notes(lead)}
+
+
 def safe_lead(lead):
+    from crm import recalculate_payment_plan, single_payment_summary
     from qualification_service import audit_payload
     values = lead.get("field_values") or {}
     assignment = lead.get("sales_assignment") or {}
-    notes = [audit_payload(note) for note in (lead.get("lead_notes") or []) if isinstance(note, dict) and note.get("source") not in {"private", "internal_private"}]
-    out = {key: lead.get(key) for key in ("status", "created_at", "updated_at", "lead_status", "call_outcome", "qualification_score", "lead_temperature", "call_attempt_count", "do_not_call", "auto_qualification_enabled", "qualification_processing")}
+    notes = visible_notes(lead)
+    out = {key: lead.get(key) for key in ("status", "customer_status", "created_at", "updated_at", "lead_status", "call_outcome", "qualification_score", "lead_temperature", "call_attempt_count", "do_not_call", "auto_qualification_enabled", "qualification_processing", "utm", "utm_last_touch", "form_id", "form_name", "landing_page_url", "phone_country_code", *DEAL_KEYS)}
     out.update({"id": str(lead["_id"]), "sales_assignment": assignment, "property_name": (lead.get("opportunity") or {}).get("name") or (lead.get("referral_property") or {}).get("name"), "notes": notes, "lead_notes": notes})
     for key in ("full_name", "phone", "email", "address", "source", "assigned_salesperson"):
         out[key] = values.get(key) or lead.get(key)
@@ -141,12 +158,17 @@ def safe_lead(lead):
     for key in ("communication_summary", "qualification_call"):
         out[key] = audit_payload(lead.get(key) or {})
         out[key].pop("raw_provider_data", None)
+    receipts = lead.get("receipts") or []
+    if lead.get("conversion_type") == "payment_plan":
+        out["payment_plan"] = recalculate_payment_plan(lead.get("payment_plan") or {}, receipts)
+    elif lead.get("conversion_type") == "single_payment":
+        out["payment_summary"] = single_payment_summary(lead, receipts)
     return out
 
 
 def member_snapshot(lead, tasks):
     from crm_workspace import _follow_up_snapshot
-    return _follow_up_snapshot({**lead, "lead_notes": safe_lead(lead)["lead_notes"]}, tasks)
+    return _follow_up_snapshot(member_view(lead), tasks)
 
 
 async def portal_lead(request, ws_id, lead_id):
@@ -160,72 +182,266 @@ async def portal_lead(request, ws_id, lead_id):
     return db, user, workspace, membership, lead
 
 
+def member_values(lead, settings):
+    from crm import default_field_values
+    stored = default_field_values(lead, settings)
+    return {field["key"]: stored.get(field["key"], "") for field in member_fields(settings)}
+
+
 @portal_router.get("/leads")
-async def portal_leads(ws_id: str, request: Request, search: str = "", page: int = 1):
-    from crm import apply_lead_filters
+async def portal_leads(ws_id: str, request: Request, search: str = Query(default="", max_length=200), page: int = Query(default=1, ge=1), limit: int = Query(default=20, ge=1, le=100),
+                       status: str = Query(default="", max_length=100), created_from: datetime | None = None, created_before: datetime | None = None):
+    from crm import apply_lead_filters, ensure_crm_settings
     db = db_from(request)
     _, _, membership = await member_context(request, db, ws_id)
-    query = apply_lead_filters(permitted_leads(ws_id, membership), search=search[:200])
-    rows = await db.crm_leads.find(query).sort("created_at", -1).skip((max(1, page) - 1) * 20).limit(20).to_list(20)
+    query = apply_lead_filters(permitted_leads(ws_id, membership), search=search, created_from=created_from, created_before=created_before)
+    if status:
+        query["status"] = status
+    settings = await ensure_crm_settings(db, ws_id)
+    rows = await db.crm_leads.find(query).sort("created_at", -1).skip((page - 1) * limit).limit(limit).to_list(limit)
     ids = [str(doc["_id"]) for doc in rows]
     tasks = await db.tasks.find({"workspace_id": ws_id, "lead_id": {"$in": ids}, "source": "crm_reminder"}).to_list(None)
     grouped = {lead_id: [] for lead_id in ids}
     for task in tasks:
         grouped[task["lead_id"]].append(task)
-    return {"items": [{**safe_lead(doc), "follow_up": member_snapshot(doc, grouped[str(doc["_id"])])} for doc in rows], "total": await db.crm_leads.count_documents(query)}
+    items = [{**safe_lead(doc), "field_values": member_values(doc, settings), "follow_up": member_snapshot(doc, grouped[str(doc["_id"])])} for doc in rows]
+    return {"items": items, "total": await db.crm_leads.count_documents(query), "page": page, "limit": limit}
+
+
+async def detail_payload(db, ws_id, lead_id):
+    from crm import ensure_crm_settings
+    lead = await db.crm_leads.find_one({"workspace_id": ws_id, "_id": ObjectId(lead_id)})
+    reminders = await db.tasks.find({"workspace_id": ws_id, "lead_id": lead_id, "source": "crm_reminder"}).sort("scheduled_time", 1).limit(100).to_list(100)
+    settings = await ensure_crm_settings(db, ws_id)
+    return {"lead": {**safe_lead(lead), "field_values": member_values(lead, settings), "follow_up": member_snapshot(lead, reminders)}, "reminders": [{"id": str(doc["_id"]), **{key: doc.get(key) for key in ("title", "objective", "scheduled_time", "status", "outcome")}} for doc in reminders]}
 
 
 @portal_router.get("/leads/{lead_id}")
 async def portal_detail(ws_id: str, lead_id: str, request: Request):
-    db, _, _, _, lead = await portal_lead(request, ws_id, lead_id)
-    reminders = await db.tasks.find({"workspace_id": ws_id, "lead_id": lead_id, "source": "crm_reminder"}).sort("scheduled_time", 1).limit(100).to_list(100)
-    return {"lead": {**safe_lead(lead), "follow_up": member_snapshot(lead, reminders)}, "reminders": [{"id": str(doc["_id"]), **{key: doc.get(key) for key in ("title", "objective", "scheduled_time", "status", "outcome")}} for doc in reminders]}
+    db, _, _, _, _ = await portal_lead(request, ws_id, lead_id)
+    return await detail_payload(db, ws_id, lead_id)
+
+
+async def add_member_note(db, ws_id, lead, author, body):
+    text = body.get("body")
+    if set(body) - {"body", "source", "direction"} or not isinstance(text, str) or not text.strip() or len(text) > 4000 or body.get("source", "sales_member") not in {"sales_member", "manual_whatsapp"}:
+        raise HTTPException(422, "Enter a note of 1-4000 characters")
+    note = {"id": str(ObjectId()), "source": body.get("source", "sales_member"), "body": text.strip(), "author": author.get("name") or author["email"], "user_id": str(author["_id"]), "created_at": now_iso()}
+    if note["source"] == "manual_whatsapp":
+        note["direction"] = "outbound"
+    await db.crm_leads.update_one({"_id": lead["_id"], "workspace_id": ws_id}, {"$push": {"lead_notes": note}, "$set": {"updated_at": now_iso()}})
+    return note
 
 
 @portal_router.post("/leads/{lead_id}/notes")
 async def member_note(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
     db, user, _, _, lead = await portal_lead(request, ws_id, lead_id)
-    text = body.get("body")
-    if set(body) - {"body", "source", "direction"} or not isinstance(text, str) or not text.strip() or len(text) > 4000 or body.get("source", "sales_member") not in {"sales_member", "manual_whatsapp"}:
-        raise HTTPException(422, "Enter a note of 1-4000 characters")
-    note = {"id": str(ObjectId()), "source": body.get("source", "sales_member"), "body": text.strip(), "author": user.get("name") or user["email"], "user_id": str(user["_id"]), "created_at": now_iso()}
-    if note["source"] == "manual_whatsapp":
-        note["direction"] = "outbound"
-    await db.crm_leads.update_one({"_id": lead["_id"], "workspace_id": ws_id}, {"$push": {"lead_notes": note}, "$set": {"updated_at": now_iso()}})
-    return {"ok": True}
+    await add_member_note(db, ws_id, lead, user, body)
+    return await detail_payload(db, ws_id, lead_id)
 
 
 @portal_router.post("/leads/{lead_id}/reminders")
 async def member_reminder(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
-    from crm_workspace import ReminderInput
+    from crm_workspace import ReminderInput, insert_reminder
     db, user, _, _, _ = await portal_lead(request, ws_id, lead_id)
     try:
         reminder = ReminderInput(**body)
     except ValueError:
         raise HTTPException(422, "Enter a title and a due date with timezone") from None
-    await db.tasks.insert_one({"workspace_id": ws_id, "lead_id": lead_id, "source": "crm_reminder", "title": reminder.title, "objective": reminder.note, "scheduled_time": reminder.due_at.isoformat(), "status": "pending", "requires_approval": True, "agent": "sales", "created_by": str(user["_id"]), "created_at": now_iso(), "updated_at": now_iso()})
-    return {"ok": True}
+    return await insert_reminder(db, ws_id, lead_id, user, reminder)
 
 
-@portal_router.patch("/leads/{lead_id}/reminders/{reminder_id}")
-async def member_reminder_status(ws_id: str, lead_id: str, reminder_id: str, request: Request, body: dict = Body(...)):
+@portal_router.get("/reminders")
+async def member_reminders(ws_id: str, lead_id: str, request: Request, start: datetime | None = None, end: datetime | None = None,
+                           status: Literal["pending", "done", "cancelled", "all"] = "all", overdue: bool = False,
+                           offset: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=100)):
+    from crm_workspace import reminder_page
     db, _, _, _, _ = await portal_lead(request, ws_id, lead_id)
-    if not ObjectId.is_valid(reminder_id) or set(body) - {"status", "outcome"} or body.get("status") not in {"done", "cancelled"} or not isinstance(body.get("outcome", ""), str) or len(body.get("outcome", "")) > 1000:
-        raise HTTPException(422, "Choose done or cancelled with an optional outcome")
-    patch = {"status": body["status"], "outcome": body.get("outcome", ""), "updated_at": now_iso(), "completed_at": now_iso()}
-    result = await db.tasks.update_one({"_id": ObjectId(reminder_id), "workspace_id": ws_id, "lead_id": lead_id, "source": "crm_reminder"}, {"$set": patch})
-    if not result.matched_count:
+    return await reminder_page(db, ws_id, lead_id, start, end, status, overdue, offset, limit)
+
+
+@portal_router.patch("/reminders/{reminder_id}")
+async def member_reminder_update(ws_id: str, reminder_id: str, request: Request, body: dict = Body(...)):
+    from crm_workspace import ReminderInput, ReminderStatus, change_reminder
+    db = db_from(request)
+    query = {"workspace_id": ws_id, "source": "crm_reminder", "_id": ObjectId(reminder_id) if ObjectId.is_valid(reminder_id) else None}
+    task = await db.tasks.find_one(query) if query["_id"] else None
+    if not task:
         raise HTTPException(404, "Follow-up not found")
-    return {"ok": True}
+    _, user, _, _, _ = await portal_lead(request, ws_id, task["lead_id"])
+    try:
+        change = ReminderStatus(**body) if "status" in body else ReminderInput(**body)
+    except ValueError:
+        raise HTTPException(422, "Enter a title and due date, or a valid follow-up status") from None
+    return await change_reminder(db, {**query, "lead_id": task["lead_id"]}, user, change)
 
 
-@portal_router.get("/performance")
-async def personal_performance(ws_id: str, request: Request):
-    from sales_team import performance_rows
-    from workspace_modules import workspace_currency
+@portal_router.get("/follow-ups/snapshots")
+async def member_snapshots(ws_id: str, request: Request, lead_ids: str = Query(max_length=2500)):
+    from crm_workspace import snapshots_for
+    db = db_from(request)
+    _, _, membership = await member_context(request, db, ws_id)
+    return await snapshots_for(db, ws_id, permitted_leads(ws_id, membership), lead_ids, prepare=member_view)
+
+
+@portal_router.post("/leads/{lead_id}/follow-up/suggest")
+async def member_suggest(ws_id: str, lead_id: str, request: Request):
+    from crm_workspace import follow_up_suggestion
+    db, _, workspace, _, lead = await portal_lead(request, ws_id, lead_id)
+    return await follow_up_suggestion(db, ws_id, workspace, member_view(lead))
+
+
+@portal_router.get("/leads/{lead_id}/insights")
+async def member_insights(ws_id: str, lead_id: str, request: Request):
+    from sales_leadership import lead_insights
+    db, _, workspace, _, lead = await portal_lead(request, ws_id, lead_id)
+    result = await lead_insights(db, workspace, member_view(lead))
+    # Customer history spans the customer's other deals, which may belong to other salespeople.
+    result.pop("customer", None)
+    return result
+
+
+def member_fields(settings):
+    """CRM fields shown to sales members; phone stays read-only and owner-managed fields are hidden."""
+    from crm import active_fields
+    from meta_fields import META_FIELDS
+    hidden = {"source", "assigned_salesperson", *META_FIELDS}
+    return [{**{key: field.get(key) for key in ("key", "label", "type", "required", "options")}, "editable": field["key"] != "phone"}
+            for field in active_fields(settings) if field["key"] not in hidden]
+
+
+@portal_router.get("/settings")
+async def member_settings(ws_id: str, request: Request):
+    from crm import ensure_crm_settings
+    db = db_from(request)
+    await member_context(request, db, ws_id)
+    settings = await ensure_crm_settings(db, ws_id)
+    states = [{key: state.get(key) for key in ("key", "label", "color", "order")} for state in settings.get("states", [])]
+    return {"states": states, "fields": member_fields(settings), "tag_library": settings.get("tag_library") or []}
+
+
+def changed_by(user, at):
+    return {"user_id": str(user["_id"]), "name": user.get("name") or user["email"], "at": at}
+
+
+async def apply_member_update(db, ws_id, user, lead, body):
+    """Stage and contact-field changes by a shared member. Marking won books the deal exactly as the owner CRM does."""
+    from crm import default_field_values, ensure_crm_settings, status_side_effects, validate_field_values, won_side_effects
+    if not isinstance(body, dict) or not body or set(body) - {"status", "field_values"}:
+        raise HTTPException(422, "Only the stage and contact fields can be updated")
+    settings = await ensure_crm_settings(db, ws_id)
+    updates = {"updated_at": now_iso()}
+    if "status" in body:
+        status = body["status"]
+        if status not in {state["key"] for state in settings.get("states", [])}:
+            raise HTTPException(422, "Choose a valid stage")
+        updates.update({"status": status, **status_side_effects(lead, status)})
+        if status == "won":
+            updates.update(await won_side_effects(db, ws_id, lead))
+        if status != lead.get("status"):
+            updates["status_changed_by"] = changed_by(user, updates["updated_at"])
+    if "field_values" in body:
+        incoming = body["field_values"]
+        editable = {field["key"] for field in member_fields(settings) if field["editable"]}
+        if not isinstance(incoming, dict) or set(incoming) - editable:
+            raise HTTPException(422, "One or more fields cannot be edited")
+        values = validate_field_values({**default_field_values(lead, settings), **incoming}, settings)
+        updates["field_values"] = values
+        updates.update({key: values.get(key) for key in incoming if key in {"full_name", "email", "address"}})
+    await db.crm_leads.update_one({"_id": lead["_id"], "workspace_id": ws_id}, {"$set": updates})
+    if updates.get("google_sheet_sync_status") == "pending":
+        from google_sheets import sync_lead_status
+        await sync_lead_status(db, ws_id, str(lead["_id"]))
+
+
+@portal_router.patch("/leads/{lead_id}")
+async def member_update_lead(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
+    db, user, _, _, lead = await portal_lead(request, ws_id, lead_id)
+    await apply_member_update(db, ws_id, user, lead, body)
+    return await detail_payload(db, ws_id, lead_id)
+
+
+@portal_router.get("/pipeline")
+async def member_pipeline(ws_id: str, request: Request, status: str = Query(max_length=100), search: str = Query(default="", max_length=200),
+                          created_from: datetime | None = None, created_before: datetime | None = None,
+                          offset: int = Query(default=0, ge=0), limit: int = Query(default=30, ge=1, le=100)):
+    from crm import apply_lead_filters
+    from crm_workspace import pipeline_stage
     db = db_from(request)
     _, workspace, membership = await member_context(request, db, ws_id)
-    person_id = membership.get("sales_person_id")
+    query = apply_lead_filters(permitted_leads(ws_id, membership), search=search, created_from=created_from, created_before=created_before)
+    return await pipeline_stage(db, workspace, {**query, "status": status}, offset, limit)
+
+
+@portal_router.get("/pipeline-value")
+async def member_pipeline_value(ws_id: str, request: Request, search: str = Query(default="", max_length=200), created_from: datetime | None = None,
+                                created_before: datetime | None = None, status: str = Query(default="all", max_length=100)):
+    from crm import apply_lead_filters
+    from crm_workspace import pipeline_total
+    db = db_from(request)
+    _, workspace, membership = await member_context(request, db, ws_id)
+    return await pipeline_total(db, workspace, apply_lead_filters(permitted_leads(ws_id, membership), search=search, created_from=created_from, created_before=created_before), status)
+
+
+@portal_router.patch("/pipeline/leads/{lead_id}")
+async def member_move_lead(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
+    if set(body) != {"status"}:
+        raise HTTPException(422, "Choose a stage")
+    return await member_update_lead(ws_id, lead_id, request, body)
+
+
+# Payments, receipts and invoices reuse the owner CRM handlers once lead permission is confirmed.
+@portal_router.post("/leads/{lead_id}/convert")
+async def member_convert(ws_id: str, lead_id: str, request: Request, body: dict = Body(default=None)):
+    from crm import convert_lead
+    db, user, _, _, lead = await portal_lead(request, ws_id, lead_id)
+    await convert_lead(ws_id, lead_id, request, body)
+    if lead.get("status") != "won":
+        await db.crm_leads.update_one({"_id": lead["_id"], "workspace_id": ws_id}, {"$set": {"status_changed_by": changed_by(user, now_iso())}})
+    return await detail_payload(db, ws_id, lead_id)
+
+
+@portal_router.patch("/leads/{lead_id}/payment-plan")
+async def member_payment_plan(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
+    from crm import update_payment_plan
+    db, _, _, _, _ = await portal_lead(request, ws_id, lead_id)
+    await update_payment_plan(ws_id, lead_id, request, body)
+    return await detail_payload(db, ws_id, lead_id)
+
+
+@portal_router.post("/leads/{lead_id}/receipts")
+async def member_receipt(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
+    from crm import create_receipt
+    db, _, _, _, _ = await portal_lead(request, ws_id, lead_id)
+    await create_receipt(ws_id, lead_id, request, body)
+    return await detail_payload(db, ws_id, lead_id)
+
+
+@portal_router.get("/leads/{lead_id}/receipts/{receipt_id}/{kind}")
+async def member_receipt_document(ws_id: str, lead_id: str, receipt_id: str, kind: Literal["html", "pdf"], request: Request) -> Response:
+    from crm import render_receipt, render_receipt_pdf
+    await portal_lead(request, ws_id, lead_id)
+    return await (render_receipt if kind == "html" else render_receipt_pdf)(ws_id, lead_id, receipt_id, request)
+
+
+@portal_router.post("/leads/{lead_id}/final-invoice")
+async def member_final_invoice(ws_id: str, lead_id: str, request: Request, body: dict = Body(default=None)):
+    from crm import create_final_invoice
+    await portal_lead(request, ws_id, lead_id)
+    return await create_final_invoice(ws_id, lead_id, request, body)
+
+
+@portal_router.get("/leads/{lead_id}/final-invoice/{kind}")
+async def member_invoice_document(ws_id: str, lead_id: str, kind: Literal["html", "pdf"], request: Request) -> Response:
+    from crm import render_final_invoice, render_final_invoice_pdf
+    await portal_lead(request, ws_id, lead_id)
+    return await (render_final_invoice if kind == "html" else render_final_invoice_pdf)(ws_id, lead_id, request)
+
+
+async def member_performance(db, workspace, membership):
+    from sales_team import performance_rows
+    from workspace_modules import workspace_currency
+    ws_id, person_id = str(workspace["_id"]), membership.get("sales_person_id")
     if not person_id:
         raise HTTPException(403, "Use the owner performance dashboard")
     person = await db.crm_sales_people.find_one({"workspace_id": ws_id, "_id": ObjectId(person_id)})
@@ -233,6 +449,13 @@ async def personal_performance(ws_id: str, request: Request):
     query["is_test_lead"] = {"$ne": True}
     leads = await db.crm_leads.find(query, {"sales_assignment": 1, "sales_credit": 1, "opportunity": 1, "referral_property": 1, "status": 1, "is_test_lead": 1}).to_list(None)
     return {"item": performance_rows([person], leads)[0], "currency": workspace_currency(workspace)}
+
+
+@portal_router.get("/performance")
+async def personal_performance(ws_id: str, request: Request):
+    db = db_from(request)
+    _, workspace, membership = await member_context(request, db, ws_id)
+    return await member_performance(db, workspace, membership)
 
 
 @portal_router.get("/properties")

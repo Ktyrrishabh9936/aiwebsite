@@ -49,9 +49,20 @@ async def accessible_workspaces(db, user):
     return rows
 
 
-def workspace_shell(workspace, membership):
-    from workspace_modules import workspace_currency
-    return {"id": str(workspace["_id"]), "name": workspace.get("name", "Workspace"), "access_role": membership["role"], "currency": workspace_currency(workspace)}
+async def workspace_shell(db, workspace, membership):
+    """What a shared member may know about the workspace: who shared it, whose leads, and their own sales identity."""
+    from crm import DEFAULT_ORGANIZATION, effective_organization
+    from workspace_modules import workspace_currency, workspace_modules
+    owner = await db.users.find_one({"_id": ObjectId(workspace["user_id"])}, {"name": 1, "email": 1}) if ObjectId.is_valid(str(workspace.get("user_id", ""))) else None
+    person = await db.crm_sales_people.find_one({"workspace_id": str(workspace["_id"]), "_id": ObjectId(membership["sales_person_id"])}, {"name": 1}) if ObjectId.is_valid(membership.get("sales_person_id", "")) else None
+    settings = await db.crm_settings.find_one({"workspace_id": str(workspace["_id"])}, {"organization": 1})
+    company = effective_organization(settings, workspace).get("company_name")
+    # The document default is a placeholder, not the owner's organization.
+    organization = company if company and company != DEFAULT_ORGANIZATION["company_name"] else workspace.get("name", "Workspace")
+    return {"id": str(workspace["_id"]), "name": workspace.get("name", "Workspace"), "access_role": membership["role"], "currency": workspace_currency(workspace),
+            "modules": workspace_modules(workspace), "model_id": workspace.get("model_id"), "organization": organization,
+            "shared_by": {"name": (owner or {}).get("name") or "Workspace owner", "email": (owner or {}).get("email", "")},
+            "member_name": (person or {}).get("name", "")}
 
 
 def permitted_leads(ws_id, membership):

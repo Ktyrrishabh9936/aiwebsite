@@ -310,7 +310,7 @@ async def list_workspaces(request: Request):
 async def get_workspace(ws_id: str, request: Request):
     from workspace_access import member_context, workspace_shell
     _, ws, membership = await member_context(request, db, ws_id)
-    return {**workspace_out(ws), "access_role": "owner"} if membership["role"] == "owner" else workspace_shell(ws, membership)
+    return {**workspace_out(ws), "access_role": "owner"} if membership["role"] == "owner" else await workspace_shell(db, ws, membership)
 
 
 @api.get("/workspaces/{ws_id}/bootstrap")
@@ -320,7 +320,7 @@ async def workspace_bootstrap(ws_id: str, request: Request):
         from workspace_access import member_context, workspace_shell, accessible_workspaces
         user, ws, membership = await member_context(request, db, ws_id)
     if membership["role"] != "owner":
-        return {"workspace": workspace_shell(ws, membership), "workspaces": await accessible_workspaces(db, user), "notifications": []}
+        return {"workspace": await workspace_shell(db, ws, membership), "workspaces": await accessible_workspaces(db, user), "notifications": []}
     async with timed(request, "db_bootstrap"):
         workspace_docs, notification_docs = await asyncio.gather(
             db.workspaces.find({"user_id": str(user["_id"])}).sort("created_at", -1).to_list(100),

@@ -1,73 +1,131 @@
-import { formatDateTime, inputToUtc } from "../lib/timezone";
 import { useCallback, useEffect, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
+import { Bot, Building2, Check, LogOut, Plus, Share2, UserCircle, Users } from "lucide-react";
+import { toast } from "sonner";
 import { useAuth } from "../context/AuthContext";
 import api, { formatError } from "../lib/api";
-import { toast } from "sonner";
-import LeadNotes from "../components/LeadNotes";
-import QualificationSummary from "../components/QualificationSummary";
-import LeadQualificationPanel from "../components/LeadQualificationPanel";
-import LeadWhatsAppCompose from "../components/LeadWhatsAppCompose";
-import LeadSmsCompose from "../components/LeadSmsCompose";
-import { FollowUpSnapshot } from "../components/FollowUpAction";
+import { formatMoneyMinor } from "../lib/currency";
+import { Logo } from "../components/Logo";
+import { ThemeToggle } from "../components/ThemeToggle";
+import { ModelPicker } from "../components/ModelPicker";
+import { AgentWorkspace } from "../components/AgentWorkspace";
+import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "../components/ui/dialog";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
+import CrmInbox from "./sections/CrmInbox";
 
+const ROLE_LABELS = { sales_agent: "Sales agent", channel_partner: "Channel partner" };
+const ROLE_ACCESS = { sales_agent: "leads assigned to you", channel_partner: "leads assigned to you or introduced by you" };
+
+// The shared workspace for sales agents and channel partners: the owner's CRM on their permitted leads, with Agent Mode.
 export default function SalesPortal({ workspace, workspaces }) {
-  const wsId = workspace.id;
-  const base = `/workspaces/${wsId}/sales-portal`;
-  const location = useLocation();
   const navigate = useNavigate();
-  const { logout } = useAuth();
-  const [leads, setLeads] = useState({ items: [], total: 0 });
-  const [detail, setDetail] = useState(null);
-  const [detailTab, setDetailTab] = useState("Details");
+  const { user, logout } = useAuth();
+  const [agentMode, setAgentMode] = useState(false);
+  const [agentVisited, setAgentVisited] = useState(false);
   const [performance, setPerformance] = useState(null);
-  const [properties, setProperties] = useState([]);
-  const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
-  const [whatsappOpen, setWhatsappOpen] = useState(false);
-  const [smsOpen, setSmsOpen] = useState(false);
-  const [reminder, setReminder] = useState({ title: "", note: "", due_at: "" });
-  const [referral, setReferral] = useState({ full_name: "", phone: "", email: "", property_id: "", acquisition_channel: "referral" });
-  const [showReferral, setShowReferral] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [outcome, setOutcome] = useState("");
-  const load = useCallback(async () => {
-    try { const [records, stats, inventory] = await Promise.all([api.get(`${base}/leads`, { params: { page, search } }), api.get(`${base}/performance`), api.get(`${base}/properties`)]); setLeads(records.data); setPerformance(stats.data); setProperties(inventory.data.items); setError(""); }
-    catch (err) { setLeads({ items: [], total: 0 }); setDetail(null); setPerformance(null); setError(formatError(err.response?.data?.detail)); }
-  }, [base, page, search]);
-  const openLead = useCallback(async (id) => {
-    try { const { data } = await api.get(`${base}/leads/${id}`); setDetail(data); }
-    catch (err) { setDetail(null); toast.error(formatError(err.response?.data?.detail)); }
-  }, [base]);
-  useEffect(() => { const timer = setTimeout(load, 250); return () => clearTimeout(timer); }, [load]);
-  useEffect(() => { const id = new URLSearchParams(location.search).get("lead"); if (id) openLead(id); }, [location.search, openLead]);
-  useEffect(() => { setDetail(null); setPage(1); setSearch(""); setShowReferral(false); }, [wsId]);
-  useEffect(() => { const refresh = () => { load(); if (detail?.lead.id) openLead(detail.lead.id); }; const timer = setInterval(refresh, 15000); window.addEventListener("focus", refresh); return () => { clearInterval(timer); window.removeEventListener("focus", refresh); }; }, [load, detail?.lead.id, openLead]);
-  const mutate = async (method, url, body) => {
-    setBusy(true); setError("");
-    try { await api[method](url, body); await load(); if (detail?.lead.id) await openLead(detail.lead.id); return true; }
-    catch (err) { toast.error(formatError(err.response?.data?.detail)); return false; }
-    finally { setBusy(false); }
-  };
-  const submitReferral = async (event) => { event.preventDefault(); if (await mutate("post", `${base}/leads`, referral)) { setShowReferral(false); setReferral({ full_name: "", phone: "", email: "", property_id: "", acquisition_channel: "referral" }); toast.success("Lead added with your introduction credit. No automatic AI call was triggered."); } };
-  const submitReminder = async (event) => {
-    event.preventDefault();
-    try {
-      const due_at = inputToUtc(reminder.due_at);
-      if (await mutate("post", `${base}/leads/${detail.lead.id}/reminders`, { ...reminder, due_at })) setReminder({ title: "", note: "", due_at: "" });
-    } catch (error) { toast.error(error.message); }
-  };
-  const money = (minor) => new Intl.NumberFormat(undefined, { style: "currency", currency: performance?.currency || workspace.currency || "INR", maximumFractionDigits: 0 }).format(minor / 100);
-  const inputClass = "h-10 w-full rounded-lg border bg-background px-3 text-sm";
-  return <main className="min-h-screen bg-background p-4 sm:p-8"><div className="max-w-7xl mx-auto space-y-6">
-    <header className="flex flex-wrap justify-between gap-4 items-center"><div><h1 className="text-2xl font-semibold">{workspace.name}</h1><p className="text-sm text-muted-foreground">{workspace.access_role === "sales_agent" ? "Sales agent" : "Channel partner"} workspace</p></div><div className="flex gap-2"><select aria-label="Workspace" value={wsId} onChange={(event) => navigate(`/app/w/${event.target.value}/crm`)} className="h-10 rounded-lg border bg-background px-3 text-sm">{workspaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><button onClick={() => { logout(); navigate("/login"); }} className="rounded-lg border px-3 text-sm">Log out</button></div></header>
-    {error && <div role="alert" className="rounded-lg border border-destructive/30 p-4 text-sm text-destructive">{error}<button onClick={load} className="ml-3 underline">Retry</button></div>}
-    {performance && <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">{[["Assigned leads", performance.item.assigned_leads], ["Booked sales", performance.item.sales], ["Booked sales value", money(performance.item.sales_minor)], ["Leads introduced", performance.item.introduced_leads]].map(([label, value]) => <div key={label} className="rounded-xl border bg-card p-4"><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 text-xl font-semibold">{value}</p></div>)}</section>}
-    <div className="flex flex-wrap gap-3"><input aria-label="Search permitted leads" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search your leads" className={`${inputClass} flex-1`} /><button onClick={() => setShowReferral(!showReferral)} className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground">Add referral / marketing lead</button></div>
-    {showReferral && <form onSubmit={submitReferral} className="rounded-xl border bg-card p-5 grid sm:grid-cols-2 gap-3"><h2 className="sm:col-span-2 font-semibold">New lead</h2>{["full_name", "phone", "email"].map((key) => <label key={key} className="text-sm">{key === "full_name" ? "Name" : key === "phone" ? "Phone" : "Email (optional)"}<input required={key !== "email"} type={key === "email" ? "email" : key === "phone" ? "tel" : "text"} value={referral[key]} onChange={(event) => setReferral({ ...referral, [key]: event.target.value })} className={`mt-1 ${inputClass}`} /></label>)}<label className="text-sm">Property<select value={referral.property_id} onChange={(event) => setReferral({ ...referral, property_id: event.target.value })} className={`mt-1 ${inputClass}`}><option value="">Not yet selected</option>{properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></label><label className="text-sm">Source<select value={referral.acquisition_channel} onChange={(event) => setReferral({ ...referral, acquisition_channel: event.target.value })} className={`mt-1 ${inputClass}`}><option value="referral">Referral</option><option value="marketing">Marketing</option></select></label><button disabled={busy} className="rounded-lg bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50">Add lead</button></form>}
-    <div className={`grid gap-5 items-start ${detail ? "xl:grid-cols-[minmax(0,1.4fr)_minmax(340px,1fr)]" : ""}`}><section className="min-w-0 rounded-xl border bg-card p-4"><div className="flex justify-between pb-4"><h2 className="font-semibold">Lead records</h2><span className="text-sm text-muted-foreground">{leads.total} leads</span></div><div className="space-y-3">{leads.items.map((lead) => <article key={lead.id} className={`overflow-hidden rounded-xl border ${detail?.lead.id === lead.id ? "border-primary/50" : ""}`}><button onClick={() => { setWhatsappOpen(false); setSmsOpen(false); setOutcome(""); setDetailTab("Details"); openLead(lead.id); }} className="w-full text-left bg-background p-4 hover:bg-accent/20"><div className="flex justify-between gap-3"><strong className="text-sm">{lead.full_name || lead.phone}</strong><span className="rounded-md bg-muted px-2 py-1 text-xs font-medium capitalize">{lead.status?.replaceAll("_", " ")}</span></div><p className="mt-1 text-sm text-muted-foreground">{lead.phone}</p>{lead.property_name && <p className="mt-1 text-xs text-muted-foreground">{lead.property_name}</p>}{lead.assigned_salesperson && <p className="mt-1 text-xs text-muted-foreground">Agent: {lead.assigned_salesperson}</p>}</button><div className="border-t bg-muted/20 px-4 py-3"><p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Follow-up</p><FollowUpSnapshot snapshot={lead.follow_up} /></div></article>)}</div>{!leads.items.length && <p className="p-4 text-sm text-muted-foreground">No permitted leads found.</p>}<div className="mt-4 border-t pt-3 flex justify-between text-sm"><button disabled={page === 1} onClick={() => setPage(page - 1)}>Previous</button><span>{page} / {Math.max(1, Math.ceil(leads.total / 20))}</span><button disabled={page * 20 >= leads.total} onClick={() => setPage(page + 1)}>Next</button></div></section>
-    {detail && <aside aria-label="Lead details" className="fixed inset-0 z-50 overflow-y-auto bg-background p-4 xl:sticky xl:top-4 xl:z-auto xl:max-h-[calc(100dvh-32px)] xl:bg-transparent xl:p-0"><section className="max-w-3xl mx-auto rounded-xl border bg-card p-5 space-y-5"><div className="flex justify-between border-b pb-4 gap-3"><div><h2 className="text-lg font-bold">{detail.lead.full_name || "Lead details"}</h2>{detail.lead.created_at && <p className="mt-1 text-xs text-muted-foreground">Captured on {formatDateTime(detail.lead.created_at, { dateStyle: "medium", timeStyle: "short", hour12: true })}</p>}</div><div className="flex flex-wrap items-start gap-2"><button onClick={() => setWhatsappOpen(true)} className="h-9 rounded-lg border bg-background px-2.5 text-xs font-semibold text-emerald-500">WhatsApp</button><button onClick={() => setSmsOpen(true)} className="h-9 rounded-lg border bg-background px-2.5 text-xs font-semibold text-primary">SMS</button><button onClick={() => setDetail(null)} className="h-9 text-sm text-muted-foreground">Close</button></div></div><LeadWhatsAppCompose key={`whatsapp-${detail.lead.id}`} open={whatsappOpen} onOpenChange={setWhatsappOpen} phone={detail.lead.phone} leadName={detail.lead.full_name} onMarkSent={(body) => mutate("post", `${base}/leads/${detail.lead.id}/notes`, body)} /><LeadSmsCompose key={`sms-${detail.lead.id}`} open={smsOpen} onOpenChange={setSmsOpen} wsId={wsId} lead={detail.lead} apiBase={`${base}/sms`} /><div className="flex flex-wrap gap-1 rounded-lg border p-1" role="group" aria-label="Lead sections">{["Details", "Qualification", "Follow-up", "Notes"].map((tab) => <button key={tab} aria-pressed={detailTab === tab} onClick={() => setDetailTab(tab)} className={`h-9 rounded-md px-3 text-xs font-semibold ${detailTab === tab ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{tab}</button>)}</div>{detailTab === "Details" && <div className="grid sm:grid-cols-2 gap-3">{[["Name", detail.lead.full_name], ["Phone", detail.lead.phone], ["Email", detail.lead.email], ["Address", detail.lead.address], ["Assigned Salesperson", detail.lead.assigned_salesperson || "Unassigned"], ["Channel partner", detail.lead.sales_assignment?.channel_partner_name], ["Source", detail.lead.source], ["Property", detail.lead.property_name], ["State", detail.lead.status]].map(([label, value]) => <div key={label}><p className="text-xs font-semibold uppercase text-muted-foreground">{label}</p><p className="mt-1 min-h-10 rounded-lg border bg-background px-3 py-2 text-sm break-words">{value || "Not provided"}</p></div>)}</div>}{detailTab === "Notes" && <LeadNotes key={detail.lead.id} notes={detail.lead.lead_notes || detail.lead.notes || []} saving={busy} onAdd={(body) => mutate("post", `${base}/leads/${detail.lead.id}/notes`, { body })} />}{detailTab === "Qualification" && <><LeadQualificationPanel key={detail.lead.id} lead={detail.lead} readOnly apiBase={`${base}/qualification`} /><QualificationSummary communication={detail.lead.communication_summary || {}} qualification={detail.lead.qualification_call || {}} /></>}{detailTab === "Follow-up" && <div className="space-y-4"><div className="rounded-lg border bg-muted/20 p-3"><FollowUpSnapshot snapshot={detail.lead.follow_up} /></div><form onSubmit={submitReminder} className="space-y-2 border-t pt-4"><h3 className="text-sm font-semibold">Schedule follow-up</h3><input aria-label="Follow-up title" required placeholder="Next action" value={reminder.title} onChange={(event) => setReminder({ ...reminder, title: event.target.value })} className={inputClass} /><textarea aria-label="Follow-up note" placeholder="Follow-up details (optional)" maxLength={4000} rows={3} value={reminder.note} onChange={(event) => setReminder({ ...reminder, note: event.target.value })} className="w-full rounded-lg border bg-background p-3 text-sm" /><input aria-label="Follow-up due date" required type="datetime-local" value={reminder.due_at} onChange={(event) => setReminder({ ...reminder, due_at: event.target.value })} className={inputClass} /><button disabled={busy} className="rounded-lg border px-3 py-2 text-sm disabled:opacity-50">Schedule</button></form><label className="block text-sm">Follow-up outcome<input value={outcome} maxLength={1000} onChange={(event) => setOutcome(event.target.value)} className={`mt-1 ${inputClass}`} /></label>{detail.reminders.map((item) => <div key={item.id} className="border-t pt-3 text-sm"><strong>{item.title}</strong>{item.objective && <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{item.objective}</p>}<p className="text-xs text-muted-foreground mt-1">{formatDateTime(item.scheduled_time, { dateStyle: "medium", timeStyle: "short", hour12: true })} · {item.status}</p>{item.outcome && <p className="mt-1">{item.outcome}</p>}{item.status === "pending" && <div className="flex gap-3 mt-2">{["done", "cancelled"].map((status) => <button key={status} disabled={busy} onClick={() => mutate("patch", `${base}/leads/${detail.lead.id}/reminders/${item.id}`, { status, outcome })} className="text-xs underline disabled:opacity-50">{status === "done" ? "Complete" : "Cancel"}</button>)}</div>}</div>)}</div>}</section></aside>}
+  const organization = workspace.organization || workspace.name;
+  const sharedBy = workspace.shared_by || {};
+  const role = ROLE_LABELS[workspace.access_role] || "Team member";
+
+  const loadPerformance = useCallback(() => {
+    api.get(`/workspaces/${workspace.id}/sales-portal/performance`).then(({ data }) => setPerformance(data)).catch(() => setPerformance(null));
+  }, [workspace.id]);
+  useEffect(() => {
+    loadPerformance();
+    const timer = setInterval(() => { if (!document.hidden) loadPerformance(); }, 15000);
+    window.addEventListener("focus", loadPerformance);
+    window.addEventListener("arevei:manager-changed", loadPerformance);
+    return () => { clearInterval(timer); window.removeEventListener("focus", loadPerformance); window.removeEventListener("arevei:manager-changed", loadPerformance); };
+  }, [loadPerformance]);
+
+  const signOut = () => { logout(); navigate("/login"); };
+  const modeClass = (active) => `inline-flex items-center gap-2 rounded-full px-3 py-2 text-xs font-semibold ${active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`;
+
+  return (
+    <div className="app-shell h-[100dvh] flex flex-col overflow-hidden">
+      <header className="app-topbar sticky top-0 z-20 glass border-b border-border">
+        <div className="min-h-16 px-3 sm:px-5 py-2 flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 flex items-center gap-3">
+            <Logo className="text-base hidden sm:flex" to="/app" />
+            <div className="min-w-0 sm:border-l sm:pl-3">
+              <p className="text-[11px] text-muted-foreground truncate max-w-56">{organization}</p>
+              <h2 className="font-semibold truncate">{agentMode ? "AI Manager" : "CRM"}</h2>
+            </div>
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-primary/10 px-2.5 py-1 text-[11px] font-semibold text-primary"><Share2 size={12} /> Shared workspace</span>
+          </div>
+          <div className="app-mode-switch flex rounded-full border border-border p-1 gap-1" role="group" aria-label="Workspace mode">
+            <button type="button" aria-pressed={!agentMode} onClick={() => setAgentMode(false)} className={modeClass(!agentMode)}><Users size={14} /> Human Mode</button>
+            <button type="button" aria-pressed={agentMode} onClick={() => { setAgentVisited(true); setAgentMode(true); }} className={modeClass(agentMode)}><Bot size={14} /> Agent Mode</button>
+          </div>
+          <div className="flex items-center gap-2.5">
+            <WorkspaceSwitcher current={workspace} workspaces={workspaces} navigate={navigate} />
+            <Popover>
+              <PopoverTrigger asChild><button aria-label="Account" className="grid place-items-center w-9 h-9 rounded-full border border-border hover:bg-accent transition-colors"><UserCircle className="w-4 h-4" /></button></PopoverTrigger>
+              <PopoverContent align="end" className="w-72 max-w-[calc(100vw-24px)] p-0">
+                <div className="px-4 py-3 border-b border-border"><div className="font-medium text-sm truncate">{user?.name || workspace.member_name || "Account"}</div><div className="text-xs text-muted-foreground truncate">{user?.email}</div><div className="mt-1 text-xs text-muted-foreground">{role} in {organization}</div></div>
+                <div className="p-2"><button onClick={signOut} className="flex items-center gap-2 w-full h-9 px-2 rounded-md text-sm text-muted-foreground hover:text-destructive hover:bg-accent"><LogOut className="w-4 h-4" /> Log out</button></div>
+              </PopoverContent>
+            </Popover>
+            <ThemeToggle />
+          </div>
+        </div>
+        <div role="note" aria-label="Shared workspace details" className="border-t border-border bg-primary/5 px-3 sm:px-5 py-2 text-xs text-muted-foreground flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span>Shared by <strong className="text-foreground">{sharedBy.name || "the workspace owner"}</strong>{sharedBy.email && ` (${sharedBy.email})`}</span>
+          <span>Organization: <strong className="text-foreground">{organization}</strong></span>
+          <span>You: <strong className="text-foreground">{workspace.member_name || user?.name || "Team member"}</strong> · {role}</span>
+          <span>You control the {ROLE_ACCESS[workspace.access_role] || "leads shared with you"}</span>
+        </div>
+      </header>
+
+      <main id="workspace-content" tabIndex={-1} hidden={agentMode} className={agentMode ? "hidden" : "flex-1 min-h-0 overflow-y-auto overscroll-contain"}>
+        {performance && <section aria-label="Your performance" className="max-w-7xl mx-auto px-4 sm:px-8 pt-6 grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {[["Assigned leads", performance.item.assigned_leads], ["Booked sales", performance.item.sales], ["Booked sales value", formatMoneyMinor(performance.item.sales_minor, performance.currency || workspace.currency)], ["Leads introduced", performance.item.introduced_leads]].map(([label, value]) => <div key={label} className="rounded-xl border bg-card p-4"><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 text-xl font-semibold">{value}</p></div>)}
+        </section>}
+        <CrmInbox key={workspace.id} member={workspace} />
+      </main>
+      {agentVisited && <div hidden={!agentMode} className={agentMode ? "flex-1 min-h-0 overflow-y-auto" : "hidden"}><AgentWorkspace key={workspace.id} ws={workspace} active={agentMode} /></div>}
     </div>
-  </div></main>;
+  );
+}
+
+// Members keep their own workspaces alongside the ones shared with them, and can start one of their own.
+function WorkspaceSwitcher({ current, workspaces, navigate }) {
+  const own = workspaces.filter((item) => item.access_role === "owner");
+  const shared = workspaces.filter((item) => item.access_role !== "owner");
+  const [creating, setCreating] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState("");
+  const [modelId, setModelId] = useState("openai.gpt-oss-120b");
+  const create = async (event) => {
+    event.preventDefault();
+    setCreating(true);
+    try {
+      const { data } = await api.post("/workspaces", { website_url: url, model_id: modelId });
+      toast.success("Workspace created - training brain");
+      setOpen(false);
+      navigate(`/app/w/${data.id}/sales-strategy`);
+    } catch (error) { toast.error(formatError(error.response?.data?.detail)); }
+    finally { setCreating(false); }
+  };
+  const row = (item, path) => <button key={item.id} onClick={() => navigate(path)} aria-current={item.id === current.id ? "true" : undefined} className={`w-full flex items-center justify-between gap-2 rounded-md border p-2.5 text-left text-sm ${item.id === current.id ? "border-primary/50 bg-primary/5" : "border-border hover:bg-accent"}`}><span className="min-w-0 truncate">{item.name}</span>{item.id === current.id ? <Check className="w-4 h-4 text-primary shrink-0" /> : item.access_role !== "owner" && <span className="text-[11px] text-muted-foreground shrink-0">{ROLE_LABELS[item.access_role] || "Shared"}</span>}</button>;
+  return <Popover>
+    <PopoverTrigger asChild><button className="inline-flex items-center gap-2 h-9 rounded-full border border-border px-3 text-xs font-semibold hover:bg-accent"><Building2 className="w-4 h-4" /><span className="hidden sm:inline">Workspaces</span></button></PopoverTrigger>
+    <PopoverContent align="end" className="w-80 max-w-[calc(100vw-24px)] p-3 space-y-3">
+      <div className="space-y-1.5"><p className="text-xs uppercase tracking-wider font-bold text-muted-foreground">Your workspaces</p>{own.length ? own.map((item) => row(item, `/app/w/${item.id}`)) : <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">You have no workspace of your own yet.</p>}</div>
+      <div className="space-y-1.5"><p className="text-xs uppercase tracking-wider font-bold text-muted-foreground">Shared with you</p>{shared.map((item) => row(item, `/app/w/${item.id}/crm`))}</div>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogTrigger asChild><button className="w-full inline-flex items-center justify-center gap-1.5 h-9 rounded-md bg-primary text-primary-foreground text-xs font-semibold"><Plus className="w-3.5 h-3.5" /> Create your own workspace</button></DialogTrigger>
+        <DialogContent>
+          <DialogHeader><DialogTitle className="font-display">Create workspace</DialogTitle></DialogHeader>
+          <form onSubmit={create} className="space-y-5 pt-2">
+            <div className="space-y-2"><Label htmlFor="shared-ws-url">Website URL</Label><Input id="shared-ws-url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://yourcompany.com" required /><p className="text-xs text-muted-foreground">Your own workspace is separate from the workspaces shared with you.</p></div>
+            <div className="space-y-2"><Label>Model</Label><ModelPicker value={modelId} onChange={setModelId} /></div>
+            <button type="submit" disabled={creating} className="w-full h-11 rounded-full bg-primary text-primary-foreground font-semibold disabled:opacity-60">{creating ? "Creating..." : "Train brain"}</button>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </PopoverContent>
+  </Popover>;
 }

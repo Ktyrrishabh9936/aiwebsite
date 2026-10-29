@@ -89,14 +89,14 @@ PAGE_NAMES = {"": "Overview", "crm": "CRM → Records", "crm?tab=reminders": "CR
               "blogs": "Blogs", "settings": "Settings"}
 
 
-def result_link(ws_id, name, args, result):
+def result_link(ws_id, name, args, result, registry=REGISTRY):
     """Deep link to the page showing what a tool read or changed."""
     base = f"/app/w/{ws_id}"
     result = result if isinstance(result, dict) else {}
     lead_id = args.get("lead_id") or (result.get("id") if name in LEAD_RESULT_TOOLS else None)
     if lead_id and name != "archive_lead": return f"{base}/crm?lead={lead_id}"
     if name in {"generate_blog_draft", "set_blog_status"} and result.get("id"): return f"{base}/blogs/{result['id']}"
-    page = REGISTRY.get(name, {}).get("page")
+    page = registry.get(name, {}).get("page")
     if page: return f"{base}/{page}"
     return base if name in {"get_sales_briefing", "list_notifications"} else ""
 
@@ -138,16 +138,18 @@ def valid_history(messages):
 
 async def run_loop(ws, body, history, tools, emit, save, model=None):
     model = model or tool_turn
+    # Shared members run a narrower tool set and prompt; owners keep the full catalog.
+    registry = getattr(tools, "registry", REGISTRY)
     messages = valid_history(history) + [{"role": "user", "content": body.message}]
     zone = ZoneInfo(body.timezone)
     context = {"workspace": ws.get("name", ""), "now": datetime.now(zone).isoformat(), "timezone": body.timezone}
-    system = SYSTEM + "\nSession context: " + json.dumps(context)
+    system = getattr(tools, "system", SYSTEM) + "\nSession context: " + json.dumps(context)
     cache, operations = {}, 0
     await emit({"type": "run_started", "status": "running", "label": "Manager is coordinating your request", "section": "AI Manager"})
     await save(messages)
     for turn in range(48):
         await emit({"type": "planning", "status": "running", "label": "Choosing the next action", "section": "AI Manager"})
-        reply = await model(ws.get("model_id"), system, messages, [tool["schema"] for tool in TOOLS])
+        reply = await model(ws.get("model_id"), system, messages, [tool["schema"] for tool in registry.values()])
         calls = reply.get("tool_calls") or []
         if not calls:
             answer = (reply.get("content") or "").strip()
@@ -162,7 +164,7 @@ async def run_loop(ws, body, history, tools, emit, save, model=None):
             operations += 1
             if operations > 96: raise ValueError("Action limit reached; saved changes remain available")
             name = call.get("function", {}).get("name", "")
-            metadata = REGISTRY.get(name, {"label": "Unsupported action", "section": "AI Manager", "agent": "AI Manager"})
+            metadata = registry.get(name, {"label": "Unsupported action", "section": "AI Manager", "agent": "AI Manager"})
             event = {"operation_id": call.get("id") or uuid.uuid4().hex, "tool": name, "label": metadata["label"],
                      "section": metadata["section"], "agent": metadata["agent"], "writes": metadata.get("writes", False),
                      "page": metadata.get("page", "")}
@@ -183,7 +185,7 @@ async def run_loop(ws, body, history, tools, emit, save, model=None):
                 summary = ("Delegated; waiting for qualification outcome" if delegated else
                            f"{result['total']} matching records" if isinstance(result, dict) and "total" in result else
                            "Saved in workspace" if metadata.get("writes") else "Information retrieved")
-                link = result_link(ws["_id"], name, args, result)
+                link = result_link(ws["_id"], name, args, result, registry)
                 await emit({**event, "type": "tool_finished", "status": "delegated" if delegated else "completed",
                             "summary": summary, "link": link, "job": result if delegated else None})
             except Exception as error:
@@ -202,8 +204,10 @@ async def run_loop(ws, body, history, tools, emit, save, model=None):
 
 
 async def authorized(request, ws_id):
+    """Owners and active shared members; each conversation and run is scoped to the signed-in user."""
+    from workspace_access import member_context
     if not ObjectId.is_valid(ws_id): raise HTTPException(404, "Workspace not found")
-    return await get_current_user_and_workspace(request, request.app.state.db, ws_id)
+    return await member_context(request, request.app.state.db, ws_id)
 
 
 def scope(ws_id, user):
@@ -212,7 +216,7 @@ def scope(ws_id, user):
 
 @router.get("/conversation/{conversation_id}")
 async def conversation(ws_id: str, conversation_id: str, request: Request):
-    user, _ = await authorized(request, ws_id)
+    user, _, _ = await authorized(request, ws_id)
     db = request.app.state.db
     document = await db.manager_conversations.find_one({**scope(ws_id, user), "conversation_id": conversation_id})
     runs = await db.manager_runs.find({**scope(ws_id, user), "conversation_id": conversation_id},
@@ -224,7 +228,7 @@ async def conversation(ws_id: str, conversation_id: str, request: Request):
 
 @router.get("/runs/{run_id}")
 async def get_run(ws_id: str, run_id: str, request: Request):
-    user, _ = await authorized(request, ws_id)
+    user, _, _ = await authorized(request, ws_id)
     row = await request.app.state.db.manager_runs.find_one({**scope(ws_id, user), "run_id": run_id}, {"_id": 0})
     if not row: raise HTTPException(404, "Manager run not found")
     if row.get("status") == "running" and datetime.fromisoformat(row["created_at"]) < datetime.now(timezone.utc) - timedelta(minutes=6):
@@ -247,7 +251,7 @@ async def get_run(ws_id: str, run_id: str, request: Request):
 
 @router.post("/runs")
 async def start_run(ws_id: str, request: Request, body: AgentInput):
-    user, workspace = await authorized(request, ws_id)
+    user, workspace, membership = await authorized(request, ws_id)
     db = request.app.state.db
     owner_scope = scope(ws_id, user)
     run_key = f"{ws_id}:{user['_id']}:{body.request_id}"
@@ -285,7 +289,11 @@ async def start_run(ws_id: str, request: Request, body: AgentInput):
 
     async def execute():
         final_status = "failed"
-        tools = ManagerTools(db, workspace, request)
+        if membership["role"] == "owner":
+            tools = ManagerTools(db, workspace, request)
+        else:
+            from member_manager import MemberManagerTools
+            tools = MemberManagerTools(db, workspace, request, membership, user)
         tools.remember(thread.get("known"))
         try:
             with usage_scope(ws_id, "manager_agent"):

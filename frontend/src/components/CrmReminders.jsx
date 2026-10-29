@@ -26,7 +26,7 @@ const calendarDays = (month) => {
   return Array.from({ length: 42 }, (_, index) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + index));
 };
 
-export default function CrmReminders({ wsId, leadId, onOpenLead }) {
+export default function CrmReminders({ wsId, leadId, onOpenLead, apiBase, notifications = true }) {
   const [day, setDay] = useState(localDate);
   const [month, setMonth] = useState(() => new Date(`${appDate().slice(0, 7)}-01T12:00:00`));
   const [view, setView] = useState(leadId ? "all" : "day");
@@ -43,7 +43,7 @@ export default function CrmReminders({ wsId, leadId, onOpenLead }) {
   const [revision, setRevision] = useState(0);
   const [notificationStatus, setNotificationStatus] = useState(null);
   const [notificationBusy, setNotificationBusy] = useState(false);
-  const base = `/workspaces/${wsId}/crm`;
+  const base = apiBase || `/workspaces/${wsId}/crm`;
   const today = localDate();
   const chooseDay = (value) => { setDay(value); setMonth(new Date(`${value}T00:00:00`)); setView("day"); setPage(0); };
   const enableNotifications = async () => {
@@ -65,6 +65,7 @@ export default function CrmReminders({ wsId, leadId, onOpenLead }) {
     } finally { setNotificationBusy(false); }
   };
   useEffect(() => {
+    if (!notifications) return undefined;
     let live = true;
     const refresh = () => currentDevice(wsId)
       .then((value) => { if (live) setNotificationStatus(value); })
@@ -73,7 +74,7 @@ export default function CrmReminders({ wsId, leadId, onOpenLead }) {
     window.addEventListener("focus", refresh);
     window.addEventListener("arevei:push-changed", refresh);
     return () => { live = false; window.removeEventListener("focus", refresh); window.removeEventListener("arevei:push-changed", refresh); };
-  }, [wsId]);
+  }, [wsId, notifications]);
   useEffect(() => {
     let live = true;
     const params = { status, offset: page * 50, limit: 50 };
@@ -111,11 +112,11 @@ export default function CrmReminders({ wsId, leadId, onOpenLead }) {
       <div className="grid grid-cols-7 gap-1 text-center text-xs text-muted-foreground mb-1">{["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((name) => <span key={name}>{name}</span>)}</div>
       <div className="grid grid-cols-7 gap-1">{calendarDays(month).map((date) => { const key = calendarDate(date); const selected = key === day; const isToday = key === today; return <button key={key} type="button" aria-label={dateLabel(date)} aria-current={isToday ? "date" : undefined} aria-pressed={selected} onClick={() => chooseDay(key)} className={`h-9 rounded-lg text-sm transition ${selected ? "bg-primary text-primary-foreground font-semibold" : isToday ? "border-2 border-primary text-primary font-semibold" : date.getMonth() === month.getMonth() ? "hover:bg-accent" : "text-muted-foreground/50 hover:bg-accent"}`}>{date.getDate()}</button>; })}</div>
     </div>
-    <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3 text-sm">
+    {notifications && <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3 text-sm">
       <span className="font-medium">Follow-up notifications</span>
       {notificationStatus?.enabled ? <span className="text-emerald-600 dark:text-emerald-400">{notificationStatus.localOnly ? "Browser alerts enabled" : "Enabled on this device"}</span> : notificationStatus?.supported === false ? <span className="text-muted-foreground">Unavailable in this browser</span> : <button type="button" disabled={notificationBusy || !notificationStatus} onClick={enableNotifications} className="rounded-lg border px-3 py-1.5 font-medium hover:bg-accent disabled:opacity-50">{notificationBusy ? "Enabling…" : notificationStatus?.configured === false ? "Enable browser alerts" : "Enable notifications"}</button>}
       <span className="text-xs text-muted-foreground">{notificationStatus?.localOnly || notificationStatus?.configured === false ? "Local browser alerts require this workspace to remain open." : "Alerts are delivered for this workspace even when the installed app is closed."}</span>
-    </div>
+    </div>}
     {(leadId || editing) && <form onSubmit={save} className="rounded-xl border bg-card p-4 space-y-3">
       <h4 className="text-sm font-medium">{editing ? "Edit follow-up" : "Plan a follow-up"}</h4>
       <label className="block text-xs">What needs to happen?<input required maxLength={200} value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} placeholder="Call about the site visit" className={`${inputClass} mt-1`} /></label>

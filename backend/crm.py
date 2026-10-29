@@ -1701,6 +1701,27 @@ async def set_test_lead(ws_id: str, lead_id: str, request: Request, body: dict =
     return decorate_lead(await db.crm_leads.find_one(query), settings)
 
 
+def status_side_effects(doc, status):
+    """Updates shared by owner and member stage changes: sheet sync and clearing a junk verdict on reopen."""
+    updates = pending_sheet_sync(doc, status)
+    qualification = doc.get("qualification_call") or {}
+    if doc.get("status") == "lost" and status != "lost" and qualification.get("qualification_category") == "junk":
+        updates["qualification_call.qualification_category"] = ""
+        updates["qualification_call.last_error"] = ""
+        updates["qualification_call.disconnection_reason"] = ""
+    return updates
+
+
+async def won_side_effects(db, ws_id, doc):
+    """Marking a real-estate lead won books its unit, for owner and shared-member stage changes alike."""
+    if (doc.get("opportunity") or {}).get("module") != "real_estate":
+        return {}
+    from sales_modules import finalize_opportunity
+    workspace = await db.workspaces.find_one({"_id": oid(ws_id)}) or {}
+    return {"opportunity": await finalize_opportunity(db, ws_id, doc, workspace), "customer_status": "customer",
+            "converted_at": doc.get("converted_at") or now_iso()}
+
+
 @router.patch("/leads/{lead_id}")
 async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
     db = db_from(request)
@@ -1733,20 +1754,11 @@ async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = B
         "assigned_salesperson": values.get("assigned_salesperson"),
         "updated_at": now_iso(),
     }
-    updates.update(pending_sheet_sync(doc, status))
+    updates.update(status_side_effects(doc, status))
     if "is_test_lead" in body:
         updates["is_test_lead"] = body["is_test_lead"]
-    if status == "won" and (doc.get("opportunity") or {}).get("module") == "real_estate":
-        _, workspace = await require_workspace_access(request, ws_id)
-        from sales_modules import finalize_opportunity
-        updates["opportunity"] = await finalize_opportunity(db, ws_id, doc, workspace)
-        updates["customer_status"] = "customer"
-        updates["converted_at"] = doc.get("converted_at") or now_iso()
-    qualification = doc.get("qualification_call") or {}
-    if doc.get("status") == "lost" and status != "lost" and qualification.get("qualification_category") == "junk":
-        updates["qualification_call.qualification_category"] = ""
-        updates["qualification_call.last_error"] = ""
-        updates["qualification_call.disconnection_reason"] = ""
+    if status == "won":
+        updates.update(await won_side_effects(db, ws_id, doc))
     await db.crm_leads.update_one({"workspace_id": ws_id, "_id": oid(lead_id)}, {"$set": updates})
     if pending_sheet_sync(doc, status):
         from google_sheets import sync_lead_status
@@ -1756,7 +1768,7 @@ async def update_lead(ws_id: str, lead_id: str, request: Request, body: dict = B
 
 @router.post("/leads/{lead_id}/convert")
 async def convert_lead(ws_id: str, lead_id: str, request: Request, body: dict = Body(default=None)):
-    await require_workspace_access(request, ws_id)
+    # The router dependency authorizes owners; the shared sales portal checks lead permission before calling this.
     db = db_from(request)
     settings = await ensure_crm_settings(db, ws_id)
     body = body or {}

@@ -285,7 +285,7 @@ export default function WorkspaceLayout() {
                                 <div className="font-medium text-sm truncate">{workspace.name}</div>
                                 <div className="text-xs text-muted-foreground truncate">{workspace.website_url}</div>
                                 <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-                                  <s.icon className={`w-3.5 h-3.5 ${s.cls}`} /> {workspace.id === ws.id ? "Current - " : ""}{s.label}
+                                  {workspace.access_role && workspace.access_role !== "owner" ? <><Users className="w-3.5 h-3.5 text-primary" /> Shared with you · {workspace.access_role === "channel_partner" ? "Channel partner" : "Sales agent"}</> : <><s.icon className={`w-3.5 h-3.5 ${s.cls}`} /> {workspace.id === ws.id ? "Current - " : ""}{s.label}</>}
                                 </div>
                               </div>
                             </div>

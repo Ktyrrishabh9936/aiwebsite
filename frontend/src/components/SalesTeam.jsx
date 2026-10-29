@@ -6,6 +6,7 @@ import WorkspaceMembers from "./WorkspaceMembers";
 export function useSalesPeople(wsId) {
   const [people, setPeople] = useState([]);
   useEffect(() => {
+    if (!wsId) return undefined; // Shared members have no access to the sales team.
     let active = true;
     const refresh = () => api.get(`/workspaces/${wsId}/crm/sales-team`).then(({ data }) => { if (active) setPeople(data.items || []); }).catch(() => {});
     refresh();

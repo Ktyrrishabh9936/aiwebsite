@@ -46,8 +46,11 @@ async def access(request, ws_id):
 async def pipeline(ws_id: str, request: Request, status: str = Query(max_length=100), search: str = Query(default="", max_length=200), campaign: str = Query(default="", max_length=200), created_from: datetime = Query(None), created_before: datetime = Query(None), offset: int = Query(default=0, ge=0), limit: int = Query(default=30, ge=1, le=100)):
     _, workspace = await access(request, ws_id)
     query = apply_lead_filters(lead_query(ws_id), search, campaign, created_from, created_before, **{key: request.query_params.get(key, "") for key in ("sales_agent_id", "channel_partner_id", "introduced_by_id")})
-    query["status"] = status
-    db = db_from(request)
+    return await pipeline_stage(db_from(request), workspace, {**query, "status": status}, offset, limit)
+
+
+async def pipeline_stage(db, workspace, query, offset, limit):
+    """One pipeline column for an already-scoped lead query (owner workspace or a member's permitted leads)."""
     total = await db.crm_leads.count_documents(query)
     docs = await db.crm_leads.find(query, {"field_values.full_name": 1, "field_values.phone": 1, "field_values.email": 1, "full_name": 1, "phone": 1, "email": 1, "status": 1, "created_at": 1, "lead_status": 1, "opportunity": 1, "tags": 1, "customer_status": 1}).sort([("created_at", -1), ("_id", -1)]).skip(offset).limit(limit).to_list(limit)
     value = await db.crm_leads.aggregate([{"$match": {**query, "is_test_lead": {"$ne": True}}}, {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$opportunity.total_minor", 0]}}}}]).to_list(1)
@@ -59,10 +62,14 @@ async def pipeline(ws_id: str, request: Request, status: str = Query(max_length=
 async def pipeline_value(ws_id: str, request: Request, search: str = Query(default="", max_length=200), campaign: str = Query(default="", max_length=200), created_from: datetime = Query(None), created_before: datetime = Query(None), status: str = Query(default="all", max_length=100)):
     _, workspace = await access(request, ws_id)
     query = apply_lead_filters(lead_query(ws_id), search, campaign, created_from, created_before, **{key: request.query_params.get(key, "") for key in ("sales_agent_id", "channel_partner_id", "introduced_by_id")})
-    query["is_test_lead"] = {"$ne": True}
+    return await pipeline_total(db_from(request), workspace, query, status)
+
+
+async def pipeline_total(db, workspace, query, status="all"):
+    query = {**query, "is_test_lead": {"$ne": True}}
     if status != "all":
         query["status"] = status
-    values = await db_from(request).crm_leads.aggregate([{"$match": query}, {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$opportunity.total_minor", 0]}}}}]).to_list(1)
+    values = await db.crm_leads.aggregate([{"$match": query}, {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$opportunity.total_minor", 0]}}}}]).to_list(1)
     return {"value_minor": values[0]["total"] if values else 0, "currency": workspace_currency(workspace)}
 
 
@@ -126,19 +133,23 @@ def _follow_up_snapshot(lead, tasks):
 @router.get("/follow-ups/snapshots")
 async def follow_up_snapshots(ws_id: str, request: Request, lead_ids: str = Query(max_length=2500)):
     await access(request, ws_id)
+    return await snapshots_for(db_from(request), ws_id, lead_query(ws_id), lead_ids)
+
+
+async def snapshots_for(db, ws_id, scope, lead_ids, prepare=lambda lead: lead):
+    """Follow-up snapshots for the requested leads inside the caller's lead scope; prepare redacts what the caller may not see."""
     ids = list(dict.fromkeys(part.strip() for part in lead_ids.split(",") if part.strip()))
     if not ids or len(ids) > 100:
         raise HTTPException(422, "Select between 1 and 100 leads")
     object_ids = [oid(value) for value in ids]
-    db = db_from(request)
-    leads = await db.crm_leads.find({**lead_query(ws_id), "_id": {"$in": object_ids}},
+    leads = await db.crm_leads.find({**scope, "_id": {"$in": object_ids}},
                                     {"status": 1, "customer_status": 1, "lead_notes": 1,
                                      "communication_summary": 1}).to_list(100)
     tasks = await db.tasks.find({"workspace_id": ws_id, "source": "crm_reminder", "lead_id": {"$in": ids}}).sort("updated_at", -1).to_list(1000)
     by_lead = {}
     for task in tasks:
         by_lead.setdefault(task.get("lead_id"), []).append(task)
-    return {str(lead["_id"]): _follow_up_snapshot(lead, by_lead.get(str(lead["_id"]), [])) for lead in leads}
+    return {str(lead["_id"]): _follow_up_snapshot(prepare(lead), by_lead.get(str(lead["_id"]), [])) for lead in leads}
 
 
 def _manual_suggestion(lead, snapshot):
@@ -171,6 +182,11 @@ async def suggest_follow_up(ws_id: str, lead_id: str, request: Request):
     lead = await db.crm_leads.find_one({**lead_query(ws_id), "_id": oid(lead_id)})
     if not lead:
         raise HTTPException(404, "Active lead not found")
+    return await follow_up_suggestion(db, ws_id, workspace, lead)
+
+
+async def follow_up_suggestion(db, ws_id, workspace, lead):
+    lead_id = str(lead["_id"])
     tasks = await db.tasks.find({"workspace_id": ws_id, "lead_id": lead_id, "source": "crm_reminder"}).sort("updated_at", -1).limit(20).to_list(20)
     snapshot = _follow_up_snapshot(lead, tasks)
     fallback = _manual_suggestion(lead, snapshot)
@@ -205,6 +221,10 @@ async def create_reminder(ws_id: str, lead_id: str, request: Request, body: Remi
     lead = await db.crm_leads.find_one({**lead_query(ws_id), "_id": oid(lead_id)})
     if not lead:
         raise HTTPException(404, "Active lead not found")
+    return await insert_reminder(db, ws_id, lead_id, user, body)
+
+
+async def insert_reminder(db, ws_id, lead_id, user, body):
     now = now_iso()
     task = {"_id": ObjectId(), "workspace_id": ws_id, "lead_id": lead_id, "source": "crm_reminder",
             "title": body.title, "objective": body.note.strip(), "scheduled_time": body.due_at.isoformat(),
@@ -220,10 +240,17 @@ async def reminders(ws_id: str, request: Request, lead_id: str | None = None, st
                     end: datetime | None = None, status: Literal["pending", "done", "cancelled", "all"] = "pending",
                     overdue: bool = False, offset: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=100)):
     await access(request, ws_id)
+    return await reminder_page(db_from(request), ws_id, lead_id, start, end, status, overdue, offset, limit)
+
+
+async def reminder_page(db, ws_id, lead_id, start, end, status, overdue, offset, limit, lead_ids=None):
+    """lead_ids limits an unfiltered listing to a member's permitted leads."""
     query = {"workspace_id": ws_id, "source": "crm_reminder"}
     if lead_id:
         oid(lead_id)
         query["lead_id"] = lead_id
+    elif lead_ids is not None:
+        query["lead_id"] = {"$in": lead_ids}
     if status != "all":
         query["status"] = status
     for value in (start, end):
@@ -235,7 +262,6 @@ async def reminders(ws_id: str, request: Request, lead_id: str | None = None, st
         query["scheduled_time"] = {"$lt": now_iso()}
     elif start or end:
         query["scheduled_time"] = {**({"$gte": start.astimezone(timezone.utc).isoformat()} if start else {}), **({"$lt": end.astimezone(timezone.utc).isoformat()} if end else {})}
-    db = db_from(request)
     total = await db.tasks.count_documents(query)
     sort_fields = [("updated_at", -1), ("_id", -1)] if lead_id and status == "all" and not start and not end and not overdue else [("scheduled_time", 1), ("_id", 1)]
     docs = await db.tasks.find(query).sort(sort_fields).skip(offset).limit(limit).to_list(limit)
@@ -254,8 +280,10 @@ async def reminders(ws_id: str, request: Request, lead_id: str | None = None, st
 @router.patch("/reminders/{reminder_id}")
 async def update_reminder(ws_id: str, reminder_id: str, request: Request, body: ReminderInput | ReminderStatus):
     user, _ = await access(request, ws_id)
-    db = db_from(request)
-    query = {"workspace_id": ws_id, "source": "crm_reminder", "_id": oid(reminder_id)}
+    return await change_reminder(db_from(request), {"workspace_id": ws_id, "source": "crm_reminder", "_id": oid(reminder_id)}, user, body)
+
+
+async def change_reminder(db, query, user, body):
     patch = ({"status": body.status, **({"outcome": body.outcome.strip()} if body.status == "done" and body.outcome.strip() else {})}
              if isinstance(body, ReminderStatus) else {"title": body.title, "objective": body.note.strip(), "scheduled_time": body.due_at.isoformat()})
     now = now_iso()

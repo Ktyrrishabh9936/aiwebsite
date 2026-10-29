@@ -79,6 +79,13 @@ let webpackConfig = {
       },
     },
   },
+  jest: {
+    // Mirror the webpack '@' alias so components using it can be tested.
+    configure: (jestConfig) => ({
+      ...jestConfig,
+      moduleNameMapper: { ...jestConfig.moduleNameMapper, '^@/(.*)$': '<rootDir>/src/$1' },
+    }),
+  },
   webpack: {
     alias: {
       '@': path.resolve(__dirname, 'src'),

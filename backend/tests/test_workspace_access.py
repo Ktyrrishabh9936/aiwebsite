@@ -11,7 +11,7 @@ from crm import router as crm_router
 from memberships import owner_router, invite_router, portal_router
 from sales_team import router as team_router, shared_router
 from workflows import router as workflow_router
-from workspace_access import accessible_workspaces
+from workspace_access import accessible_workspaces, workspace_shell
 from migrate_workspace_access import migrate
 from tests.test_qualification_integration import isolated
 
@@ -50,6 +50,10 @@ def test_workspace_membership_lifecycle(monkeypatch):
             assert (await client.post(f"/membership-invitations/{token}/accept")).status_code == 410
             visible = await accessible_workspaces(db, await db.users.find_one({"_id": agent}))
             assert visible == [{"id": str(ws), "name": "Private workspace", "access_role": "sales_agent"}]
+            membership = await db.workspace_memberships.find_one({"user_id": str(agent), "workspace_id": str(ws)})
+            shell = await workspace_shell(db, await db.workspaces.find_one({"_id": ws}), membership)
+            assert shell["shared_by"] == {"name": "owner", "email": "owner@example.com"}
+            assert shell["member_name"] == "Agent" and shell["organization"] == "Private workspace" and shell["access_role"] == "sales_agent"
             lead, hidden, introduced = ObjectId(), ObjectId(), ObjectId()
             await db.crm_leads.insert_many([
                 {"_id": lead, "workspace_id": str(ws), "status": "new", "deleted_at": None, "phone": "+14155550123", "sales_assignment": {"sales_agent_id": str(agent_person)}, "payments": [{"secret": "private"}], "lead_notes": [{"id": "a", "source": "sales_member", "body": "Visible note"}, {"id": "b", "source": "private", "body": "Owner secret"}]},
@@ -101,8 +105,51 @@ def test_workspace_membership_lifecycle(monkeypatch):
             task = await db.tasks.find_one({"lead_id": str(lead)})
             assert task["requires_approval"] is True
             assert task["created_by"] == str(agent)
-            assert (await client.patch(portal + f"/leads/{hidden}/reminders/{task['_id']}", json={"status": "done"})).status_code == 404
-            assert (await client.patch(portal + f"/leads/{lead}/reminders/{task['_id']}", json={"status": "done", "outcome": "Spoke to lead"})).status_code == 200
+            hidden_task = (await db.tasks.insert_one({"workspace_id": str(ws), "lead_id": str(hidden), "source": "crm_reminder", "title": "Owner only", "status": "pending"})).inserted_id
+            assert (await client.patch(portal + f"/reminders/{hidden_task}", json={"status": "done"})).status_code == 404
+            assert (await client.get(portal + "/reminders", params={"lead_id": str(hidden)})).status_code == 404
+            assert [row["title"] for row in (await client.get(portal + "/reminders", params={"lead_id": str(lead)})).json()["items"]] == ["Call again"]
+            rescheduled = await client.patch(portal + f"/reminders/{task['_id']}", json={"title": "Call about visit", "note": "", "due_at": due})
+            assert rescheduled.status_code == 200 and rescheduled.json()["title"] == "Call about visit"
+            assert (await client.patch(portal + f"/reminders/{task['_id']}", json={"status": "done", "outcome": "Spoke to lead"})).status_code == 200
+            config = (await client.get(portal + "/settings")).json()
+            assert "won" in [state["key"] for state in config["states"]]
+            assert {field["key"]: field["editable"] for field in config["fields"]}["phone"] is False
+            assert "source" not in [field["key"] for field in config["fields"]]
+            staged = await client.patch(portal + f"/leads/{lead}", json={"status": "contacted", "field_values": {"full_name": "Diya Rao", "address": "Pune"}})
+            assert staged.status_code == 200, staged.text
+            assert staged.json()["lead"]["status"] == "contacted" and staged.json()["lead"]["full_name"] == "Diya Rao"
+            stored = await db.crm_leads.find_one({"_id": lead})
+            assert stored["status_changed_by"]["user_id"] == str(agent) and stored["field_values"]["address"] == "Pune"
+            assert (await client.patch(portal + f"/leads/{lead}", json={"field_values": {"phone": "+14155550999"}})).status_code == 422
+            assert (await client.patch(portal + f"/leads/{lead}", json={"payments": []})).status_code == 422
+            assert (await client.patch(portal + f"/leads/{hidden}", json={"status": "contacted"})).status_code == 404
+            column = (await client.get(portal + "/pipeline", params={"status": "contacted"})).json()
+            assert [row["id"] for row in column["items"]] == [str(lead)]
+            assert (await client.get(portal + "/pipeline-value")).status_code == 200
+            snapshots = await client.get(portal + "/follow-ups/snapshots", params={"lead_ids": f"{lead},{hidden}"})
+            assert list(snapshots.json()) == [str(lead)] and "Owner secret" not in snapshots.text
+            assert (await client.get(portal + f"/leads/{lead}/insights")).status_code == 200
+            assert (await client.get(portal + f"/leads/{hidden}/insights")).status_code == 404
+            # A shared member runs the whole deal on their own leads: conversion, payments, receipts and invoice.
+            assert (await client.post(portal + f"/leads/{hidden}/convert", json={"conversion_type": "single_payment"})).status_code == 404
+            assert (await client.post(base + f"/crm/leads/{lead}/convert", json={"conversion_type": "single_payment"})).status_code == 403
+            converted = await client.post(portal + f"/leads/{lead}/convert", json={"conversion_type": "single_payment"})
+            assert converted.status_code == 200, converted.text
+            assert converted.json()["lead"]["status"] == "won" and converted.json()["lead"]["customer_status"] == "customer"
+            assert (await db.crm_leads.find_one({"_id": lead}))["status_changed_by"]["user_id"] == str(agent)
+            paid = await client.post(portal + f"/leads/{lead}/receipts", json={"total_amount": "1000", "amount": "1000", "payment_method": "UPI"})
+            assert paid.status_code == 200, paid.text
+            receipt = paid.json()["lead"]["receipts"][-1]
+            assert paid.json()["lead"]["payment_summary"]["status"] == "completed"
+            document = await client.get(portal + f"/leads/{lead}/receipts/{receipt['id']}/html")
+            assert document.status_code == 200 and receipt["receipt_number"] in document.text
+            assert (await client.get(portal + f"/leads/{lead}/receipts/{receipt['id']}/pdf")).headers["content-type"] == "application/pdf"
+            assert (await client.get(portal + f"/leads/{hidden}/receipts/{receipt['id']}/html")).status_code == 404
+            invoice = await client.post(portal + f"/leads/{lead}/final-invoice", json={})
+            assert invoice.status_code == 200, invoice.text
+            assert (await client.get(portal + f"/leads/{lead}/final-invoice/html")).status_code == 200
+            assert (await client.patch(portal + f"/leads/{lead}", json={"status": "contacted"})).status_code == 200
             assert (await client.post(portal + f"/leads/{hidden}/notes", json={"body": "Forbidden"})).status_code == 404
             assert (await client.post(portal + "/leads", json={"phone": "+14155550124", "sales_assignment": {"sales_agent_id": "other"}})).status_code == 422
             assert (await client.get("/crm/shared-leads/old-token")).status_code == 410
@@ -144,6 +191,39 @@ def test_workspace_membership_lifecycle(monkeypatch):
             expired = await invite(agent_person, "agent@example.com")
             await db.workspace_invitations.update_one({"sales_person_id": str(agent_person)}, {"$set": {"expires_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()}})
             assert (await client.get(f"/membership-invitations/{expired}")).status_code == 410
+    asyncio.run(isolated(run))
+
+
+def test_member_agent_mode_only_reaches_permitted_leads(monkeypatch):
+    import pytest
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from member_manager import MEMBER_REGISTRY, MemberManagerTools
+
+    async def run(db):
+        owner, agent, ws, person, lead, hidden = (ObjectId() for _ in range(6))
+        await db.users.insert_many([{"_id": owner, "email": "owner@example.com", "name": "owner"}, {"_id": agent, "email": "agent@example.com", "name": "agent"}])
+        await db.workspaces.insert_one({"_id": ws, "user_id": str(owner), "name": "Workspace"})
+        await db.crm_sales_people.insert_one({"_id": person, "workspace_id": str(ws), "name": "Agent", "role": "sales_agent", "active": True, "user_id": str(agent)})
+        await db.workspace_memberships.insert_one({"_id": f"{ws}:{agent}", "workspace_id": str(ws), "user_id": str(agent), "sales_person_id": str(person), "role": "sales_agent", "active": True})
+        await db.crm_leads.insert_many([
+            {"_id": lead, "workspace_id": str(ws), "deleted_at": None, "status": "new", "full_name": "Shared lead", "sales_assignment": {"sales_agent_id": str(person)}},
+            {"_id": hidden, "workspace_id": str(ws), "deleted_at": None, "status": "new", "full_name": "Owner lead"}])
+        monkeypatch.setattr(auth, "access_token_payload", lambda request: {"sub": str(agent)})
+        tools = MemberManagerTools(db, await db.workspaces.find_one({"_id": ws}), SimpleNamespace(), await db.workspace_memberships.find_one({}), await db.users.find_one({"_id": agent}))
+        assert {"archive_lead", "list_sales_people", "update_business_profile", "assign_sales_person"}.isdisjoint(MEMBER_REGISTRY)
+        found = await tools.execute("search_leads", {})
+        assert [row["id"] for row in found["items"]] == [str(lead)] and found["total"] == 1
+        with pytest.raises(HTTPException):
+            await tools.execute("get_lead", {"lead_id": str(hidden)})
+        with pytest.raises(ValueError):
+            await tools.execute("archive_lead", {"lead_id": str(lead)})
+        await tools.execute("add_lead_note", {"lead_id": str(lead), "body": "Called back"})
+        assert (await db.crm_leads.find_one({"_id": lead}))["lead_notes"][-1]["author"] == "agent"
+        assert (await tools.execute("get_lead_payments", {"lead_id": str(lead)}))["customer_status"] == "lead"
+        await db.workspace_memberships.update_one({}, {"$set": {"active": False}})
+        with pytest.raises(HTTPException):
+            await tools.execute("search_leads", {})
     asyncio.run(isolated(run))
 
 

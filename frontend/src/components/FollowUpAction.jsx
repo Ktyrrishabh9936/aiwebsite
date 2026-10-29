@@ -19,7 +19,7 @@ function FollowUpDateTime({ value }) {
   </time>;
 }
 
-export function useFollowUpSnapshots(wsId, leadIds) {
+export function useFollowUpSnapshots(wsId, leadIds, apiBase) {
   const ids = leadIds.filter(Boolean).join(",");
   const [snapshots, setSnapshots] = useState({});
   const [revision, setRevision] = useState(0);
@@ -31,11 +31,11 @@ export function useFollowUpSnapshots(wsId, leadIds) {
   useEffect(() => {
     if (!ids) { setSnapshots({}); return undefined; }
     let live = true;
-    api.get(`/workspaces/${wsId}/crm/follow-ups/snapshots`, { params: { lead_ids: ids } })
+    api.get(`${apiBase || `/workspaces/${wsId}/crm`}/follow-ups/snapshots`, { params: { lead_ids: ids } })
       .then(({ data }) => { if (live) setSnapshots(data); })
       .catch(() => { if (live) setSnapshots({}); });
     return () => { live = false; };
-  }, [wsId, ids, revision]);
+  }, [wsId, ids, revision, apiBase]);
   return snapshots;
 }
 
@@ -49,7 +49,7 @@ export function FollowUpSnapshot({ snapshot, compact = false }) {
   </div>;
 }
 
-export default function FollowUpAction({ wsId, lead, snapshot, compact = false }) {
+export default function FollowUpAction({ wsId, lead, snapshot, compact = false, apiBase }) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [note, setNote] = useState("");
@@ -58,7 +58,7 @@ export default function FollowUpAction({ wsId, lead, snapshot, compact = false }
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const base = `/workspaces/${wsId}/crm`;
+  const base = apiBase || `/workspaces/${wsId}/crm`;
   const changed = () => window.dispatchEvent(new Event("arevei:follow-up-changed"));
   const suggest = async () => {
     setBusy(true); setError("");

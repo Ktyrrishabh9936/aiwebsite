@@ -394,6 +394,12 @@ async def insights(ws_id: str, lead_id: str, request: Request):
     if not ObjectId.is_valid(lead_id): raise HTTPException(404, "Lead not found")
     lead = await db.crm_leads.find_one({"_id": ObjectId(lead_id), "workspace_id": ws_id, "deleted_at": None})
     if not lead: raise HTTPException(404, "Lead not found")
+    return await lead_insights(db, ws, lead)
+
+
+async def lead_insights(db, ws, lead):
+    """Grounded lead insight shared by the owner CRM and the shared sales portal."""
+    ws_id, lead_id = str(ws["_id"]), str(lead["_id"])
     tasks = await db.tasks.find({"workspace_id": ws_id, "lead_id": lead_id, "status": {"$in": ["pending", "awaiting_approval"]}}).to_list(200)
     result = lead_insight(lead, tasks, ws.get("sales_profile") or {})
     from customer_lifecycle import customer_history
