@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/cli": "^8.6.0",
+    "@capacitor/core": "^8.6.0",
     "@hookform/resolvers": "5.0.1",
     "@monaco-editor/react": "^4.7.0",
     "@radix-ui/react-accordion": "1.2.8",
@@ -65,7 +68,9 @@
   "scripts": {
     "start": "craco start",
     "build": "craco build",
-    "test": "craco test"
+    "test": "craco test",
+    "build:mobile": "node scripts/build-mobile.js",
+    "cap:android": "cap open android"
   },
   "browserslist": {
     "production": [
