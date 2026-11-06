@@ -2,7 +2,7 @@
 
 Open `/pwa-test.html` on the frontend (for example `http://localhost:3000/pwa-test.html`). This is an isolated static test page; no React build or backend is needed for installation and offline testing. The existing frontend dev server serves it, and production builds copy it into `build/`.
 
-For phone testing after deployment, open the HTTPS site and go to **Settings → Install on your phone → Open mobile app preview**. Settings includes separate Android Chrome and iPhone Safari installation steps. No ngrok change is needed.
+The workspace itself is now installable: `index.html` links the manifest, `src/index.js` captures the browser's `beforeinstallprompt` event at startup, and the **Install app** button (Overview page header and **Settings → Install on your phone**) opens the native install dialog in one tap. The manifest's `start_url` is `/app`, so the home-screen shortcut opens the workspace. On iPhone, or in a browser that never offers the prompt, the button shows the manual Add to Home Screen steps instead. Settings still links the isolated test page below.
 
 1. Wait for **Offline setup: Ready**, then reload once.
 2. Install using **Install Arevei** when enabled or the browser install menu. On iPhone, open in Safari and use **Share → Add to Home Screen**.

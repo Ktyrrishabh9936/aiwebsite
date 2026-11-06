@@ -1,5 +1,6 @@
 import SalesBriefing from "../../components/SalesBriefing";
 import SetupChecklist from "../../components/onboarding/SetupChecklist";
+import InstallAppButton from "../../components/InstallAppButton";
 import { formatDateTime } from "../../lib/timezone";
 import { useCallback, useEffect, useState } from "react";
 import { useOutletContext, useNavigate } from "react-router-dom";
@@ -166,7 +167,10 @@ export default function Overview() {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div><h1 className="font-display text-3xl sm:text-4xl font-bold tracking-tight">Business overview</h1>
         <p className="text-sm text-muted-foreground mt-2">Track your leads, collections, and next steps.</p></div>
-        <button onClick={() => nav("crm")} className="inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg bg-primary text-primary-foreground text-sm font-semibold">Open CRM <ArrowRight className="w-4 h-4" /></button>
+        <div className="flex flex-wrap items-center gap-3">
+          <InstallAppButton />
+          <button onClick={() => nav("crm")} className="inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg bg-primary text-primary-foreground text-sm font-semibold">Open CRM <ArrowRight className="w-4 h-4" /></button>
+        </div>
       </div>
 
       {analyticsStatus === "error" && <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-card p-4 text-sm"><p>CRM data couldn’t be refreshed. Your records are still available in CRM.</p><button onClick={load} className="inline-flex min-h-10 items-center gap-2 px-3 rounded-lg border font-medium"><RefreshCw size={14} /> Try again</button></div>}

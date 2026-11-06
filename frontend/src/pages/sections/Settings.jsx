@@ -1,6 +1,7 @@
 import VoiceProviders from "../../components/VoiceProviders";
 import TwilioSmsSettings from "../../components/TwilioSmsSettings";
 import PushNotificationSettings from "../../components/PushNotificationSettings";
+import InstallAppButton from "../../components/InstallAppButton";
 import AIUsageDashboard from "../../components/AIUsageDashboard";
 import BillingDashboard from "../../components/BillingDashboard";
 import { useEffect, useState } from "react";
@@ -171,21 +172,24 @@ export default function Settings() {
           <div className="rounded-md border border-border bg-background p-4 space-y-2">
             <h3 className="font-semibold">Android · Chrome</h3>
             <ol className="list-decimal pl-5 text-sm text-muted-foreground space-y-2">
-              <li>Open this site in Chrome on your phone and tap Open mobile app preview below.</li>
-              <li>Tap Install Arevei, or open Chrome’s menu and choose Add to Home screen → Install.</li>
+              <li>Open this site in Chrome on your phone and tap Install app below (it is also on the Overview page).</li>
+              <li>Confirm Install. If no dialog appears, open Chrome’s menu and choose Add to Home screen → Install.</li>
               <li>Launch Arevei from your home screen.</li>
             </ol>
           </div>
           <div className="rounded-md border border-border bg-background p-4 space-y-2">
             <h3 className="font-semibold">iPhone · Safari</h3>
             <ol className="list-decimal pl-5 text-sm text-muted-foreground space-y-2">
-              <li>Open this site in Safari on your iPhone and tap Open mobile app preview below.</li>
+              <li>Open this site in Safari on your iPhone.</li>
               <li>Tap Share, then Add to Home Screen. Enable Open as Web App if shown, and tap Add.</li>
               <li>Launch Arevei from your home screen.</li>
             </ol>
           </div>
         </div>
-        <a href={`${process.env.PUBLIC_URL || ""}/pwa-test.html`} className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"><Smartphone className="h-4 w-4" /> Open mobile app preview</a>
+        <div className="flex flex-wrap items-center gap-3">
+          <InstallAppButton className="h-10 rounded-md bg-primary text-primary-foreground border-transparent hover:bg-primary/90" />
+          <a href={`${process.env.PUBLIC_URL || ""}/pwa-test.html`} className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-semibold hover:bg-accent"><Smartphone className="h-4 w-4" /> Open mobile app preview</a>
+        </div>
         <p className="text-xs leading-5 text-muted-foreground">This first preview tests installation and an offline test page. Your workspace still needs an internet connection. Use the deployed HTTPS site on your phone; installation may be unavailable in private browsing or inside another app’s browser.</p>
       </section>
 

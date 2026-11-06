@@ -80,3 +80,22 @@ test("failed analytics hide zero totals and recover on retry", async () => {
   expect(container.querySelector('[role="alert"]')).toBeNull();
   expect(container.querySelector('[data-testid="stat-crm-total-leads"]').textContent).toContain("12");
 });
+
+test("the install button opens the browser install dialog captured at startup", async () => {
+  await act(async () => root.render(<Overview />));
+  const event = new Event("beforeinstallprompt", { cancelable: true });
+  event.prompt = jest.fn().mockResolvedValue(undefined);
+  event.userChoice = Promise.resolve({ outcome: "accepted" });
+  await act(async () => { window.dispatchEvent(event); });
+  const install = container.querySelector('[data-testid="install-app-button"]');
+  expect(install.textContent).toContain("Install app");
+  await act(async () => install.click());
+  expect(event.prompt).toHaveBeenCalledTimes(1);
+});
+
+test("the install button is hidden inside the installed app", async () => {
+  Object.defineProperty(navigator, "standalone", { configurable: true, value: true });
+  await act(async () => root.render(<Overview />));
+  expect(container.querySelector('[data-testid="install-app-button"]')).toBeNull();
+  Object.defineProperty(navigator, "standalone", { configurable: true, value: undefined });
+});
