@@ -1,5 +1,5 @@
 import { formatDateTime } from "../lib/timezone";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import api, { formatError } from "../lib/api";
 
 const fields = {
@@ -8,6 +8,13 @@ const fields = {
 };
 const secrets = { plivo: [["auth_token", "Auth token"], ["callback_token", "Callback token (32+ characters, optional with signatures)"], ["bearer_token", "Flow bearer token (only for bearer authentication)"]], sarvam: [["api_key", "Voice Agents API key"]] };
 const input = "w-full border rounded px-3 py-2 bg-background text-sm";
+const LANGUAGES = ["English", "Hindi", "Bengali", "Gujarati", "Kannada", "Konkani", "Malayalam", "Tamil", "Telugu", "Punjabi", "Odia", "Marathi", "Assamese"];
+const newCreationKey = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `k-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+const agentNameFor = (business) => `${(business || "AREVEI").replace(/[^\w\- ()]/g, " ").replace(/\s+/g, " ").trim().slice(0, 34) || "AREVEI"} Lead Qualifier`;
+const errorDetail = (error) => { const detail = error?.response?.data?.detail; return detail && typeof detail === "object" && !Array.isArray(detail) ? detail : null; };
+const errorMessage = (error, fallback) => errorDetail(error)?.message || (error?.response?.data?.detail != null ? formatError(error.response.data.detail)
+  : !error?.response ? (error?.message && !error?.request ? error.message : fallback) : `The backend returned HTTP ${error.response.status}.`);
+const ACCOUNT_LABELS = { connected: "connected", expired: "sign-in expired, reconnect", disconnected: "not connected", unavailable: "status unavailable" };
 
 export default function VoiceProviders({ workspaceId }) {
   const [providers, setProviders] = useState([]);
@@ -19,8 +26,53 @@ export default function VoiceProviders({ workspaceId }) {
   const [guideMessage, setGuideMessage] = useState("");
   const [guideForm, setGuideForm] = useState({ business_name: "", offer: "", objective: "", instructions: "" });
   const [guide, setGuide] = useState(null);
+  const [account, setAccount] = useState({ status: "disconnected" });
+  const [connections, setConnections] = useState([]);
+  const [voices, setVoices] = useState([]);
+  const [createForm, setCreateForm] = useState({ agent_name: "", connection_id: "", agent_phone_number: "", initial_language: "English", voice_id: "", api_key: "" });
+  const [creationKey, setCreationKey] = useState(newCreationKey);
+  const [creation, setCreation] = useState(null);
+  const [createMessage, setCreateMessage] = useState("");
+  const connectListener = useRef(null);
   const base = `/workspaces/${workspaceId}/voice-providers`;
   const selected = providers.find((p) => p.provider === provider);
+  const sarvamAccountConnected = account.status === "connected";
+
+  const loadAccount = async () => {
+    try {
+      const { data } = await api.get(`${base}/sarvam/account`);
+      const status = data?.status === "connected" || data?.status === "expired" ? data.status : "disconnected";
+      setAccount({ ...(data || {}), status });
+      if (status !== "connected") { setConnections([]); return; }
+      const { data: list } = await api.get(`${base}/sarvam/account/connections`);
+      const items = Array.isArray(list?.connections) ? list.connections : [];
+      setConnections(items);
+      setCreateForm((form) => {
+        const connection = items.find((item) => item.connection_id === form.connection_id) || items[0];
+        if (!connection) return form;
+        const phone = connection.phone_numbers?.includes(form.agent_phone_number) ? form.agent_phone_number : connection.phone_numbers?.[0] || "";
+        return { ...form, connection_id: connection.connection_id, agent_phone_number: phone };
+      });
+    } catch (error) {
+      setAccount({ status: "unavailable", error: errorMessage(error, "The backend could not be reached.") });
+      setConnections([]);
+    }
+  };
+  useEffect(() => {
+    if (provider !== "sarvam") return;
+    setCreation(null); setCreateMessage("");
+    loadAccount();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider, base]);
+  useEffect(() => {
+    if (!sarvamAccountConnected) { setVoices([]); return undefined; }
+    let active = true;
+    api.get(`${base}/sarvam/account/voices`, { params: { language: createForm.initial_language } })
+      .then(({ data }) => { if (active) setVoices(Array.isArray(data?.voices) ? data.voices : []); })
+      .catch(() => { if (active) setVoices([]); });
+    return () => { active = false; };
+  }, [sarvamAccountConnected, createForm.initial_language, base]);
+  useEffect(() => () => { if (connectListener.current) window.removeEventListener("message", connectListener.current); }, []);
 
   useEffect(() => {
     let active = true;
@@ -99,6 +151,77 @@ export default function VoiceProviders({ workspaceId }) {
     catch { setMessage("Copy unavailable. Select and copy the text manually."); }
   };
 
+  const connectAccount = async () => {
+    setBusy(true); setCreateMessage("");
+    try {
+      const { data } = await api.post(`${base}/sarvam/account/connect`, {});
+      const popup = window.open(data.authorization_url, "Sarvam Connect", "width=560,height=720");
+      if (!popup) { setCreateMessage("Allow pop-ups for this site, then connect again."); return; }
+      setCreateMessage("Finish signing in to Sarvam in the window that opened.");
+      if (connectListener.current) window.removeEventListener("message", connectListener.current);
+      const listener = (event) => {
+        if (event.data?.type !== "SARVAM_CONNECTED" && event.data?.type !== "SARVAM_CONNECT_FAILED") return;
+        window.removeEventListener("message", listener); connectListener.current = null;
+        if (event.data.type === "SARVAM_CONNECTED") { setCreateMessage("Sarvam account connected."); loadAccount(); }
+        else setCreateMessage("Sarvam sign-in did not complete. Try connecting again.");
+      };
+      connectListener.current = listener;
+      window.addEventListener("message", listener);
+    } catch (error) {
+      setCreateMessage(`Could not start Sarvam sign-in: ${errorMessage(error, "The backend could not be reached.")}`);
+    } finally { setBusy(false); }
+  };
+
+  const disconnectAccount = async () => {
+    setBusy(true); setCreateMessage("");
+    try { await api.delete(`${base}/sarvam/account`); setAccount({ status: "disconnected" }); setConnections([]); setCreateMessage("Sarvam account disconnected. Existing agents keep working."); }
+    catch (error) { setCreateMessage(`Could not disconnect: ${errorMessage(error, "The backend could not be reached.")}`); }
+    finally { setBusy(false); }
+  };
+
+  const applyCreation = async (data, verb) => {
+    setCreation(data.creation);
+    if (data.provider) setProviders((items) => items.map((item) => item.provider === "sarvam" ? { ...item, ...data.provider } : { ...item, is_default: false }));
+    setCreateForm((form) => ({ ...form, api_key: "" }));
+    setCreationKey(newCreationKey());
+    try { const { data: list } = await api.get(base); if (Array.isArray(list)) setProviders(list); } catch { /* provider details refresh is best effort */ }
+    const verification = data.provider?.status === "connected" ? "Connection verified; calls can start now."
+      : `Connection check: ${(data.provider?.status || "unverified").replaceAll("_", " ")}. Check the Voice Agents API key, then use Save & Test Connection.`;
+    setCreateMessage(`Agent "${data.creation?.agent_name}" ${verb} in Sarvam (version ${data.creation?.app_version}) and connected to this workspace. ${verification}`);
+  };
+
+  const createAgent = async () => {
+    setBusy(true); setCreateMessage("Creating the agent in Sarvam…"); setCreation(null);
+    try {
+      const languages = [...new Set([createForm.initial_language, "English", "Hindi"])];
+      const payload = { creation_key: creationKey, agent_name: createForm.agent_name.trim() || agentNameFor(guideForm.business_name),
+        business_name: guideForm.business_name, offer: guideForm.offer, objective: guideForm.objective, instructions: guideForm.instructions,
+        connection_id: createForm.connection_id, agent_phone_number: createForm.agent_phone_number,
+        initial_language: createForm.initial_language, supported_languages: languages, revision: selected?.revision };
+      if (createForm.voice_id) payload.voice_id = createForm.voice_id;
+      if (createForm.api_key.trim()) payload.api_key = createForm.api_key.trim();
+      const { data } = await api.post(`${base}/sarvam/agents`, payload);
+      await applyCreation(data, data.idempotent ? "already existed" : "created");
+    } catch (error) {
+      const code = errorDetail(error)?.code;
+      if (code === "created_unsaved") setCreation({ status: "created_unsaved" });
+      if (code === "account_reconnect_required" || code === "account_not_connected") setAccount((current) => ({ ...current, status: "expired" }));
+      setCreateMessage(`Could not create the agent: ${errorMessage(error, "The backend could not be reached.")}`);
+    } finally { setBusy(false); }
+  };
+
+  const finishConnecting = async () => {
+    setBusy(true); setCreateMessage("Connecting the created agent…");
+    try {
+      const body = { revision: selected?.revision };
+      if (createForm.api_key.trim()) body.api_key = createForm.api_key.trim();
+      const { data } = await api.post(`${base}/sarvam/agents/${creationKey}/connect`, body);
+      await applyCreation(data, "exists");
+    } catch (error) {
+      setCreateMessage(`Could not connect the created agent: ${errorMessage(error, "The backend could not be reached.")}`);
+    } finally { setBusy(false); }
+  };
+
   const regenerateCallbackSecurity = async () => {
     setBusy(true); setMessage("");
     try {
@@ -136,7 +259,39 @@ export default function VoiceProviders({ workspaceId }) {
             <label className="text-sm sm:col-span-2">Call objective<input className={input} value={guideForm.objective} onChange={(e) => setGuideForm({ ...guideForm, objective: e.target.value })} placeholder="Qualify the lead and agree on the next step" /></label>
             <label className="text-sm sm:col-span-2">Additional instructions<textarea className={input} rows="3" value={guideForm.instructions} onChange={(e) => setGuideForm({ ...guideForm, instructions: e.target.value })} placeholder="Optional policies, tone, language, or handoff rules" /></label>
           </div>
-          <button type="button" className="border rounded px-3 py-2 text-sm mt-3" onClick={generateGuide}>Generate setup guide</button>
+          <div className="border rounded p-3 space-y-3 mt-3" aria-label="Sarvam account">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm font-medium">Sarvam account: {ACCOUNT_LABELS[account.status] || account.status}{account.connected_by ? ` (${account.connected_by})` : ""}</p>
+              {sarvamAccountConnected
+                ? <button type="button" className="underline text-xs" onClick={disconnectAccount}>Disconnect</button>
+                : <button type="button" className="border rounded px-3 py-2 text-sm" onClick={connectAccount}>Connect Sarvam account</button>}
+            </div>
+            {sarvamAccountConnected ? <>
+              <p className="text-xs text-muted-foreground">AREVEI creates the agent with your business details above, configures the lead-context inputs and qualification outputs, commits a version and connects it here.</p>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <label className="text-sm">Agent name<input className={input} maxLength="50" value={createForm.agent_name} placeholder={agentNameFor(guideForm.business_name)} onChange={(e) => setCreateForm({ ...createForm, agent_name: e.target.value })} /></label>
+                <label className="text-sm">Language<select aria-label="Agent language" className={input} value={createForm.initial_language} onChange={(e) => setCreateForm({ ...createForm, initial_language: e.target.value, voice_id: "" })}>{LANGUAGES.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+                <label className="text-sm">Telephony connection<select aria-label="Telephony connection" className={input} value={createForm.connection_id} onChange={(e) => { const item = connections.find((c) => c.connection_id === e.target.value); setCreateForm({ ...createForm, connection_id: e.target.value, agent_phone_number: item?.phone_numbers?.[0] || "" }); }}>
+                  {connections.length === 0 && <option value="">No telephony connection in Sarvam yet</option>}
+                  {connections.map((item) => <option key={item.connection_id} value={item.connection_id}>{item.name}{item.provider ? ` · ${item.provider}` : ""}</option>)}
+                </select></label>
+                <label className="text-sm">Agent phone number<select aria-label="Agent phone number" className={input} value={createForm.agent_phone_number} onChange={(e) => setCreateForm({ ...createForm, agent_phone_number: e.target.value })}>
+                  {(connections.find((c) => c.connection_id === createForm.connection_id)?.phone_numbers || []).map((phone) => <option key={phone} value={phone}>{phone}</option>)}
+                  {!(connections.find((c) => c.connection_id === createForm.connection_id)?.phone_numbers || []).length && <option value="">No onboarded number</option>}
+                </select></label>
+                <label className="text-sm">Voice (optional)<select aria-label="Agent voice" className={input} value={createForm.voice_id} onChange={(e) => setCreateForm({ ...createForm, voice_id: e.target.value })}>
+                  <option value="">Sarvam default voice</option>
+                  {voices.map((voice) => <option key={voice.voice_id} value={voice.voice_id}>{voice.name}{voice.gender ? ` · ${voice.gender}` : ""}</option>)}
+                </select></label>
+                {!selected?.configured_secrets?.includes("api_key") && <label className="text-sm">Voice Agents API key<input type="password" autoComplete="new-password" className={input} value={createForm.api_key} placeholder="Required for placing calls" onChange={(e) => setCreateForm({ ...createForm, api_key: e.target.value })} /></label>}
+              </div>
+              <button type="button" className="rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm disabled:opacity-50" disabled={busy || !createForm.connection_id || !createForm.agent_phone_number} onClick={createAgent}>Create agent in Sarvam</button>
+            </> : <p className="text-xs text-muted-foreground">{account.error || "Connect the Sarvam account that owns your voice agents. AREVEI then creates and connects the agent for you; the manual guide below remains available."}</p>}
+            {createMessage && <p role="status" className="text-sm">{createMessage}</p>}
+            {creation?.status === "created_unsaved" && <button type="button" className="border rounded px-3 py-2 text-sm" onClick={finishConnecting}>Finish connecting</button>}
+          </div>
+          <p className="text-xs text-muted-foreground mt-3">Manual alternative: generate a prompt for Sarvam's AI agent builder.</p>
+          <button type="button" className="border rounded px-3 py-2 text-sm mt-1" onClick={generateGuide}>Generate setup guide</button>
           {guideMessage && <p role="status" className="text-sm mt-2">{guideMessage}</p>}
           {guide && <div className="space-y-3 mt-4" aria-label="Sarvam setup guide">
             <div><p className="text-sm font-medium">Inputs Sarvam AI will configure</p><div className="flex flex-wrap gap-2 mt-1">{guide.variables.map((item) => <code key={item.name} className="border rounded px-2 py-1 text-xs">{item.name}</code>)}</div><p className="text-xs text-muted-foreground mt-1">Your existing qualification output variables will remain unchanged.</p></div>

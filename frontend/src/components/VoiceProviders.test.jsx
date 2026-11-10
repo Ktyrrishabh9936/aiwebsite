@@ -169,3 +169,83 @@ test("replacement keys can be saved to older backends without the unsupported re
  expect(api.put.mock.calls[1][1]).toEqual({enabled:false,config:{app_id:'existing'},credentials:{api_key:'replacement-key'},revision:2});
  expect(container.querySelector('[role="status"]').textContent).toContain('saved as this workspace');
 });
+
+const byUrl = (routes) => (url) => {
+  const match = Object.keys(routes).find((key) => url.endsWith(key));
+  return match ? Promise.resolve({ data: routes[match] }) : Promise.reject(new Error(`unexpected GET ${url}`));
+};
+const sarvamProviders = [
+  { provider: "plivo", enabled: false, config: {}, status: "missing_configuration" },
+  { provider: "sarvam", enabled: false, config: {}, status: "missing_configuration", configured_secrets: [], revision: 2, is_default: true },
+];
+const connectedAccount = {
+  "/voice-providers": sarvamProviders,
+  "/sarvam/account": { status: "connected", connected_by: "owner@example.com" },
+  "/sarvam/account/connections": { connections: [{ connection_id: "conn-1", name: "Vobiz", provider: "vobiz", phone_numbers: ["+917971413693"] }] },
+  "/sarvam/account/voices": { voices: [{ voice_id: "01a0cf16-5db4-7924-a37d-8f3bb1234d7c", name: "Ishita", gender: "female" }] },
+};
+const typeInto = (element, value) => act(async () => {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(element, value);
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+});
+const openSarvamSetup = async () => {
+  await act(async () => root.render(<VoiceProviders workspaceId="A" />));
+  const details = [...container.querySelectorAll("details")].find((item) => item.textContent.includes("Set up a new Sarvam agent"));
+  details.open = true;
+  return details;
+};
+
+test("creates and connects a Sarvam agent automatically from the connected account", async () => {
+  api.get.mockImplementation(byUrl(connectedAccount));
+  api.post.mockResolvedValue({ data: {
+    creation: { status: "connected", agent_name: "Acme Lead Qualifier", app_id: "App-1", app_version: 1 },
+    provider: { provider: "sarvam", enabled: true, status: "connected", revision: 3, configured_secrets: ["api_key"], config: { app_id: "App-1", app_version: 1, connection_id: "conn-1", agent_phone_number: "+917971413693", organization_id: "org", workspace_id: "sws" } },
+  } });
+  const details = await openSarvamSetup();
+  expect(details.textContent).toContain("Sarvam account: connected (owner@example.com)");
+  expect(container.querySelector('[aria-label="Telephony connection"]').value).toBe("conn-1");
+  expect(container.querySelector('[aria-label="Agent phone number"]').value).toBe("+917971413693");
+  const businessInput = [...details.querySelectorAll("input")].find((item) => item.placeholder === "Uses workspace name if blank");
+  await typeInto(businessInput, "Acme");
+  await typeInto(details.querySelector('input[type="password"]'), "rest-key");
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Create agent in Sarvam").click());
+  const [url, payload] = api.post.mock.calls.find(([called]) => called === "/workspaces/A/voice-providers/sarvam/agents");
+  expect(url).toBe("/workspaces/A/voice-providers/sarvam/agents");
+  expect(payload).toEqual(expect.objectContaining({ creation_key: expect.any(String), agent_name: "Acme Lead Qualifier", business_name: "Acme",
+    connection_id: "conn-1", agent_phone_number: "+917971413693", initial_language: "English", supported_languages: ["English", "Hindi"], api_key: "rest-key", revision: 2 }));
+  expect(payload.voice_id).toBeUndefined();
+  expect(details.querySelector('[role="status"]').textContent).toContain('Agent "Acme Lead Qualifier" created in Sarvam (version 1) and connected');
+  expect(details.querySelector('[role="status"]').textContent).toContain("Connection verified");
+  expect(api.put).not.toHaveBeenCalled();
+});
+
+test("keeps the creation key and offers Finish connecting when Sarvam created the agent but saving failed", async () => {
+  api.get.mockImplementation(byUrl(connectedAccount));
+  api.post.mockRejectedValueOnce({ response: { status: 503, data: { detail: { code: "created_unsaved", message: "The agent exists in Sarvam but could not be connected: encryption unavailable. Use Finish connecting." } } } });
+  api.post.mockResolvedValueOnce({ data: { creation: { status: "connected", agent_name: "AREVEI Lead Qualifier", app_id: "App-1", app_version: 1 }, provider: { provider: "sarvam", status: "connected", revision: 3, config: {} } } });
+  const details = await openSarvamSetup();
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Create agent in Sarvam").click());
+  expect(details.querySelector('[role="status"]').textContent).toContain("could not be connected");
+  const key = api.post.mock.calls[0][1].creation_key;
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Finish connecting").click());
+  expect(api.post).toHaveBeenLastCalledWith(`/workspaces/A/voice-providers/sarvam/agents/${key}/connect`, { revision: 2 });
+  expect(details.querySelector('[role="status"]').textContent).toContain("connected to this workspace");
+  expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Finish connecting")).toBe(false);
+});
+
+test("connect opens the Sarvam sign-in window and reloads the account when it completes", async () => {
+  const routes = { ...connectedAccount, "/sarvam/account": { status: "disconnected" } };
+  api.get.mockImplementation(byUrl(routes));
+  api.post.mockResolvedValue({ data: { authorization_url: "https://mcp.sarvam.ai/voice-agents/authorize?state=abc" } });
+  window.open = jest.fn(() => ({ closed: false }));
+  const details = await openSarvamSetup();
+  expect(details.textContent).toContain("Sarvam account: not connected");
+  expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Create agent in Sarvam")).toBe(false);
+  await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Connect Sarvam account").click());
+  expect(api.post).toHaveBeenCalledWith("/workspaces/A/voice-providers/sarvam/account/connect", {});
+  expect(window.open).toHaveBeenCalledWith("https://mcp.sarvam.ai/voice-agents/authorize?state=abc", "Sarvam Connect", expect.any(String));
+  routes["/sarvam/account"] = { status: "connected" };
+  await act(async () => { window.dispatchEvent(new MessageEvent("message", { data: { type: "SARVAM_CONNECTED" } })); });
+  expect(details.textContent).toContain("Sarvam account: connected");
+  expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Create agent in Sarvam")).toBe(true);
+});

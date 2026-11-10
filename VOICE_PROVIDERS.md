@@ -167,7 +167,45 @@ requirement, fit, explicit budget, eligibility, timeline, intent, decision-maker
 location, preferences, objections, interest, and do-not-call. The separate prompt is not
 needed when updating an agent whose qualification outputs already work.
 
+### Automated Sarvam agent creation
+
+Sarvam's public REST API cannot create, configure or commit agents; only the official
+Voice Agents MCP server (`https://mcp.sarvam.ai/voice-agents`, OAuth 2.1 with PKCE, dynamic
+client registration and rotating refresh tokens) exposes those operations. `backend/sarvam_agent_builder.py`
+uses it so that an owner can create and connect an agent without opening the Sarvam dashboard:
+
+1. Settings > Voice Providers > Sarvam > "Set up a new Sarvam agent" > **Connect Sarvam account**.
+   The backend registers AREVEI once per callback URL (`{PUBLIC_BASE_URL}/api/sarvam/oauth/callback`,
+   overridable with `SARVAM_OAUTH_REDIRECT_URI` for local development), opens Sarvam's consent page in a
+   pop-up and stores the tokens in `sarvam_account_connections`, encrypted with `VOICE_CREDENTIAL_KEYS`
+   and bound to the AREVEI workspace. Tokens are never returned to the browser. Access tokens last about
+   a day and are refreshed server-side; a refresh failure marks the account `expired` and the UI asks to reconnect.
+2. The owner fills the same business fields the manual guide uses, picks the telephony connection and
+   onboarded number (read live from Sarvam), a language and optionally a voice, and clicks **Create agent in Sarvam**.
+   The backend creates the agent, writes the shared runtime prompt (`voice_api.sarvam_runtime_prompt`),
+   configures `lead_name`, `lead_phone` and `lead_context` as call-start inputs and the twelve qualification
+   outputs as post-call variables, verifies the draft, commits a version and then calls the existing
+   `save_config` with app ID, committed version, connection, number, `payload_mode=lead_context_v1`, followed by
+   the existing connection probe. Calling, callbacks and qualification are unchanged.
+3. The Voice Agents REST API key is still required for placing calls. It is requested once if the workspace
+   has none, before anything is created in Sarvam.
+
+Idempotency: every creation request carries a client-generated `creation_key` recorded in
+`sarvam_agent_creations` (unique per workspace). A retry with the same key returns the existing agent, a
+request still in progress is refused with `creation_in_progress`, and a Sarvam-side success followed by an
+AREVEI persistence failure leaves the record in `created_unsaved` so the UI offers **Finish connecting**
+(`POST .../sarvam/agents/{creation_key}/connect`) instead of creating a second agent. Sarvam validation
+messages are surfaced with URLs and secrets removed.
+
+APIs (all workspace owner/admin unless noted): `GET/DELETE /workspaces/{ws_id}/voice-providers/sarvam/account`,
+`POST .../account/connect`, `GET .../account/connections`, `GET .../account/voices?language=`,
+`POST .../sarvam/agents`, `GET .../sarvam/agents/{creation_key}`, `POST .../sarvam/agents/{creation_key}/connect`,
+and the browser redirect `GET /sarvam/oauth/callback` (authenticated by the single-use OAuth state).
+Run `python migrate_runtime.py` to create the unique indexes for the three new collections.
+The manual setup guide remains available as a fallback.
+
 Official contracts consulted:
+- https://docs.sarvam.ai/voice-agents/mcp (Voice Agents MCP server, agent creation and commit)
 - https://docs.sarvam.ai/conversations/api/introduction
 - https://docs.sarvam.ai/conversations/api/instant-outbound/create
 - https://docs.sarvam.ai/conversations/api/instant-outbound/webhook-payload

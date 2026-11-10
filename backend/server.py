@@ -1296,6 +1296,8 @@ api.include_router(sales_portal_router)
 api.include_router(plivo_agents_router)
 from voice_api import router as voice_providers_router
 api.include_router(voice_providers_router)
+from sarvam_agent_builder import router as sarvam_agent_builder_router
+api.include_router(sarvam_agent_builder_router)
 api.include_router(qualification_router)
 api.include_router(crm_performance_router)
 api.include_router(crm_workspace_router)

@@ -42,12 +42,13 @@ class SarvamSetupGuideRequest(BaseModel):
     instructions: str = Field(default="", max_length=16000)
 
 
-def sarvam_setup_prompt(business_name, offer, objective, instructions):
+def sarvam_runtime_prompt(business_name, offer, objective, instructions):
+    """The agent's runtime instructions; shared by the manual guide and automated creation."""
     business_name = " ".join((business_name or "the business").split())
     offer = " ".join((offer or "the configured product or service").split())
     objective = " ".join((objective or "qualify the lead and identify the appropriate next step").split())
     instructions = " ".join((instructions or "No additional business instructions.").split())
-    runtime_prompt = f"""# ROLE
+    return f"""# ROLE
 You are the voice lead-qualification assistant for {business_name}.
 
 # CALL INPUTS
@@ -78,6 +79,10 @@ Every call receives exactly these three String variables:
 
 # RESULT
 Capture the qualification facts required by the agent's existing output variables so AREVEI can update the CRM after the call."""
+
+
+def sarvam_setup_prompt(business_name, offer, objective, instructions):
+    runtime_prompt = sarvam_runtime_prompt(business_name, offer, objective, instructions)
     return f"""Configure this Sarvam voice agent for AREVEI lead qualification.
 
 # REQUIRED CONFIGURATION CHANGES
