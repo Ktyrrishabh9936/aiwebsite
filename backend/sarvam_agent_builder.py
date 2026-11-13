@@ -34,7 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from crm import db_from, require_workspace_access
 from models import now_iso
-from voice_config import decrypt, encrypt, load_config, public_base, public_config, save_config
+from voice_config import decrypt, encrypt, load_config, platform_sarvam_configured, platform_sarvam_key, public_base, public_config, save_config
 from voice_providers import get_provider
 
 router = APIRouter(tags=["sarvam agent builder"])
@@ -51,6 +51,9 @@ TOOL_TIMEOUT = 45
 Language = Literal["English", "Hindi", "Bengali", "Gujarati", "Kannada", "Konkani", "Malayalam", "Tamil", "Telugu",
                    "Punjabi", "Odia", "Marathi", "Assamese"]
 SUPPORTED_LANGUAGES = Language.__args__
+# AREVEI's own Sarvam sign-in, used only by scripts/setup_sarvam_master_agent.py to create the
+# master agent. Stored under this pseudo workspace id, separate from every workspace's own account.
+PLATFORM_ACCOUNT = "__platform__"
 INPUT_VARIABLES = [
     {"name": "lead_name", "description": "Lead name"},
     {"name": "lead_phone", "description": "Lead phone number"},
@@ -138,11 +141,12 @@ async def begin_connect(db, ws_id, user):
     verifier, challenge = pkce_pair()
     state = secure_random.token_urlsafe(32)
     now = datetime.now(timezone.utc)
-    existing = await db.sarvam_account_connections.find_one({"workspace_id": ws_id}) or {}
+    owner = ws_id
+    existing = await db.sarvam_account_connections.find_one({"workspace_id": owner}) or {}
     # A new consent never discards a working connection until the exchange succeeds.
-    await db.sarvam_account_connections.update_one({"workspace_id": ws_id}, {"$set": {
-        "workspace_id": ws_id,
-        "pending": {"state": state, "encrypted_verifier": encrypt(ws_id, TOKEN_ENVELOPE, {"verifier": verifier}),
+    await db.sarvam_account_connections.update_one({"workspace_id": owner}, {"$set": {
+        "workspace_id": owner,
+        "pending": {"state": state, "encrypted_verifier": encrypt(owner, TOKEN_ENVELOPE, {"verifier": verifier}),
                     "client_id": client_id, "redirect_uri": uri, "expires_at": (now + STATE_TTL).isoformat(),
                     "user_id": str(user["_id"]), "user_email": user.get("email")},
         "status": existing.get("status") or "pending", "updated_at": now.isoformat()},
@@ -236,7 +240,7 @@ class SarvamMcpClient:
         doc = self.connection
         if doc.get("status") != "connected" or not doc.get("encrypted_tokens"):
             raise SarvamBuilderError(409, "account_not_connected", "Connect the Sarvam account before creating agents")
-        tokens = decrypt(self.ws_id, TOKEN_ENVELOPE, doc["encrypted_tokens"])
+        tokens = decrypt(doc["workspace_id"], TOKEN_ENVELOPE, doc["encrypted_tokens"])
         if not force_refresh and tokens.get("expires_at", 0) - 120 > time.time():
             return tokens["access_token"]
         if not tokens.get("refresh_token"):
@@ -257,9 +261,9 @@ class SarvamMcpClient:
         revision = int(doc.get("token_revision") or 0)
         updated = await self.db.sarvam_account_connections.update_one(
             {"_id": doc["_id"], "token_revision": revision},
-            {"$set": {"encrypted_tokens": token_envelope(self.ws_id, new), "token_revision": revision + 1, "updated_at": now_iso()}})
+            {"$set": {"encrypted_tokens": (envelope := token_envelope(doc["workspace_id"], new)), "token_revision": revision + 1, "updated_at": now_iso()}})
         if updated.matched_count:
-            self.connection = {**doc, "encrypted_tokens": token_envelope(self.ws_id, new), "token_revision": revision + 1}
+            self.connection = {**doc, "encrypted_tokens": envelope, "token_revision": revision + 1}
         else:
             # Another worker refreshed concurrently; its rotated token is the valid one.
             self.connection = await self.db.sarvam_account_connections.find_one({"_id": doc["_id"]}) or doc
@@ -391,10 +395,10 @@ def creation_public(doc):
     return {key: doc.get(key) for key in keys}
 
 
-def agent_variables():
+def agent_variables(inputs=None):
     from voice_api import SARVAM_QUALIFICATION_OUTPUTS
     variables = {}
-    for item in INPUT_VARIABLES:
+    for item in inputs or INPUT_VARIABLES:
         variables[item["name"]] = {"name": item["name"], "value": "", "description": item["description"], "type": "string",
                                    "needs_initial_value": True, "update_post_interaction": False}
     for item in SARVAM_QUALIFICATION_OUTPUTS:
@@ -406,11 +410,11 @@ def agent_variables():
     return variables
 
 
-def build_agent_config(body: AgentCreateRequest):
+def build_agent_config(body: AgentCreateRequest, inputs=None):
     languages = list(dict.fromkeys([body.initial_language, *body.supported_languages]))
     config = {
         "channel_type": "v2v",
-        "llm_config": {"agent_config": {"agent_variables": agent_variables()}},
+        "llm_config": {"agent_config": {"agent_variables": agent_variables(inputs)}},
         "language_config": {"initial_language_name": body.initial_language, "supported_languages": languages},
         "intro_message_config": {"audio": body.intro_message},
     }
@@ -469,7 +473,12 @@ async def create_agent(db, ws_id, user, body: AgentCreateRequest):
     except HTTPException as exc:
         if exc.status_code != 409:
             raise
-    if not supplied_key and not stored_secrets.get("api_key"):
+    in_platform_workspace = platform_sarvam_key({"organization_id": connection.get("sarvam_org_id"), "workspace_id": connection.get("sarvam_workspace_id")})
+    # Sarvam names the account's org/workspace only in the first commit. Until then the account may be
+    # AREVEI's own, so proceed; connect_created_agent asks for a key if it turns out not to be.
+    ids_unknown = not (connection.get("sarvam_org_id") and connection.get("sarvam_workspace_id"))
+    platform_possible = ids_unknown and platform_sarvam_configured()
+    if not supplied_key and not stored_secrets.get("api_key") and not in_platform_workspace and not platform_possible:
         raise SarvamBuilderError(422, "api_key_required", "Enter the Sarvam Voice Agents API key; calls are placed with it")
     now = now_iso()
     query = {"workspace_id": ws_id, "creation_key": body.creation_key}
@@ -550,21 +559,55 @@ async def create_agent(db, ws_id, user, body: AgentCreateRequest):
     return await connect_created_agent(db, ws_id, record, supplied_key, body.revision)
 
 
+async def create_master_agent(db, agent_name, initial_language="English", voice_id=None):
+    """Create and commit AREVEI's single master agent in the platform Sarvam account.
+
+    Used once by scripts/setup_sarvam_master_agent.py. Returns the values for backend/.env.
+    """
+    from managed_voice import MASTER_INTRO, PROFILE_VARIABLES, master_prompt
+    inputs = INPUT_VARIABLES + PROFILE_VARIABLES
+    body = AgentCreateRequest(creation_key="master-agent", agent_name=agent_name, connection_id="unused",
+                              agent_phone_number="+10000000000", initial_language=initial_language,
+                              supported_languages=list(SUPPORTED_LANGUAGES), voice_id=voice_id, intro_message=MASTER_INTRO)
+    connection = await sarvam_connection(db, PLATFORM_ACCOUNT)
+    async with SarvamMcpClient(db, PLATFORM_ACCOUNT, connection) as mcp:
+        created = await mcp.tool("configure_agent", {"name": body.agent_name, "config": build_agent_config(body, inputs)})
+        app_id = created.get("id") or (created.get("details") or {}).get("app_id")
+        if not app_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", str(app_id)):
+            raise SarvamBuilderError(502, "provider_unavailable", "Sarvam did not return an agent id")
+        await mcp.tool("configure_agent", {"agent_id": app_id, "prompt_append": master_prompt(), "prompt_scope": "state"})
+        try:
+            await mcp.tool("configure_agent", {"agent_id": app_id, "config": {"llm_config": {"agent_config": {"agent_variables": {"user_name": None}}}}})
+        except SarvamBuilderError:
+            pass
+        check = await mcp.tool("agents", {"operation": "get", "id": app_id, "params": {"include": ["variables", "prompt_text"]}})
+        verify_agent(check, inputs)
+        commit = await mcp.tool("agents", {"operation": "commit", "id": app_id, "params": {"app_version_description": "AREVEI master voice agent"}})
+        versions = await mcp.tool("agents", {"operation": "get", "id": app_id, "params": {"include": ["versions"]}})
+    committed = [int(v["app_version"]) for v in versions.get("versions") or [] if v.get("status") == "committed" and isinstance(v.get("app_version"), int)]
+    if not committed:
+        raise SarvamBuilderError(502, "provider_unavailable", "Sarvam did not report a committed version")
+    return {"SARVAM_ORG_ID": commit.get("org_id") or connection.get("sarvam_org_id"),
+            "SARVAM_WORKSPACE_ID": commit.get("workspace_id") or connection.get("sarvam_workspace_id"),
+            "SARVAM_APP_ID": app_id, "SARVAM_APP_VERSION": max(committed)}
+
+
 async def workspace_business_name(db, ws_id):
     workspace = await db.workspaces.find_one({"_id": ObjectId(ws_id)}) if ObjectId.is_valid(ws_id) else None
     brain = (workspace or {}).get("brain") or {}
     return (brain.get("business_profile") or {}).get("company_name") or (workspace or {}).get("name") or ""
 
 
-def verify_agent(check):
+def verify_agent(check, inputs=None):
+    inputs = inputs or INPUT_VARIABLES
     variables = check.get("variables") or {}
-    required = [v["name"] for v in INPUT_VARIABLES]
+    required = [v["name"] for v in inputs]
     from voice_api import SARVAM_QUALIFICATION_OUTPUTS
     required += [item["name"] for item in SARVAM_QUALIFICATION_OUTPUTS]
     missing = [name for name in required if name not in variables]
     if missing:
         raise SarvamBuilderError(502, "configuration_error", "Sarvam agent is missing variables: " + ", ".join(missing))
-    for name in (v["name"] for v in INPUT_VARIABLES):
+    for name in (v["name"] for v in inputs):
         if variables[name].get("update_post_interaction"):
             raise SarvamBuilderError(502, "configuration_error", f"{name} must be a call-start input")
     states = ((check.get("prompt_text") or {}).get("states") or {})
@@ -592,7 +635,14 @@ async def connect_created_agent(db, ws_id, record, supplied_key="", revision=Non
         await db.sarvam_agent_creations.update_one(query, {"$set": {"status": "created_unsaved", "error_code": "missing_sarvam_ids",
                                                                      "error": "Enter the Sarvam organization and workspace IDs once, then finish connecting", "updated_at": now_iso()}})
         raise SarvamBuilderError(409, "missing_sarvam_ids", "Enter the Sarvam organization and workspace IDs once, then finish connecting")
-    config = {"organization_id": org_id, "workspace_id": sarvam_ws, "app_id": record["app_id"], "app_version": int(record["app_version"]),
+    has_key = (supplied_key or "api_key" in ((existing or {}).get("configured_secrets") or [])
+               or platform_sarvam_key({"organization_id": org_id, "workspace_id": sarvam_ws}))
+    if not has_key:
+        message = "The agent was created, but this Sarvam account is not AREVEI's. Enter its Voice Agents API key, then use Finish connecting"
+        await db.sarvam_agent_creations.update_one(query, {"$set": {"status": "created_unsaved", "error_code": "api_key_required",
+                                                                     "error": message, "updated_at": now_iso()}})
+        raise SarvamBuilderError(422, "created_unsaved", message)
+    config ={"organization_id": org_id, "workspace_id": sarvam_ws, "app_id": record["app_id"], "app_version": int(record["app_version"]),
               "connection_id": record["connection_id"], "agent_phone_number": record["agent_phone_number"], "payload_mode": "lead_context_v1"}
     credentials = {"api_key": supplied_key} if supplied_key else {}
     try:
@@ -609,6 +659,8 @@ async def connect_created_agent(db, ws_id, record, supplied_key="", revision=Non
                                  f"The agent exists in Sarvam but could not be connected: {detail.get('message')}. Use Finish connecting.") from None
     await db.workspaces.update_one({"_id": ObjectId(ws_id)}, {"$set": {"qualification_voice_provider": "sarvam", "updated_at": now_iso()}})
     await db.sarvam_agent_creations.update_one(query, {"$set": {"status": "connected", "error": None, "error_code": None, "updated_at": now_iso()}})
+    from managed_voice import on_dedicated_connected
+    await on_dedicated_connected(db, ws_id)
     logger.info(json.dumps({"event": "sarvam_agent_connected", "workspace_id": ws_id, "creation_key": record["creation_key"],
                             "app_id": record["app_id"], "app_version": int(record["app_version"]), "verification": saved.get("status")}))
     record = await db.sarvam_agent_creations.find_one(query)
@@ -627,7 +679,10 @@ class SarvamIdsRequest(BaseModel):
 @router.get("/workspaces/{ws_id}/voice-providers/sarvam/account")
 async def get_account(ws_id: str, request: Request):
     await require_workspace_access(request, ws_id)
-    return account_public(await db_from(request).sarvam_account_connections.find_one({"workspace_id": ws_id}))
+    doc = await db_from(request).sarvam_account_connections.find_one({"workspace_id": ws_id})
+    covered = platform_sarvam_key({"organization_id": (doc or {}).get("sarvam_org_id"), "workspace_id": (doc or {}).get("sarvam_workspace_id")})
+    ids_unknown = not ((doc or {}).get("sarvam_org_id") and (doc or {}).get("sarvam_workspace_id"))
+    return {**account_public(doc), "platform_key": bool(covered), "platform_key_possible": bool(ids_unknown and platform_sarvam_configured())}
 
 
 @router.post("/workspaces/{ws_id}/voice-providers/sarvam/account/connect")

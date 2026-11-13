@@ -2340,10 +2340,17 @@ async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=F
     from voice_config import public_base
     workspace = await db.workspaces.find_one({"_id": ObjectId(ws_id)}) or {}
     profile, profile_id = await resolve_profile(db, ws_id, lead, workspace)
-    provider = get_provider(profile.voice_provider)
+    from managed_voice import call_variables, workspace_calling_agent
+    voice_agent = await workspace_calling_agent(db, ws_id)
+    # A workspace AI Voice Agent (trial master or dedicated) always calls through Sarvam; its
+    # configuration decides which agent. Workspaces without one keep the profile's provider.
+    provider = get_provider("sarvam" if voice_agent else profile.voice_provider)
     try:
         public_base()
         agent_config = await provider.configuration(db, ws_id, agent_config_id)
+        if voice_agent:
+            # Users see their own agent's name, never the calling platform.
+            agent_config["display_name"] = voice_agent.get("agent_name") or agent_config.get("display_name") or "AI agent"
     except HTTPException as exc:
         if raise_on_error:
             raise
@@ -2363,13 +2370,15 @@ async def _start_qualification_call(db, ws_id, lead_id, request: Request, auto=F
     await update_call_session(db, ws_id, session_id, {"profile_snapshot": profile.model_dump(mode="json"), "profile_id": profile_id})
     base_payload = qualification_payload(public_base(), ws_id, lead_id, lead, lead_phone, agent_config, session_id)
     base_payload["qualification_profile"] = profile.model_dump(mode="json")
-    if provider.name == "sarvam" and agent_config.get("payload_mode") == "lead_context_v1":
+    if provider.name == "sarvam" and agent_config.get("payload_mode") in ("lead_context_v1", "managed_v1"):
         from lead_context import prepare_lead_context
         settings = await ensure_crm_settings(db, ws_id)
         context, context_source = await prepare_lead_context(
             lead, profile, settings, ws_id, workspace.get("model_id")
         )
         base_payload.update({"lead_name": base_payload["customer_name"], "lead_context": context})
+        if agent_config.get("payload_mode") == "managed_v1":
+            base_payload["voice_agent_variables"] = call_variables(voice_agent or {})
         await update_call_session(db, ws_id, session_id, {
             "lead_context": context,
             "lead_context_source": context_source,

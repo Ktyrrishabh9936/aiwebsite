@@ -17,7 +17,7 @@ export default function LeadNotes({ notes = [], saving, onAdd, onDelete }) {
                     {note.source === "call_agent" && (
                       <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[10px] font-semibold uppercase opacity-80">
                         <PhoneCall className="w-3 h-3" />
-                        <span>{note.call_provider === "plivo" ? "AI call" : note.call_provider || "call"}</span>
+                        <span>{note.call_provider ? "AI call" : "call"}</span>
                         {note.call_direction && <span>{note.call_direction}</span>}
                         {note.status && <span>{note.status}</span>}
                         {note.duration && <span>{note.duration}s</span>}

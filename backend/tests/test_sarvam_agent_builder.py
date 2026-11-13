@@ -29,6 +29,7 @@ def environment(monkeypatch):
     monkeypatch.setenv("VOICE_CREDENTIAL_KEYS", Fernet.generate_key().decode())
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://crm.example")
     monkeypatch.delenv("SARVAM_OAUTH_REDIRECT_URI", raising=False)
+    monkeypatch.delenv("SARVAM_API_KEY", raising=False)
     builder._metadata_cache.update(value=None, at=0.0)
 
 
@@ -319,3 +320,43 @@ def test_runtime_prompt_is_shared_with_manual_guide():
 def test_safe_tool_message_redacts_urls_and_secrets():
     text = builder.safe_tool_message("bad field voice see https://x.example/a?b=c token: abc123 api_key=zzz\n\n more")
     assert "https://" not in text and "abc123" not in text and "zzz" not in text and "bad field voice" in text
+
+
+def test_env_key_lets_creation_start_before_account_ids_are_known(sarvam, monkeypatch):
+    monkeypatch.setenv("SARVAM_API_KEY", "rest-key")
+    monkeypatch.setenv("SARVAM_ORG_ID", "org-sarvam")
+    monkeypatch.setenv("SARVAM_WORKSPACE_ID", "ws-sarvam")
+    async def run(db):
+        ws = str(ObjectId())
+        await db.workspaces.insert_one({"_id": ObjectId(ws), "name": "Acme"})
+        await connected_account(db, ws)
+        result = await builder.create_agent(db, ws, USER, request_body())
+        assert result["creation"]["status"] == "connected"
+        _, secrets = await load_config(db, ws, "sarvam")
+        assert secrets["api_key"] == "rest-key"
+    asyncio.run(isolated(run))
+
+
+def test_env_key_for_another_account_keeps_agent_and_asks_for_key(sarvam, monkeypatch):
+    monkeypatch.setenv("SARVAM_API_KEY", "platform-key")
+    monkeypatch.setenv("SARVAM_ORG_ID", "org-arevei")
+    monkeypatch.setenv("SARVAM_WORKSPACE_ID", "ws-arevei")
+    async def run(db):
+        ws = str(ObjectId())
+        await db.workspaces.insert_one({"_id": ObjectId(ws), "name": "Acme"})
+        await connected_account(db, ws)
+        body = request_body()
+        with pytest.raises(HTTPException) as failure:
+            await builder.create_agent(db, ws, USER, body)
+        assert failure.value.detail["code"] == "created_unsaved"
+        record = await db.sarvam_agent_creations.find_one({"workspace_id": ws, "creation_key": body.creation_key})
+        assert record["status"] == "created_unsaved" and record["error_code"] == "api_key_required"
+        # Now that the account is known not to be AREVEI's, the key is required up front.
+        with pytest.raises(HTTPException) as again:
+            await builder.create_agent(db, ws, USER, request_body())
+        assert again.value.detail["code"] == "api_key_required"
+        result = await builder.connect_created_agent(db, ws, record, "rest-key")
+        assert result["creation"]["status"] == "connected" and len(sarvam.creates()) == 1
+        _, secrets = await load_config(db, ws, "sarvam")
+        assert secrets["api_key"] == "rest-key"
+    asyncio.run(isolated(run))

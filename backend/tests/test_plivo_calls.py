@@ -208,6 +208,7 @@ class FakeDb:
         self.workspaces = FakeCollection([])
         self.plivo_agent_configs = FakeCollection(agents or [])
         self.workspace_voice_provider_configs = FakeCollection([])
+        self.workspace_voice_agents = FakeCollection([])
         self.plivo_call_sessions = FakeCollection([])
         self.plivo_call_events = FakeCollection([])
         self.qualification_profiles = FakeCollection([])

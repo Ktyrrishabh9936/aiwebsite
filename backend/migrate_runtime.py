@@ -56,6 +56,7 @@ async def migrate():
         (db.workspace_voice_provider_configs, [("workspace_id", 1), ("provider", 1)], {"unique": True}),
         (db.sarvam_account_connections, "workspace_id", {"unique": True}),
         (db.sarvam_agent_creations, [("workspace_id", 1), ("creation_key", 1)], {"unique": True}),
+        (db.workspace_voice_agents, "workspace_id", {"unique": True}),
         (db.sarvam_oauth_clients, "redirect_uri", {"unique": True}),
         (db.plivo_agent_configs, [("workspace_id", 1), ("enabled", 1), ("is_default", 1)], {}),
         (db.plivo_call_sessions, [("workspace_id", 1), ("lead_id", 1), ("status", 1)], {}),

@@ -22,6 +22,7 @@ import DynamicField from "../../components/LeadField";
 import ReferralLeadDialog from "../../components/ReferralLeadDialog";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
+import { VoiceAgentBanner, canCall, useVoiceAgent } from "../../components/VoiceAgentSetup";
 import {
   Users, Calendar, Info, Search, XCircle, Save, BadgeIndianRupee,
   Plus, CheckCircle2, Settings, Trash2, Columns3, Palette, Building2,
@@ -287,7 +288,8 @@ export default function CrmInbox({ member } = {}) {
     return plivoAgentState.legacy_environment_agent ? [...stored, plivoAgentState.legacy_environment_agent] : stored;
   }, [plivoAgentState]);
   const enabledPlivoAgents = useMemo(() => plivoAgents.filter((agent) => agent.enabled !== false && agent.readiness?.ready === true), [plivoAgents]);
-  const hasCallableAgent = enabledPlivoAgents.length > 0;
+  const [voiceAgent] = useVoiceAgent(member ? null : wsId);
+  const hasCallableAgent = enabledPlivoAgents.length > 0 || canCall(voiceAgent);
   const totalPages = Math.max(1, Math.ceil((pagination.total || 0) / pagination.limit));
 
   const selectLead = (lead) => {
@@ -870,6 +872,7 @@ export default function CrmInbox({ member } = {}) {
 
   return (
     <div className="crm-workspace p-4 sm:p-8 max-w-7xl mx-auto space-y-6">
+      {!member && <VoiceAgentBanner workspaceId={wsId} />}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h1 className="font-display text-3xl sm:text-4xl font-bold tracking-tight">CRM</h1>

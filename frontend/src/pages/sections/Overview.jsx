@@ -23,6 +23,7 @@ import {
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { toast } from "sonner";
 import api from "../../lib/api";
+import { VoiceAgentBanner } from "../../components/VoiceAgentSetup";
 
 const zeroAnalytics = {
   totals: { leads: 0, customers: 0, active_leads: 0, new_leads: 0, payments_collected: "0", due_amount: "0", receipts: 0 },
@@ -136,6 +137,7 @@ export default function Overview() {
 
   return (
     <div className="workspace-overview p-4 sm:p-8 max-w-7xl mx-auto space-y-7">
+      <VoiceAgentBanner workspaceId={ws.id} />
       <section className="app-overview-hero" aria-label="Sales workspace overview">
         <div><p className="app-eyebrow">Your AI Native sales workspace</p><h1>Your pipeline. A clearer next move.</h1><p>Keep your leads, conversations, and sales activity connected. Focus on the relationships that move your business forward.</p></div>
         <button type="button" onClick={() => nav("manager")} className="bg-primary text-primary-foreground">Open AI Manager <ArrowRight size={15}/></button>

@@ -26,6 +26,7 @@ PROCESS_LABELS = {
     "sheet_column_mapping": "Sheet column mapping",
     "lead_qualification": "Lead qualification",
     "lead_context": "Lead context preparation",
+    "voice_agent_setup": "Voice agent setup",
 }
 
 

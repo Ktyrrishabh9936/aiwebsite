@@ -1,4 +1,4 @@
-import VoiceProviders from "../../components/VoiceProviders";
+import VoiceAgentSetup from "../../components/VoiceAgentSetup";
 import TwilioSmsSettings from "../../components/TwilioSmsSettings";
 import PushNotificationSettings from "../../components/PushNotificationSettings";
 import InstallAppButton from "../../components/InstallAppButton";
@@ -287,7 +287,7 @@ export default function Settings() {
         <h2 className="font-display text-xl font-bold">Workspace</h2>
         <p className="text-sm text-muted-foreground mt-1">Use the account menu in the top bar to switch website workspaces or create a new one.</p>
       </section>
-      <div id="voice" className="scroll-mt-20"><VoiceProviders workspaceId={ws.id} /></div>
+      <div id="voice" className="scroll-mt-20"><VoiceAgentSetup workspaceId={ws.id} /></div>
       {(ws.access_role === "owner" || user?.role === "admin") && <div id="sms" className="scroll-mt-20"><TwilioSmsSettings wsId={ws.id} /></div>}
     </div>
   );

@@ -5,6 +5,7 @@ import api from "../../lib/api";
 
 jest.mock("../../components/SalesBriefing", () => () => null);
 jest.mock("../../components/onboarding/SetupChecklist", () => () => null);
+jest.mock("../../components/VoiceAgentSetup", () => ({ VoiceAgentBanner: () => null }));
 const mockNavigate = jest.fn();
 let mockWorkspace;
 jest.mock("react-router-dom", () => ({

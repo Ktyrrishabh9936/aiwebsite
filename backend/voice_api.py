@@ -306,8 +306,9 @@ async def sarvam_callback(ws_id: str, session_id: str, request: Request):
     recording = session.get("recording_url")
     if raw.get("interaction_id") and not recording:
         try:
-            doc, secrets = await load_config(db, ws_id, "sarvam", enabled=False)
-            recording = await get_provider("sarvam").recording(doc["config"], secrets, call_id, session.get("started_at") or session.get("created_at"))
+            from managed_voice import call_account
+            account, secrets = await call_account(db, ws_id, session)
+            recording = await get_provider("sarvam").recording(account, secrets, call_id, session.get("started_at") or session.get("created_at"))
         except HTTPException:
             recording = None
     if recording:
@@ -330,11 +331,12 @@ async def refresh_recording(ws_id: str, session_id: str, request: Request):
     session = await db.plivo_call_sessions.find_one({"_id": ObjectId(session_id), "workspace_id": ws_id, "provider": "sarvam"})
     if not session:
         raise HTTPException(404, "Call not found")
-    doc, secrets = await load_config(db, ws_id, "sarvam", enabled=False)
+    from managed_voice import call_account
+    account, secrets = await call_account(db, ws_id, session)
     call_id = (session.get("provider_identifiers") or {}).get("call_uuid")
     if not call_id:
         raise HTTPException(409, "Call requires reconciliation")
-    recording = await get_provider("sarvam").recording(doc["config"], secrets, call_id, session.get("started_at") or session.get("created_at"))
+    recording = await get_provider("sarvam").recording(account, secrets, call_id, session.get("started_at") or session.get("created_at"))
     if not recording:
         return {"status": "recording_unavailable"}
     await db.plivo_call_sessions.update_one({"_id": session["_id"], "workspace_id": ws_id}, {"$set": {"recording_url": recording}})

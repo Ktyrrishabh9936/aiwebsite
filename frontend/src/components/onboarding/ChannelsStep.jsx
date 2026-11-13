@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ArrowRight, CheckCircle2, ChevronDown, MessageSquare, PhoneCall } from "lucide-react";
 import api from "../../lib/api";
-import VoiceProviders from "../VoiceProviders";
+import VoiceAgentSetup, { canCall } from "../VoiceAgentSetup";
 import TwilioSmsSettings from "../TwilioSmsSettings";
 
 function ChannelCard({ icon: Icon, title, description, benefit, connected, open, onToggle, children }) {
@@ -33,7 +33,7 @@ export default function ChannelsStep({ wsId, onContinue, onSkip }) {
   const [sms, setSms] = useState(false);
 
   const refresh = useCallback(() => {
-    api.get(`/workspaces/${wsId}/voice-providers`).then(({ data }) => setVoice((data || []).some((p) => p.enabled))).catch(() => {});
+    api.get(`/workspaces/${wsId}/voice-agent`).then(({ data }) => setVoice(canCall(data))).catch(() => {});
     api.get(`/workspaces/${wsId}/crm/sms/config`).then(({ data }) => setSms(Boolean(data?.enabled))).catch(() => {});
   }, [wsId]);
   useEffect(() => { refresh(); }, [refresh]);
@@ -42,9 +42,9 @@ export default function ChannelsStep({ wsId, onContinue, onSkip }) {
   return (
     <div className="space-y-4">
       <ChannelCard icon={PhoneCall} title="Voice agent" connected={voice} open={open === "voice"} onToggle={() => toggle("voice")}
-        description="Connect Plivo or Sarvam so your AI calls and qualifies every new lead."
+        description="Start a free trial agent or connect your own. It calls and qualifies every new lead."
         benefit="Leads contacted within minutes convert up to several times better.">
-        <VoiceProviders workspaceId={wsId} />
+        <VoiceAgentSetup workspaceId={wsId} onSaved={refresh} />
       </ChannelCard>
       <ChannelCard icon={MessageSquare} title="SMS" connected={sms} open={open === "sms"} onToggle={() => toggle("sms")}
         description="Connect Twilio to text leads straight from their CRM record."

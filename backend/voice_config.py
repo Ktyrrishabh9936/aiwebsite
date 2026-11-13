@@ -1,4 +1,9 @@
-"""Workspace-bound encrypted voice credentials. No customer environment fallback."""
+"""Workspace-bound encrypted voice credentials.
+
+One environment fallback: SARVAM_API_KEY is AREVEI's own Voice Agents key. It is used for any Sarvam
+agent that lives in AREVEI's own Sarvam workspace (SARVAM_ORG_ID + SARVAM_WORKSPACE_ID), and never for
+agents in a customer's Sarvam account.
+"""
 import json
 import os
 import re
@@ -104,6 +109,21 @@ def safe_config(provider, config):
     return result
 
 
+def platform_sarvam_configured():
+    """True when AREVEI's own Sarvam key and workspace are set in the environment."""
+    return all(os.getenv(name, "").strip() for name in ("SARVAM_API_KEY", "SARVAM_ORG_ID", "SARVAM_WORKSPACE_ID"))
+
+
+def platform_sarvam_key(config):
+    """AREVEI's key when this Sarvam agent is in AREVEI's own Sarvam workspace, else None."""
+    key = os.getenv("SARVAM_API_KEY", "").strip()
+    org = os.getenv("SARVAM_ORG_ID", "").strip()
+    workspace = os.getenv("SARVAM_WORKSPACE_ID", "").strip()
+    if key and org and workspace and str(config.get("organization_id") or "") == org and str(config.get("workspace_id") or "") == workspace:
+        return key
+    return None
+
+
 async def load_config(db, ws_id, provider, *, enabled=True):
     validate_provider(provider)
     doc = await db.workspace_voice_provider_configs.find_one({"workspace_id": str(ws_id), "provider": provider})
@@ -113,7 +133,10 @@ async def load_config(db, ws_id, provider, *, enabled=True):
         raise HTTPException(409, "Voice provider is disabled")
     doc = dict(doc)
     doc["config"] = safe_config(provider, doc.get("config") or {})
-    return doc, decrypt(ws_id, provider, doc["encrypted_credentials"])
+    secrets = decrypt(ws_id, provider, doc["encrypted_credentials"])
+    if provider == "sarvam" and (platform_key := platform_sarvam_key(doc["config"])):
+        secrets = {**secrets, "api_key": platform_key}  # AREVEI's workspace: the .env key always applies
+    return doc, secrets
 
 
 def public_config(doc):
@@ -121,6 +144,9 @@ def public_config(doc):
     result["config"] = safe_config(doc["provider"], doc.get("config") or {})
     if doc["provider"] == "sarvam":
         configured = set(doc.get("configured_secrets") or [])
+        if platform_sarvam_key(result["config"]):
+            configured.add("api_key")
+            result["platform_api_key"] = True
         result["callback_security_configured"] = "callback_token" in configured
         result["configured_secrets"] = sorted(configured - {"callback_token"})
     return result

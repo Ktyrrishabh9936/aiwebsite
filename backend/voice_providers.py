@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+import logging
+import re
 from urllib.parse import urlsplit
 from typing import Literal
 
@@ -12,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from qualification_engine import CallResult, Outcome, validated_facts
 from voice_config import load_config, public_base, safe_config
+
+logger = logging.getLogger("voice.providers")
 
 
 class VoiceProvider:
@@ -40,6 +44,9 @@ class VoiceProvider:
             async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
                 response = await self.probe(client, config, secrets)
             if response.status_code in (401, 403):
+                # The provider's reason (e.g. "Invalid API key format.") with anything secret-looking removed.
+                reason = re.sub(r"(?i)(key|token|secret)\s*[:=]\s*\S+", r"\1=[redacted]", response.text or "")[:300]
+                logger.warning("voice_connection_rejected provider=%s status=%s reason=%s", self.name, response.status_code, reason)
                 return "invalid_credentials"
             if response.status_code >= 500 or response.status_code == 429:
                 return "provider_unavailable"
@@ -134,6 +141,20 @@ class SarvamVoiceProvider(VoiceProvider):
     required_config = ("organization_id", "workspace_id", "app_id", "app_version", "connection_id", "agent_phone_number")
     required_secrets = ("api_key", "callback_token")
 
+    async def configuration(self, db, ws_id, agent_config_id=None):
+        from managed_voice import DEDICATED, MASTER, master_configuration, workspace_calling_agent
+        agent = await workspace_calling_agent(db, ws_id)
+        if agent and agent["agent_type"] == MASTER:
+            config = await master_configuration(db, ws_id, agent)
+            self.validate_configuration(config, config["credentials"])
+            return config
+        if agent and not agent.get("enabled"):
+            raise HTTPException(409, "Voice calling is paused for this workspace")
+        config = await super().configuration(db, ws_id, agent_config_id)
+        if agent:
+            config["voice_agent_type"] = DEDICATED
+        return config
+
     def transport(self, config):
         return (f"https://apps.sarvam.ai/api/outbounds/v1/orgs/{config['organization_id']}/workspaces/{config['workspace_id']}/outbounds",
                 {"X-API-Key": config["credentials"]["api_key"]}, None)
@@ -141,12 +162,14 @@ class SarvamVoiceProvider(VoiceProvider):
     def build_payload(self, base, config, session_id):
         # Per-session capability is passed as metadata, never in a URL/access log.
         proof = callback_proof(config["credentials"]["callback_token"], base["workspace_id"], session_id)
-        if config.get("payload_mode") == "lead_context_v1":
+        if config.get("payload_mode") in ("lead_context_v1", "managed_v1"):
             agent_variables = {
                 "lead_name": str(base.get("lead_name") or base.get("customer_name") or ""),
                 "lead_phone": str(base.get("lead_phone") or base.get("to_number") or ""),
                 "lead_context": str(base.get("lead_context") or ""),
             }
+            if config.get("payload_mode") == "managed_v1":
+                agent_variables.update(base.get("voice_agent_variables") or {})
         else:
             agent_variables = {"qualification_profile": base["qualification_profile"], "customer_name": base["customer_name"],
                                "previous_answers": base["previous_answers"], "pending_discussion": base["pending_discussion"]}

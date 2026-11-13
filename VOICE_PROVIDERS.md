@@ -211,6 +211,59 @@ Official contracts consulted:
 - https://docs.sarvam.ai/conversations/api/instant-outbound/webhook-payload
 - https://docs.sarvam.ai/conversations/api/analytics/attempts
 
+### AI Voice Agent: 14-day trial (master agent) and dedicated agents
+
+Every workspace has one **AI Voice Agent** (Settings > AI Voice Agent, the onboarding "Voice agent" step, and a
+setup banner on Overview and CRM). The workspace owner chooses one of two agent types:
+
+| | Master agent (free trial) | Dedicated agent |
+|---|---|---|
+| Sarvam account | AREVEI's, from `backend/.env` | the workspace's own (OAuth via `sarvam_agent_builder`) |
+| Agent | one shared master agent | the workspace's own agent, app ID and committed version |
+| Stored in | `workspace_voice_agents` profile + platform env | `workspace_voice_provider_configs` (unchanged) |
+| Per-workspace content | sent every call as `agent_name`, `business_name`, `agent_brief` | baked into the agent's prompt at creation |
+| Calling number | `SARVAM_AGENT_PHONE_NUMBER` (shared) | the workspace's onboarded number |
+| Limits | 14 days from explicit activation, once per workspace | none |
+
+`workspace_voice_agents` (unique per workspace) holds `agent_type` (`master` / `dedicated`, the one that handles
+new calls), `enabled` (pause / resume), the profile (`agent_name`, `business_name`, `business_details`, `behaviour`) and
+`trial_started_at` / `trial_expires_at`. The trial is started by a conditional update that only matches a record that
+has never started one, so it can't be restarted or extended by re-activating, editing or switching. Expiry is enforced
+by the backend on every call.
+
+Calling: `start_qualification_call` routes a workspace that has an agent type to the Sarvam provider, and
+`SarvamVoiceProvider.configuration` resolves the master (platform config and key, the workspace's own callback secret)
+or the dedicated configuration. Paused agents and expired trials are refused there. Payloads, sessions, callbacks,
+qualification, CRM notes and tasks are unchanged. The call's `agent_snapshot.voice_agent_type` makes recording
+retrieval use the account that placed the call. Workspaces without a `workspace_voice_agents` record keep their
+previous routing, so existing Plivo and Sarvam setups keep working untouched. A previously configured Sarvam agent is
+shown as an active dedicated agent.
+
+Switching: the UI asks for confirmation. Switching never deletes either configuration; only the selected type
+places new calls. A dedicated agent created while the trial is active doesn't take over until the owner switches.
+Switching back to the master agent is allowed only while the trial is active. After expiry the profile, call history
+and CRM data stay, trial calls stop, and the screen offers to connect a dedicated agent. (There is no billing or plan
+system in AREVEI yet, so "upgrade" means connecting a dedicated agent.)
+
+APIs (workspace owner or admin): `GET /workspaces/{ws}/voice-agent`, `PUT` (profile only), `POST .../voice-agent/trial`,
+`POST .../voice-agent/calling` `{enabled}`, `POST .../voice-agent/switch` `{agent_type}`, `POST .../voice-agent/generate`.
+Dedicated creation uses the existing `/voice-providers/sarvam/...` builder routes; the full manual provider panel is
+available under "Advanced: set up an existing agent manually".
+
+One-time master agent setup (admin):
+
+1. In the Sarvam dashboard, onboard the calling number on a telephony connection and create a Voice Agents API key.
+2. Add `SARVAM_API_KEY=<key>` to `backend/.env` (plus `SARVAM_OAUTH_REDIRECT_URI=http://localhost:8000/api/sarvam/oauth/callback`
+   locally) and start the backend. This key is used only for master-agent calls; it is never given to dedicated workspaces.
+3. From `backend/`, run `python scripts/setup_sarvam_master_agent.py` (options `--language`, `--voice-id`, `--connection-id`,
+   `--phone`) and sign in to Sarvam. It creates, verifies and commits the master agent and prints `SARVAM_ORG_ID`,
+   `SARVAM_WORKSPACE_ID`, `SARVAM_APP_ID`, `SARVAM_APP_VERSION`, `SARVAM_CONNECTION_ID`, `SARVAM_AGENT_PHONE_NUMBER`.
+4. Paste them into `backend/.env`, run `python migrate_runtime.py` (unique index on `workspace_voice_agents`) and restart.
+
+Rollback: remove the `SARVAM_*` master variables (the trial becomes unavailable and trial calls fail closed) and/or
+delete `workspace_voice_agents` records. Workspaces then return to their previous provider routing; no existing
+collection was altered.
+
 ## Deployment and Plivo migration
 
 1. Back up MongoDB and retain the existing environment values. Drain active legacy calls
