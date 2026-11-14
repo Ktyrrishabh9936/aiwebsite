@@ -40,19 +40,41 @@ logger = logging.getLogger("voice.sarvam_inbound")
 TOKEN_ENVELOPE = "sarvam_inbound"
 TOKEN_HEADER = "X-Arevei-Inbound-Token"
 TOOL_NAME = "arevei_caller_lookup"
+FIND_TOOL_NAME = "arevei_find_lead"
+CALLER_SYSTEM_VARIABLE = "user_identifier"  # Sarvam runtime value: the caller's number on telephony calls
+SETUP_VERSION = 2  # bump when prepare_agent learns something new; enabled routes upgrade on the next sync
+OPENING_INTRO = "{{opening_line}}"
 INBOUND_MARKER = "# INBOUND CALLS"
-INBOUND_PROMPT = f"""{INBOUND_MARKER}
+_INBOUND_RULES_HEAD = f"""{INBOUND_MARKER}
 Outbound calls always supply lead_context. When lead_context starts with "INBOUND CALL" or is empty, the person rang the business:
-- Welcome them and thank them for calling. Never say you are calling them, and never offer to call back to start the conversation.
-- If lead_name is set, greet them by name and use lead_context; do not ask again for facts it already contains.
-- If lead_name is empty, ask for their name early, then ask how you can help, then qualify as usual.
-- If they say they enquired before from another number, ask for that number or their email.
+- The opening line has already welcomed them. Never say you are calling them, and never offer to call back to start the conversation.
+- If lead_name is set, use their name and lead_context. Do not ask again for facts lead_context already contains. When it helps, mention briefly what was discussed last time.
+- If lead_name is empty, ask for their name, then how you can help, then qualify as usual."""
+_INBOUND_RULES_TAIL = """- Spell back any email address the caller gives, letter by letter, before using it.
 - If the call is a wrong number, spam, or someone selling to the business, end it politely without qualifying.
 - If lead_context says the person asked not to be called, still help them politely because they called; never push."""
+INBOUND_PROMPT = f"""{_INBOUND_RULES_HEAD}
+- If a caller you do not recognise says they spoke with the business before, ask for the phone number or email they used then, and call tool:{FIND_TOOL_NAME} with it. Use only what the tool returns.
+- You have no other way to look up records. Never say you are checking, searching, or that you found or did not find records unless tool:{FIND_TOOL_NAME} returned that result.
+- If the tool finds nothing, say so once, note the details they give, and carry on helping; the team will link the records.
+{_INBOUND_RULES_TAIL}"""
+INBOUND_PROMPT_BASIC = f"""{_INBOUND_RULES_HEAD}
+- You cannot look up records during the call. Never say you are checking, searching, or that you found or did not find records. If they say they spoke with the business before, note the phone number or email they used then; the team will link the records.
+{_INBOUND_RULES_TAIL}"""
 CALLER_NAME_VARIABLE = {
     "name": "caller_name", "value": "", "type": "string", "needs_initial_value": False, "update_post_interaction": True,
     "description": "The caller's name as they stated it",
     "post_interaction_prompt": "From the conversation, determine the caller's name exactly as they stated it. Leave empty when unknown.",
+}
+CALLER_EMAIL_VARIABLE = {
+    "name": "caller_email", "value": "", "type": "string", "needs_initial_value": False, "update_post_interaction": True,
+    "description": "The email address the caller gave",
+    "post_interaction_prompt": "From the conversation, determine the email address the caller gave, as one lowercase address such as "
+                               "name@example.com, joining any letters they spelled out. Leave empty when they gave none.",
+}
+OPENING_VARIABLE = {
+    "name": "opening_line", "value": "", "type": "string", "needs_initial_value": False, "update_post_interaction": False,
+    "description": "The first sentence the agent says. Outbound calls set it; inbound calls use this default or the caller lookup's.",
 }
 MIN_DURATION_SECONDS = 10
 MIN_USER_WORDS = 3
@@ -168,70 +190,182 @@ async def latest_committed(mcp, app_id):
     return max(committed)
 
 
-def lookup_tool_arguments(app_id, ws_id, token, with_caller=True, with_existing=True):
-    from voice_config import public_base
-    body = {}
+def agent_prompt(agent):
+    """The initial state's instructions from an agents(get, include=prompt_text) result."""
+    prompt = agent.get("prompt_text") or {}
+    states = prompt.get("states") or {}
+    if not states:
+        return ""
+    state = states.get(prompt.get("initial_state_name") or "start") or next(iter(states.values()))
+    return state.get("instructions") if isinstance(state, dict) and isinstance(state.get("instructions"), str) else ""
+
+
+def inbound_section(prompt):
+    """The current '# INBOUND CALLS' section of a prompt (up to the next top-level heading), or ''."""
+    match = re.search(r"^# INBOUND CALLS\b.*?(?=\n# |\Z)", prompt or "", flags=re.S | re.M)
+    return match.group(0).rstrip() if match else ""
+
+
+def agent_variables(agent):
+    variables = agent.get("variables") or {}
+    variables = variables.get("agent_variables", variables) if isinstance(variables, dict) else {}
+    return dict(variables) if isinstance(variables, dict) else {}
+
+
+def tool_named(agent, name):
+    for tool in agent.get("tools") or []:
+        if isinstance(tool, dict) and name in (tool.get("name"), tool.get("name_override")) and tool.get("id"):
+            return tool
+    return None
+
+
+def tool_token(tool):
+    config = (tool or {}).get("connector_config") or {}
+    return next((h.get("value") for h in config.get("headers") or [] if isinstance(h, dict) and h.get("name") == TOKEN_HEADER
+                 and isinstance(h.get("value"), str) and h.get("value")), None)
+
+
+def lookup_body(with_caller, with_opening=True):
+    """configure_app_tool body for the on_start lookup. The caller number comes from the call runtime."""
+    pairs = [("existing_name", "lead_name"), ("existing_context", "lead_context")]
+    if with_opening:
+        pairs.append(("existing_opening", "opening_line"))
+    body = [{"name": field, "type": "agent_variable", "value": {"variable_name": variable}} for field, variable in pairs]
     if with_caller:
-        body["caller_phone"] = "{{user_identifier}}"
-    if with_existing:
-        body["existing_name"] = {"type": "agent_variable", "value": {"variable_name": "lead_name"}}
-        body["existing_context"] = {"type": "agent_variable", "value": {"variable_name": "lead_context"}}
+        body.append({"name": "caller_phone", "type": "system_variable", "value": {"variable_name": CALLER_SYSTEM_VARIABLE}})
+    return body
+
+
+def lookup_saves(with_opening=True):
+    names = ("lead_name", "lead_context", "opening_line") if with_opening else ("lead_name", "lead_context")
+    return [{"response_path": name, "variable_name": name} for name in names]
+
+
+def lookup_tool_arguments(app_id, ws_id, token):
+    """Flat create shape; the caller binding and opening line are added with configure_app_tool right after."""
+    from voice_config import public_base
     return {"agent_id": app_id, "name": TOOL_NAME, "description": "Looks up the caller in AREVEI's CRM before the agent speaks.",
             "url": f"{public_base()}/api/sarvam/inbound/{ws_id}/context", "method": "POST", "lifecycle": "on_start",
-            "headers": {TOKEN_HEADER: token}, "body": body, "timeout_seconds": 5,
-            "save_to_variables": [{"response_path": "lead_name", "variable_name": "lead_name"},
-                                  {"response_path": "lead_context", "variable_name": "lead_context"}]}
+            "headers": {TOKEN_HEADER: token}, "timeout_seconds": 5,
+            "body": {"existing_name": {"type": "agent_variable", "value": {"variable_name": "lead_name"}},
+                     "existing_context": {"type": "agent_variable", "value": {"variable_name": "lead_context"}}},
+            "save_to_variables": lookup_saves(False)}
 
 
-async def prepare_agent(mcp, route, app_id, ws_id, token):
-    """Add the inbound prompt section, caller-name output and caller lookup once per agent.
+def find_tool_arguments(app_id, ws_id, token, with_saves=True):
+    from voice_config import public_base
+    arguments = {
+        "agent_id": app_id, "name": FIND_TOOL_NAME,
+        "description": "Finds the caller's earlier enquiry in the CRM by the phone number or email address they used before. "
+                       "Call it only after the caller has given one of them.",
+        "url": f"{public_base()}/api/sarvam/inbound/{ws_id}/find", "method": "POST", "lifecycle": "run",
+        "headers": {TOKEN_HEADER: token}, "timeout_seconds": 5,
+        "body": {"phone": {"type": "llm_prompt", "param_type": "Text", "required": False,
+                           "description": "The phone number the caller says they used before, digits only. Empty when they gave an email."},
+                 "email": {"type": "llm_prompt", "param_type": "Text", "required": False,
+                           "description": "The email address the caller spelled out, confirmed with them. Empty when they gave a phone number."}},
+        "resp_template": "{{reply}}",
+        "on_failure": "Sorry, I cannot check our records right now. I will note your details so our team can link them.",
+    }
+    if with_saves:
+        arguments["save_to_variables"] = [{"response_path": name, "variable_name": name} for name in ("lead_name", "lead_context")]
+    return arguments
 
-    Returns (changed, tool_id, caller_lookup, token). caller_lookup is "auto" when the caller number is bound
-    automatically, "manual" when it must be mapped once in the Sarvam console, "off" when no tool exists.
-    token is the header token the agent's lookup tool sends; an existing tool keeps its own.
+
+async def prepare_agent(mcp, route, app_id, ws_id, token, welcome):
+    """Bring the agent up to SETUP_VERSION: variables, opening line, caller lookup, in-call search and prompt section.
+
+    Every step is idempotent, so a retry after a partial failure finishes the job without duplicates. Returns a dict:
+    changed (draft written, commit needed), tool_id, caller_lookup ("auto" | "manual" | "off"), token (the one the
+    lookup tool sends; an existing tool keeps its own), find_tool_id and opening_line_ready.
     """
     from sarvam_agent_builder import SarvamBuilderError
-    same_agent = route and route.get("app_id") == app_id
-    changed = False
-    agent = await mcp.tool("agents", {"operation": "get", "id": app_id, "params": {"include": ["variables", "prompt_text", "tools"]}})
-    if INBOUND_MARKER not in json.dumps(agent):
-        await mcp.tool("configure_agent", {"agent_id": app_id, "prompt_append": INBOUND_PROMPT, "prompt_scope": "state"})
-        changed = True
-    if "caller_name" not in json.dumps(agent.get("variables") or agent):
+    from voice_config import public_base
+    if route and route.get("app_id") == app_id and route.get("setup_version") == SETUP_VERSION and route.get("context_tool_id"):
+        return {"changed": False, "tool_id": route["context_tool_id"], "caller_lookup": route.get("caller_lookup") or "manual",
+                "token": token, "find_tool_id": route.get("find_tool_id"), "opening_line_ready": bool(route.get("opening_line_ready"))}
+    agent = await mcp.tool("agents", {"operation": "get", "id": app_id, "params": {"include": ["variables", "prompt_text", "tools", "intro"]}})
+    result = {"changed": False, "tool_id": None, "caller_lookup": "off", "token": token, "find_tool_id": None, "opening_line_ready": False}
+
+    # 1. Variables first: the intro, the tools and the prompt all refer to them.
+    present = agent_variables(agent)
+    wanted = {"caller_name": CALLER_NAME_VARIABLE, "caller_email": CALLER_EMAIL_VARIABLE, "opening_line": {**OPENING_VARIABLE, "value": welcome}}
+    for name, variable in wanted.items():
+        stored = present.get(name)
+        if stored and (name != "opening_line" or (isinstance(stored, dict) and stored.get("value") == welcome)):
+            continue
         try:
-            await mcp.tool("configure_agent", {"agent_id": app_id, "config": {"llm_config": {"agent_config": {"agent_variables": {"caller_name": CALLER_NAME_VARIABLE}}}}})
-            changed = True
-        except SarvamBuilderError:
-            pass  # the name is then read from the transcript summary only
-    if same_agent and route.get("context_tool_id") and route.get("caller_lookup") in ("auto", "manual"):
-        return changed, route["context_tool_id"], route["caller_lookup"], token
-    existing = existing_lookup_tool(agent)
-    if existing:  # left behind by an earlier attempt that failed later on: reuse it, never add a second hook
-        return changed, *existing
-    # Outbound calls also fire on_start hooks. Without the echo of the outbound context the hook would
-    # overwrite it, so the tool is only created when that echo can be bound.
-    for with_caller, lookup in ((True, "auto"), (False, "manual")):
-        try:
-            created = await mcp.tool("create_api_tool", lookup_tool_arguments(app_id, ws_id, token, with_caller=with_caller))
+            await mcp.tool("configure_agent", {"agent_id": app_id, "config": {"llm_config": {"agent_config": {"agent_variables": {name: variable}}}}})
+            result["changed"] = True
+            present[name] = variable
         except SarvamBuilderError as exc:
-            logger.info(json.dumps({"event": "sarvam_inbound_tool_refused", "workspace_id": ws_id, "caller_binding": with_caller, "code": exc.code}))
-            continue
-        return True, entity_id(created, "tool_id", "id"), lookup, token
-    return changed, None, "off", token
+            logger.info(json.dumps({"event": "sarvam_inbound_variable_refused", "workspace_id": ws_id, "variable": name, "code": exc.code}))
+    has_opening = "opening_line" in present
 
+    # 2. Opening line: one intro that is right in both directions. Outbound calls pass opening_line explicitly.
+    if has_opening:
+        intro = agent.get("intro") if isinstance(agent.get("intro"), dict) else {}
+        if intro.get("audio") == OPENING_INTRO:
+            result["opening_line_ready"] = True
+        else:
+            try:
+                await mcp.tool("configure_agent", {"agent_id": app_id, "config": {"intro_message_config": {"audio": OPENING_INTRO}}})
+                result.update(changed=True, opening_line_ready=True)
+            except SarvamBuilderError as exc:
+                logger.info(json.dumps({"event": "sarvam_inbound_intro_refused", "workspace_id": ws_id, "code": exc.code}))
 
-def existing_lookup_tool(agent):
-    """(tool_id, caller_lookup, token) of the agent's AREVEI lookup tool, or None."""
-    for tool in agent.get("tools") or []:
-        if not isinstance(tool, dict) or TOOL_NAME not in (tool.get("name"), tool.get("name_override")):
-            continue
-        config = tool.get("connector_config") or {}
-        token = next((h.get("value") for h in config.get("headers") or [] if isinstance(h, dict) and h.get("name") == TOKEN_HEADER), None)
-        if not tool.get("id") or not isinstance(token, str) or not token:
-            continue
-        fields = {b.get("name") for b in config.get("body") or [] if isinstance(b, dict)}
-        return tool["id"], "auto" if "caller_phone" in fields else "manual", token
-    return None
+    # 3. Caller lookup (on_start). Reuse a tool left by an earlier attempt, and its token, instead of adding a second hook.
+    lookup = tool_named(agent, TOOL_NAME)
+    tool_id = None
+    if lookup and tool_token(lookup):
+        result["token"] = tool_token(lookup)
+        tool_id = lookup["id"]
+    else:
+        try:
+            created = await mcp.tool("create_api_tool", lookup_tool_arguments(app_id, ws_id, result["token"]))
+            tool_id = entity_id(created, "tool_id", "id")
+            result["changed"] = True
+        except SarvamBuilderError as exc:
+            logger.info(json.dumps({"event": "sarvam_inbound_tool_refused", "workspace_id": ws_id, "code": exc.code}))
+    if tool_id:
+        result.update(tool_id=tool_id, caller_lookup="manual")
+        for with_caller in (True, False):
+            try:
+                await mcp.tool("configure_app_tool", {"agent_id": app_id, "tool_type": "webhook_on_start", "name": TOOL_NAME, "tool_id": tool_id,
+                                                       "connector_config": {"url": f"{public_base()}/api/sarvam/inbound/{ws_id}/context",
+                                                                            "body": lookup_body(with_caller, has_opening),
+                                                                            "save_to_variables": lookup_saves(has_opening)}})
+                result["changed"] = True
+                if with_caller:
+                    result["caller_lookup"] = "auto"
+                break
+            except SarvamBuilderError as exc:
+                logger.info(json.dumps({"event": "sarvam_inbound_binding_refused", "workspace_id": ws_id, "caller_binding": with_caller, "code": exc.code}))
+
+    # 4. In-call search, so the agent can really look up an earlier enquiry instead of pretending to.
+    find = tool_named(agent, FIND_TOOL_NAME)
+    for with_saves in (True, False):
+        arguments = find_tool_arguments(app_id, ws_id, result["token"], with_saves=with_saves)
+        if find:  # update in place: keeps one tool and moves it onto the current token and URL
+            arguments = {key: value for key, value in arguments.items() if key not in ("name", "lifecycle")}
+            arguments["tool_id"] = find["id"]
+        try:
+            saved = await mcp.tool("create_api_tool", arguments)
+            result.update(changed=True, find_tool_id=find["id"] if find else entity_id(saved, "tool_id", "id"))
+            break
+        except SarvamBuilderError as exc:
+            logger.info(json.dumps({"event": "sarvam_inbound_find_tool_refused", "workspace_id": ws_id, "with_saves": with_saves, "code": exc.code}))
+
+    # 5. Prompt section last: it names the search tool, which must exist first.
+    section = INBOUND_PROMPT if result["find_tool_id"] else INBOUND_PROMPT_BASIC
+    current = inbound_section(agent_prompt(agent))
+    if current != section:
+        if current:
+            await mcp.tool("configure_agent", {"agent_id": app_id, "prompt_edits": [{"old_text": current, "new_text": section}], "prompt_scope": "state"})
+        else:
+            await mcp.tool("configure_agent", {"agent_id": app_id, "prompt_append": section, "prompt_scope": "state"})
+        result["changed"] = True
+    return result
 
 
 def deployment_name(number):
@@ -252,6 +386,27 @@ async def find_conflicts(mcp, number, app_id, own_deployment_id):
         else:
             others.append(deployment)
     return own, others
+
+
+async def agent_identity(db, ws_id):
+    """(agent name, business name) for spoken lines, from the workspace's voice agent profile."""
+    profile = await db.workspace_voice_agents.find_one({"workspace_id": ws_id}) or {}
+    business = str(profile.get("business_name") or "").strip()
+    if not business and ObjectId.is_valid(ws_id):
+        business = str((await db.workspaces.find_one({"_id": ObjectId(ws_id)}, {"name": 1}) or {}).get("name") or "").strip()
+    return str(profile.get("agent_name") or "").strip()[:40], business[:80]
+
+
+def inbound_welcome(agent_name, business_name, caller_name=""):
+    """The inbound opening line: welcomes, says who answered, asks how to help (Sarvam's inbound guidance)."""
+    first = (caller_name or "").split()[0] if (caller_name or "").strip() else ""
+    if agent_name:
+        thanks = f"Hello {first}, thank you for calling again." if first else "Hello, thank you for calling."
+        who = f" This is {agent_name}" + (f" from {business_name}." if business_name else ".")
+    else:
+        thanks = (f"Hello {first}, thank you for calling" if first else "Hello, thank you for calling") + (f" {business_name}." if business_name else ".")
+        who = ""
+    return f"{thanks}{who} How can I help you today?"
 
 
 async def enable_inbound(db, ws_id, user=None):
@@ -276,6 +431,7 @@ async def enable_inbound(db, ws_id, user=None):
     connection = await sarvam_connection(db, ws_id)
     route = await route_for(db, ws_id) or {}
     token = await route_token(db, ws_id, route)
+    agent_name, business_name = await agent_identity(db, ws_id)
     now = now_iso()
     await db.sarvam_inbound_routes.update_one({"_id": ws_id}, {"$set": {"workspace_id": ws_id, "status": "setting_up", "error": None, "updated_at": now,
                                                                "encrypted_token": encrypt(ws_id, TOKEN_ENVELOPE, {"token": token})},
@@ -295,8 +451,9 @@ async def enable_inbound(db, ws_id, user=None):
                 except SarvamBuilderError:
                     pass
                 own_deployment = None
-            changed, tool_id, lookup, token = await prepare_agent(mcp, route, app_id, ws_id, token)
-            if changed:
+            setup = await prepare_agent(mcp, route, app_id, ws_id, token, inbound_welcome(agent_name, business_name))
+            token, lookup = setup["token"], setup["caller_lookup"]
+            if setup["changed"]:
                 await mcp.tool("agents", {"operation": "commit", "id": app_id, "params": {"app_version_description": "Inbound calls set up by AREVEI"}})
             # Always the newest committed version: an earlier attempt may have committed the inbound setup
             # before failing, leaving the saved config on an older version without it.
@@ -324,20 +481,24 @@ async def enable_inbound(db, ws_id, user=None):
         detail = exc.detail if isinstance(exc.detail, dict) else {"code": "failed", "message": str(exc.detail)}
         await db.sarvam_inbound_routes.update_one({"_id": ws_id}, {"$set": {"status": "needs_attention", "error": detail.get("message"), "updated_at": now_iso()}})
         raise
-    if version != int(config["app_version"]):
-        # Outbound calls use the same agent version, which now includes the inbound instructions.
-        await db.workspace_voice_provider_configs.update_one({"_id": provider_doc["_id"]}, {"$set": {"config.app_version": version, "updated_at": now_iso()}, "$inc": {"revision": 1}})
+    if version != int(config["app_version"]) or bool(config.get("opening_line_ready")) != setup["opening_line_ready"]:
+        # Outbound calls use the same agent version, which now includes the inbound setup. Once its intro reads
+        # {{opening_line}}, every outbound call must pass that variable (voice_providers.SarvamVoiceProvider).
+        await db.workspace_voice_provider_configs.update_one({"_id": provider_doc["_id"]}, {"$set": {
+            "config.app_version": version, "config.opening_line_ready": setup["opening_line_ready"], "updated_at": now_iso()}, "$inc": {"revision": 1}})
     try:
         await db.sarvam_inbound_routes.update_one({"_id": ws_id}, {"$set": {
             "enabled": True, "status": "active", "error": None, "agent_phone_number": number, "connection_id": config["connection_id"],
             "app_id": app_id, "app_version": version, "deployment_id": deployment_id, "organization_id": config.get("organization_id"),
-            "sarvam_workspace_id": config.get("workspace_id"), "context_tool_id": tool_id, "caller_lookup": lookup,
+            "sarvam_workspace_id": config.get("workspace_id"), "context_tool_id": setup["tool_id"], "caller_lookup": lookup,
+            "find_tool_id": setup["find_tool_id"], "opening_line_ready": setup["opening_line_ready"], "setup_version": SETUP_VERSION,
             "token_hash": token_hash(token), "encrypted_token": encrypt(ws_id, TOKEN_ENVELOPE, {"token": token}),
             "enabled_by": str(user["_id"]) if user else route.get("enabled_by"), "updated_at": now_iso()}})
     except DuplicateKeyError:
         raise SarvamBuilderError(409, "number_in_use", f"{number} already receives inbound calls for another workspace") from None
     logger.info(json.dumps({"event": "sarvam_inbound_enabled", "workspace_id": ws_id, "app_id": app_id, "app_version": version,
-                            "deployment_id": deployment_id, "caller_lookup": lookup}))
+                            "deployment_id": deployment_id, "caller_lookup": lookup, "find_tool": bool(setup["find_tool_id"]),
+                            "opening_line_ready": setup["opening_line_ready"]}))
     return route_public(await route_for(db, ws_id))
 
 
@@ -363,7 +524,7 @@ async def sync_after_agent_change(db, ws_id):
         doc = await db.workspace_voice_provider_configs.find_one({"workspace_id": ws_id, "provider": "sarvam"})
         config = (doc or {}).get("config") or {}
         if config.get("app_id") == route.get("app_id") and int(config.get("app_version") or 0) == int(route.get("app_version") or 0) \
-                and config.get("agent_phone_number") == route.get("agent_phone_number"):
+                and config.get("agent_phone_number") == route.get("agent_phone_number") and route.get("setup_version") == SETUP_VERSION                 and bool(config.get("opening_line_ready")) == bool(route.get("opening_line_ready")):
             return
         await enable_inbound(db, ws_id)
     except Exception as exc:  # recorded on the route and shown in Settings
@@ -408,7 +569,49 @@ def lead_name(lead):
     return str(values.get("full_name") or values.get("name") or lead.get("full_name") or "").strip()
 
 
-async def caller_context(db, ws_id, lead):
+EMAIL_RE = re.compile(r"^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$")
+
+
+def normalize_email(value):
+    """A spoken or extracted email as one lowercase address, or '' when it is not one."""
+    text = str(value or "").strip().lower()
+    text = re.sub(r"\s+(at|@)\s+", "@", text)
+    text = re.sub(r"\s+(dot|\.)\s+", ".", text)
+    text = re.sub(r"\s+", "", text)
+    return text if len(text) <= 254 and EMAIL_RE.match(text) else ""
+
+
+async def leads_for_email(db, ws_id, email):
+    """Non-deleted leads in the workspace with this email (case-insensitive), most recently active first."""
+    from crm import lead_query
+    if not email:
+        return []
+    exact = {"$regex": f"^{re.escape(email)}$", "$options": "i"}
+    docs = await db.crm_leads.find({"$and": [lead_query(ws_id), {"$or": [{"field_values.email": exact}, {"email": exact}]}]}).to_list(50)
+    return sorted(docs, key=lambda d: str(d.get("updated_at") or d.get("created_at") or ""), reverse=True)
+
+
+async def call_history(db, ws_id, leads, limit=3):
+    """Short dated summaries of the latest calls with any of these leads (duplicates share one history)."""
+    ids = [str(lead["_id"]) for lead in leads]
+    rows = await db.plivo_call_sessions.find(
+        {"workspace_id": ws_id, "lead_id": {"$in": ids}, "status": "completed"},
+        {"summary": 1, "engine_result.conversation_summary": 1, "direction": 1, "completed_at": 1, "created_at": 1},
+    ).sort("created_at", -1).limit(12).to_list(12)
+    lines, seen = [], set()
+    for row in rows:
+        text = " ".join(str(row.get("summary") or (row.get("engine_result") or {}).get("conversation_summary") or "").split())
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        when = str(row.get("completed_at") or row.get("created_at") or "")[:10]
+        lines.append(f"- {when} {row.get('direction') or 'outbound'} call: {text[:400]}")
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+async def caller_context(db, ws_id, lead, leads=None):
     from crm import ensure_crm_settings
     from lead_context import deterministic_lead_context
     from qualification_service import resolve_profile
@@ -422,14 +625,28 @@ async def caller_context(db, ws_id, lead):
     lines = [f"INBOUND CALL: this person rang the business. They are an existing {'customer' if customer else 'lead'} in the CRM."]
     if lead.get("do_not_call"):
         lines.append("They previously asked not to be called. Help them politely because they called; do not push.")
-    summary = (lead.get("communication_summary") or {}).get("latest_summary") or lead.get("conversation_summary")
-    if summary:
-        lines.append(f"Last conversation: {str(summary)[:600]}")
-    facts = {k: v for k, v in (lead.get("qualification_data") or {}).items() if v not in (None, "", [], {}, [""])}
+    history = await call_history(db, ws_id, leads or [lead])
+    if history:
+        lines.append("Earlier calls, newest first (refer to them naturally; do not read them out):\n" + "\n".join(history))
+    else:
+        summary = (lead.get("communication_summary") or {}).get("latest_summary") or lead.get("conversation_summary")
+        if summary:
+            lines.append(f"Last conversation: {str(summary)[:600]}")
+    facts = {}
+    for other in reversed(leads or [lead]):  # older first, so the primary lead's answers win
+        facts.update({k: v for k, v in (other.get("qualification_data") or {}).items() if v not in (None, "", [], {}, [""])})
     if facts:
         lines.append("Already known from earlier calls (do not ask again): " + json.dumps(facts, ensure_ascii=False, default=str)[:900])
     text = "\n".join(lines) + "\n" + deterministic_lead_context(lead, profile, settings)
     return text[:CONTEXT_LIMIT]
+
+
+async def recognise(db, ws_id, leads):
+    """(primary lead, name, context) for a caller's matching leads, or (None, '', '')."""
+    lead = pick_primary(leads)
+    if not lead:
+        return None, "", ""
+    return lead, lead_name(lead), await caller_context(db, ws_id, lead, leads)
 
 
 class ContextRequest(BaseModel):
@@ -437,6 +654,7 @@ class ContextRequest(BaseModel):
     caller_phone: str | None = Field(default=None, max_length=64)
     existing_name: str | None = Field(default=None, max_length=500)
     existing_context: str | None = Field(default=None, max_length=20000)
+    existing_opening: str | None = Field(default=None, max_length=1000)
 
 
 def bound(value):
@@ -445,31 +663,85 @@ def bound(value):
     return "" if "{{" in value else value
 
 
+async def read_json(request, model):
+    try:
+        return model.model_validate(json.loads((await request.body())[:64_000] or b"{}"))
+    except (ValueError, ValidationError):
+        return model()
+
+
 @router.post("/sarvam/inbound/{ws_id}/context")
 async def inbound_context(ws_id: str, request: Request):
     db = db_from(request)
     route = await authenticate(db, ws_id, request.headers.get(TOKEN_HEADER, ""))
     if not route.get("enabled"):
         raise HTTPException(409, "Inbound calls are turned off")
-    try:
-        body = ContextRequest.model_validate(json.loads((await request.body())[:64_000] or b"{}"))
-    except (ValueError, ValidationError):
-        body = ContextRequest()
+    body = await read_json(request, ContextRequest)
     existing = bound(body.existing_context)
-    if existing:  # outbound call: AREVEI already supplied the context, leave it unchanged
-        return {"lead_name": bound(body.existing_name), "lead_context": existing, "direction": "outbound"}
+    if existing:  # outbound call: AREVEI already supplied the context and opening line; leave them unchanged
+        return {"lead_name": bound(body.existing_name), "lead_context": existing, "opening_line": bound(body.existing_opening), "direction": "outbound"}
+    agent_name, business_name = await agent_identity(db, ws_id)
     phone = phone_e164(bound(body.caller_phone))
-    reply = {"lead_name": "", "lead_context": NO_NUMBER if not phone else UNKNOWN_CALLER, "direction": "inbound", "known": False}
+    reply = {"lead_name": "", "lead_context": NO_NUMBER if not phone else UNKNOWN_CALLER, "opening_line": inbound_welcome(agent_name, business_name),
+             "direction": "inbound", "known": False}
     if phone:
         try:
-            lead = pick_primary(await asyncio.wait_for(leads_for_phone(db, ws_id, phone), timeout=3))
+            lead, name, context = await asyncio.wait_for(recognise(db, ws_id, await leads_for_phone(db, ws_id, phone)), timeout=3.5)
             if lead:
-                reply.update({"lead_name": lead_name(lead), "lead_context": await asyncio.wait_for(caller_context(db, ws_id, lead), timeout=1.5), "known": True})
+                reply.update({"lead_name": name, "lead_context": context, "opening_line": inbound_welcome(agent_name, business_name, name), "known": True})
         except asyncio.TimeoutError:
             logger.warning(json.dumps({"event": "sarvam_inbound_context_slow", "workspace_id": ws_id}))
+    # Which inputs actually arrived tells us whether Sarvam's caller binding works; values are never logged.
+    logger.info(json.dumps({"event": "sarvam_inbound_context", "workspace_id": ws_id, "caller_field": bool(bound(body.caller_phone)),
+                            "caller_seen": bool(phone), "known": reply["known"]}))
     await db.sarvam_inbound_routes.update_one({"_id": ws_id}, {"$set": {"last_context_at": now_iso(), "last_context_caller_seen": bool(phone),
                                                                        "last_context_matched": reply["known"]}})
     return reply
+
+
+class FindRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    phone: str | None = Field(default=None, max_length=64)
+    email: str | None = Field(default=None, max_length=320)
+
+
+def spoken_recap(lead, context):
+    """One short sentence the agent can say about the earlier enquiry."""
+    summary = (lead.get("communication_summary") or {}).get("latest_summary") or lead.get("conversation_summary") or ""
+    match = re.search(r"\n- \S+ \w+ call: (.+)", context)
+    text = " ".join(str(match.group(1) if match else summary).split())
+    if not text:
+        return ""
+    first = re.split(r"(?<=[.!?])\s", text)[0]
+    return first if len(first) <= 220 else first[:217].rsplit(" ", 1)[0] + "..."
+
+
+@router.post("/sarvam/inbound/{ws_id}/find")
+async def inbound_find(ws_id: str, request: Request):
+    """In-call search by the phone number or email the caller used before. The reply is spoken as is."""
+    db = db_from(request)
+    route = await authenticate(db, ws_id, request.headers.get(TOKEN_HEADER, ""))
+    if not route.get("enabled"):
+        raise HTTPException(409, "Inbound calls are turned off")
+    body = await read_json(request, FindRequest)
+    phone = phone_e164(bound(body.phone))
+    email = normalize_email(bound(body.email))
+    if not phone and not email:
+        return {"found": False, "lead_name": "", "lead_context": UNKNOWN_CALLER,
+                "reply": "I did not catch a phone number or email address. Could you tell me the one you used before?"}
+    leads = (await leads_for_phone(db, ws_id, phone)) if phone else []
+    if not leads and email:
+        leads = await leads_for_email(db, ws_id, email)
+    lead, name, context = await recognise(db, ws_id, leads)
+    logger.info(json.dumps({"event": "sarvam_inbound_find", "workspace_id": ws_id, "by_phone": bool(phone), "by_email": bool(email), "found": bool(lead)}))
+    if not lead:
+        what = "phone number" if phone else "email address"
+        return {"found": False, "lead_name": "", "lead_context": UNKNOWN_CALLER,
+                "reply": f"I could not find an earlier enquiry with that {what}. No problem, I will note it so our team can link your records."}
+    first = name.split()[0] if name else ""
+    recap = spoken_recap(lead, context)
+    reply = f"Thank you{', ' + first if first else ''}. I found your earlier enquiry with us." + (f" Last time: {recap}" if recap else "")
+    return {"found": True, "lead_name": name, "lead_context": context, "reply": reply}
 
 
 # --------------------------------------------------------------------------- Call-end webhook
@@ -665,7 +937,13 @@ async def handle_call(db, ws_id, payload):
     phone = phone_e164(payload.get("user_phone_number"))
     variables = dict(payload.get("final_agent_variables") or {})
     variables.update({k: v for k, v in (payload.get("output_agent_variables") or {}).items() if v not in (None, "")})
+    email = normalize_email(variables.get("caller_email"))
+    call_summary = " ".join(str(variables.get("call_summary") or "").split())[:2000]
     leads = await leads_for_phone(db, ws_id, phone)
+    matched_by = "phone" if leads else ""
+    if not leads and email:  # a new number, but the caller gave the email of an earlier enquiry
+        leads = await leads_for_email(db, ws_id, email)
+        matched_by = "email" if leads else ""
     lead = pick_primary(leads)
     words, duration = user_words(payload), float(payload.get("duration") or 0)
     if words == 0 or (duration < MIN_DURATION_SECONDS and words < MIN_USER_WORDS):
@@ -692,7 +970,10 @@ async def handle_call(db, ws_id, payload):
                           "caller_phone": phone, "agent_phone_number": payload.get("agent_phone_number"),
                           "started_at": payload.get("start_datetime") or now_iso(), "created_at": now_iso()}}, upsert=True)
     result = await QualificationWebhookController(db).process(ws_id, lead_id, callback_shape(payload, merged_variables(variables, lead)), provider="sarvam")
-    notes = ["Inbound call answered by the AI agent."]
+    lead = await db.crm_leads.find_one({"_id": lead["_id"]}) or lead  # fresh copy after qualification wrote to it
+    notes = [f"Inbound call: {call_summary}" if call_summary else "Inbound call answered by the AI agent."]
+    if matched_by == "email":
+        notes.append(f"Matched to this lead by the email the caller gave ({email}); they called from {phone or 'an unknown number'}.")
     if created:
         notes.append("New lead created from this call.")
     if called_back:
@@ -704,6 +985,17 @@ async def handle_call(db, ws_id, payload):
     updates = {"last_inbound_call_at": now_iso()}
     if lead.get("customer_status") == "customer" or lead.get("status") == "won":
         updates["last_customer_call_at"] = now_iso()
+    if call_summary:
+        # Sarvam's own summary describes what the caller wanted; the qualification summary only lists missing facts.
+        updates.update({"conversation_summary": call_summary, "communication_summary.latest_summary": call_summary})
+        await db.plivo_call_sessions.update_one({"workspace_id": ws_id, "provider": "sarvam", "provider_identifiers.call_uuid": payload["interaction_id"]},
+                                                {"$set": {"summary": call_summary}})
+    stored_email = normalize_email((lead.get("field_values") or {}).get("email") or lead.get("email"))
+    if email and not stored_email:
+        updates["field_values.email"] = email
+        notes.append(f"Email saved from the call: {email}.")
+    elif email and email != stored_email:
+        notes.append(f"The caller gave a different email: {email}.")
     await db.crm_leads.update_one({"_id": lead["_id"]}, {"$set": updates})
     await add_note(db, ws_id, lead_id, " ".join(notes), call_id=payload["interaction_id"], call_direction="inbound")
     return {"status": "processed", "lead_id": lead_id, "created_lead": created, "qualification_status": result.get("status")}

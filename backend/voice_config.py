@@ -64,7 +64,8 @@ def validate_provider(provider):
 
 def safe_config(provider, config):
     allowed = {"plivo": {"auth_id", "from_number", "staff_number", "trigger_url", "auth_type", "flow_id", "input_variable_mappings", "extra_payload"},
-               "sarvam": {"organization_id", "workspace_id", "app_id", "app_version", "connection_id", "agent_phone_number", "payload_mode", *SARVAM_CONFIG_ALIASES}}[provider]
+               "sarvam": {"organization_id", "workspace_id", "app_id", "app_version", "connection_id", "agent_phone_number", "payload_mode",
+                          "opening_line_ready", *SARVAM_CONFIG_ALIASES}}[provider]
     if set(config) - allowed:
         raise HTTPException(422, "Unknown provider configuration fields")
     def check_fields(value):
@@ -104,6 +105,8 @@ def safe_config(provider, config):
             raise HTTPException(422, "App version must be a positive integer") from None
     if result.get("auth_type", "basic") not in {"basic", "bearer"}:
         raise HTTPException(422, "Authentication must be basic or bearer")
+    if "opening_line_ready" in result:
+        result["opening_line_ready"] = result["opening_line_ready"] is True
     if provider == "sarvam" and result.get("payload_mode", "legacy") not in {"legacy", "lead_context_v1"}:
         raise HTTPException(422, "Sarvam agent input mode is invalid")
     return result
@@ -161,6 +164,10 @@ async def save_config(db, ws_id, provider, enabled, config, credentials, revisio
         raise HTTPException(422, "Sarvam callback security is managed automatically")
     query = {"workspace_id": str(ws_id), "provider": provider}
     old = await db.workspace_voice_provider_configs.find_one(query)
+    old_config = (old or {}).get("config") or {}
+    if provider == "sarvam" and old_config.get("opening_line_ready") and old_config.get("app_id") == config.get("app_id"):
+        # Set by inbound setup (sarvam_inbound): the same agent still opens with {{opening_line}}, so outbound must keep sending it.
+        config["opening_line_ready"] = True
     try:
         secrets = decrypt(ws_id, provider, old["encrypted_credentials"]) if old else {}
     except HTTPException as error:

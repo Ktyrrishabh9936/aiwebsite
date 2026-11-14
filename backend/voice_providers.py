@@ -170,6 +170,10 @@ class SarvamVoiceProvider(VoiceProvider):
             }
             if config.get("payload_mode") == "managed_v1":
                 agent_variables.update(base.get("voice_agent_variables") or {})
+            if config.get("opening_line_ready"):
+                # Inbound-enabled agents open with {{opening_line}}; outbound keeps its "am I speaking with" opener.
+                name = agent_variables["lead_name"].strip()
+                agent_variables["opening_line"] = f"Hi, am I speaking with {name}?" if name else "Hello! Do you have a moment to talk?"
         else:
             agent_variables = {"qualification_profile": base["qualification_profile"], "customer_name": base["customer_name"],
                                "previous_answers": base["previous_answers"], "pending_discussion": base["pending_discussion"]}
