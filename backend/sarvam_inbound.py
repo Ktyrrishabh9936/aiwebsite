@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import secrets as secure_random
 from datetime import datetime, timedelta, timezone
@@ -770,6 +771,11 @@ class InboundPayload(BaseModel):
     interaction_transcript: list[InboundTurn] | None = None
 
 
+def background_jobs_disabled():
+    """True on serverless deployments (same switch server.py uses to skip its background loops)."""
+    return os.environ.get("DISABLE_BACKGROUND_JOBS", "").strip().lower() in {"1", "true", "yes"}
+
+
 def event_key(ws_id, interaction_id):
     return f"{ws_id}:{interaction_id}"
 
@@ -811,8 +817,13 @@ async def inbound_result(ws_id: str, request: Request):
     key = await record_event(db, ws_id, payload.model_dump(mode="json"), "webhook")
     if not key:
         return {"ok": True, "duplicate": True}
-    # Acknowledge now: qualification can take longer than Sarvam waits. The sweep retries failures.
-    asyncio.create_task(process_event_safely(db, key))
+    if background_jobs_disabled():
+        # Serverless (Lambda): work left running after the response may be frozen and never finish, so the
+        # call is processed before answering. The event is already stored; the scheduled sweep retries failures.
+        await process_event_safely(db, key)
+    else:
+        # Acknowledge now: qualification can take longer than Sarvam waits. The sweep retries failures.
+        asyncio.create_task(process_event_safely(db, key))
     return {"ok": True}
 
 

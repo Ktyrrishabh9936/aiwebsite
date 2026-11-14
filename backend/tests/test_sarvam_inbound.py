@@ -452,3 +452,16 @@ def test_outbound_calls_send_the_opening_line_once_the_intro_uses_it():
     assert ready["opening_line"] == "Hi, am I speaking with Asha?"
     nameless = SarvamVoiceProvider().build_payload({**base, "lead_name": ""}, {**config, "opening_line_ready": True}, "s-1")["app_config"]["agent_variables"]
     assert nameless["opening_line"] == "Hello! Do you have a moment to talk?"
+
+
+def test_serverless_processes_the_call_before_answering(monkeypatch):
+    monkeypatch.setenv("DISABLE_BACKGROUND_JOBS", "true")
+    async def run(db):
+        ws, lead_id, _ = await seed(db)
+        await active_route(db, ws)
+        async with asgi(db) as client:
+            response = await client.post(f"/api/sarvam/inbound/{ws}/result", json=payload(interaction="int-lambda"))
+        assert response.status_code == 200
+        event = await db.sarvam_inbound_events.find_one({"_id": inbound.event_key(ws, "int-lambda")})
+        assert event["status"] == "processed" and event["lead_id"] == lead_id  # done before the response, no background task
+    asyncio.run(isolated(run))

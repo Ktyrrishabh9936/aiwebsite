@@ -6,6 +6,7 @@ from mangum import Mangum
 
 from push_notifications import dispatch_due
 from google_sheets import retry_sheet_statuses, sync_active_sheet_connections
+from sarvam_inbound import sweep as sarvam_inbound_sweep
 from server import app, db
 
 
@@ -41,7 +42,12 @@ def _run_scheduled_maintenance():
         push = await dispatch_due(db)
         await retry_sheet_statuses(db)
         sheets = await sync_active_sheet_connections(db)
-        return {"push": push, "google_sheets": sheets}
+        try:  # inbound calls: retry failed results, recover missed webhooks, keep deployments in sync
+            await sarvam_inbound_sweep(db)
+            inbound = "ok"
+        except Exception as exc:  # never block push or sheet maintenance
+            inbound = type(exc).__name__
+        return {"push": push, "google_sheets": sheets, "sarvam_inbound": inbound}
 
     return loop.run_until_complete(run())
 
