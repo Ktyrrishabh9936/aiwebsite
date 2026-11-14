@@ -1,6 +1,7 @@
 import { formatDateTime } from "../lib/timezone";
 import { useEffect, useRef, useState } from "react";
 import api, { formatError } from "../lib/api";
+import SarvamPasteSignIn from "./SarvamPasteSignIn";
 
 const fields = {
   plivo: [["auth_id", "Auth ID"], ["from_number", "Calling phone number"], ["trigger_url", "Plivo agent flow URL"], ["flow_id", "Flow ID (optional)"], ["staff_number", "Staff bridge number (optional)"]],
@@ -34,6 +35,7 @@ export default function VoiceProviders({ workspaceId }) {
   const [creation, setCreation] = useState(null);
   const [createMessage, setCreateMessage] = useState("");
   const connectListener = useRef(null);
+  const [pasting, setPasting] = useState(false);
   const base = `/workspaces/${workspaceId}/voice-providers`;
   const selected = providers.find((p) => p.provider === provider);
   const sarvamAccountConnected = account.status === "connected";
@@ -157,6 +159,8 @@ export default function VoiceProviders({ workspaceId }) {
       const { data } = await api.post(`${base}/sarvam/account/connect`, {});
       const popup = window.open(data.authorization_url, "Sarvam Connect", "width=560,height=720");
       if (!popup) { setCreateMessage("Allow pop-ups for this site, then connect again."); return; }
+      if (data.mode === "paste") { setPasting(true); setCreateMessage(""); return; }
+      setPasting(false);
       setCreateMessage("Finish signing in to Sarvam in the window that opened.");
       if (connectListener.current) window.removeEventListener("message", connectListener.current);
       const listener = (event) => {
@@ -266,6 +270,8 @@ export default function VoiceProviders({ workspaceId }) {
                 ? <button type="button" className="underline text-xs" onClick={disconnectAccount}>Disconnect</button>
                 : <button type="button" className="border rounded px-3 py-2 text-sm" onClick={connectAccount}>Connect Sarvam account</button>}
             </div>
+            {pasting && !sarvamAccountConnected && <SarvamPasteSignIn workspaceId={workspaceId} onCancel={() => setPasting(false)}
+              onConnected={async () => { setPasting(false); setCreateMessage("Sarvam account connected."); await loadAccount(); }} />}
             {sarvamAccountConnected ? <>
               <p className="text-xs text-muted-foreground">AREVEI creates the agent with your business details above, configures the lead-context inputs and qualification outputs, commits a version and connects it here.</p>
               <div className="grid sm:grid-cols-2 gap-3">

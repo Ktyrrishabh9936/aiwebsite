@@ -37,7 +37,7 @@ async def ensure_signed_in(db):
     if doc.get("status") == "connected" and fresh:
         print("Using the Sarvam sign-in from", connected_at)
         return
-    url = await builder.begin_connect(db, builder.PLATFORM_ACCOUNT, {"_id": "setup-script", "email": "setup script"})
+    url, _ = await builder.begin_connect(db, builder.PLATFORM_ACCOUNT, {"_id": "setup-script", "email": "setup script"})
     print("\nSign in to Sarvam with AREVEI's account in your browser:\n\n  " + url + "\n")
     webbrowser.open(url)
     started = datetime.now(timezone.utc).isoformat()

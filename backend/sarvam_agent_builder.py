@@ -24,7 +24,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Literal
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
 from bson import ObjectId
@@ -46,6 +46,8 @@ MCP_PROTOCOL_VERSION = "2025-06-18"
 CLIENT_NAME = "AREVEI AI Manager"
 TOKEN_ENVELOPE = "sarvam_account"  # encrypt()/decrypt() binding for account tokens
 STATE_TTL = timedelta(minutes=10)
+PASTE_REDIRECT_URI = "http://127.0.0.1:53682/arevei/sarvam/callback"  # loopback: Sarvam always accepts it
+REDIRECT_RECHECK = timedelta(hours=1)  # how long a refused https callback is remembered before retrying
 CREATION_LEASE = timedelta(minutes=10)
 TOOL_TIMEOUT = 45
 Language = Literal["English", "Hindi", "Bengali", "Gujarati", "Kannada", "Konkani", "Malayalam", "Tamil", "Telugu",
@@ -101,21 +103,33 @@ def redirect_uri():
 
 
 async def oauth_client_id(db, client, metadata, uri):
-    """One dynamically registered public client per callback URL, shared by all workspaces."""
+    """One dynamically registered public client per callback URL, shared by all workspaces.
+
+    Sarvam registers an https callback only after allow-listing it; that refusal raises redirect_not_allowed
+    and is remembered for REDIRECT_RECHECK, so sign-in switches back to the normal flow soon after Sarvam allows it.
+    """
     doc = await db.sarvam_oauth_clients.find_one({"redirect_uri": uri})
     if doc and doc.get("client_id"):
         return doc["client_id"]
+    if doc and doc.get("rejected_at") and datetime.fromisoformat(doc["rejected_at"]) > datetime.now(timezone.utc) - REDIRECT_RECHECK:
+        raise SarvamBuilderError(503, "redirect_not_allowed", "Sarvam has not allow-listed this site's sign-in callback")
+    rejected = False
     try:
         response = await client.post(metadata["registration_endpoint"], json={
             "client_name": CLIENT_NAME, "redirect_uris": [uri], "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"], "token_endpoint_auth_method": "none"}, timeout=20)
         data = response.json() if response.status_code in (200, 201) else {}
+        if response.status_code == 400:
+            rejected = (response.json() or {}).get("error") == "invalid_redirect_uri"
     except (httpx.HTTPError, ValueError):
         data = {}
+    if rejected:
+        await db.sarvam_oauth_clients.update_one({"redirect_uri": uri}, {"$set": {"rejected_at": now_iso(), "updated_at": now_iso()}}, upsert=True)
+        raise SarvamBuilderError(503, "redirect_not_allowed", "Sarvam has not allow-listed this site's sign-in callback")
     if not data.get("client_id"):
         raise SarvamBuilderError(503, "provider_unavailable", "Could not register AREVEI with Sarvam sign-in")
     await db.sarvam_oauth_clients.update_one({"redirect_uri": uri}, {"$set": {
-        "client_id": data["client_id"], "registered_at": now_iso(), "updated_at": now_iso()}}, upsert=True)
+        "client_id": data["client_id"], "registered_at": now_iso(), "updated_at": now_iso()}, "$unset": {"rejected_at": ""}}, upsert=True)
     return data["client_id"]
 
 
@@ -134,10 +148,21 @@ def account_public(doc):
 
 
 async def begin_connect(db, ws_id, user):
+    """Start Sarvam consent. Returns (authorization_url, mode): "popup" when Sarvam redirects back to AREVEI,
+    "paste" when it only accepts a loopback callback and the user pastes the address they land on."""
+    mode = "popup"
     async with httpx.AsyncClient() as client:
         metadata = await oauth_metadata(client)
         uri = redirect_uri()
-        client_id = await oauth_client_id(db, client, metadata, uri)
+        try:
+            client_id = await oauth_client_id(db, client, metadata, uri)
+        except SarvamBuilderError as exc:
+            if exc.code != "redirect_not_allowed":
+                raise
+            # Loopback callbacks are always accepted (RFC 8252). Nothing listens there on a hosted user's machine,
+            # so the browser shows an error page whose address carries the single-use code; the user pastes it back.
+            uri, mode = PASTE_REDIRECT_URI, "paste"
+            client_id = await oauth_client_id(db, client, metadata, uri)
     verifier, challenge = pkce_pair()
     state = secure_random.token_urlsafe(32)
     now = datetime.now(timezone.utc)
@@ -153,13 +178,26 @@ async def begin_connect(db, ws_id, user):
         "$setOnInsert": {"created_at": now.isoformat()}}, upsert=True)
     params = {"response_type": "code", "client_id": client_id, "redirect_uri": uri, "code_challenge": challenge,
               "code_challenge_method": "S256", "state": state, "resource": MCP_URL}
-    return metadata["authorization_endpoint"] + "?" + urlencode(params)
+    return metadata["authorization_endpoint"] + "?" + urlencode(params), mode
 
 
-async def finish_connect(db, state, code):
+def pasted_callback(text):
+    """(code, state, error) from the address the user copied after consent, or raises a friendly error."""
+    raw = (text or "").strip()
+    query = urlsplit(raw).query if "?" in raw else raw.lstrip("?")
+    values = {key: items[0] for key, items in parse_qs(query).items() if items}
+    if values.get("error"):
+        return "", values.get("state", ""), values["error"]
+    if not values.get("code") or not values.get("state"):
+        raise SarvamBuilderError(400, "invalid_paste", "That is not the Sarvam sign-in address. Copy the whole address from the window that "
+                                 "opened after you approved, starting with http://127.0.0.1, and paste it here.")
+    return values["code"], values["state"], ""
+
+
+async def finish_connect(db, state, code, ws_id=None):
     doc = await db.sarvam_account_connections.find_one({"pending.state": state})
     pending = (doc or {}).get("pending") or {}
-    if not doc or pending.get("state") != state:
+    if not doc or pending.get("state") != state or (ws_id is not None and doc.get("workspace_id") != ws_id):
         raise SarvamBuilderError(400, "invalid_state", "This sign-in link is not valid. Start the connection again from AREVEI.")
     ws_id = doc["workspace_id"]
     if datetime.fromisoformat(pending["expires_at"]) < datetime.now(timezone.utc):
@@ -695,7 +733,25 @@ async def get_account(ws_id: str, request: Request):
 @router.post("/workspaces/{ws_id}/voice-providers/sarvam/account/connect")
 async def connect_account(ws_id: str, request: Request):
     user, _ = await require_workspace_access(request, ws_id)
-    return {"authorization_url": await begin_connect(db_from(request), ws_id, user)}
+    url, mode = await begin_connect(db_from(request), ws_id, user)
+    return {"authorization_url": url, "mode": mode}
+
+
+class PastedCallback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    callback_url: str = Field(min_length=1, max_length=4000)
+
+
+@router.post("/workspaces/{ws_id}/voice-providers/sarvam/account/complete")
+async def complete_account(ws_id: str, body: PastedCallback, request: Request):
+    """Finish a "paste" sign-in: the address holds the single-use code and the state issued to this workspace."""
+    await require_workspace_access(request, ws_id)
+    code, state, error = pasted_callback(body.callback_url)
+    if error:
+        raise SarvamBuilderError(400, "consent_failed", "Sarvam sign-in was cancelled" if error == "access_denied" else "Sarvam sign-in did not complete")
+    db = db_from(request)
+    await finish_connect(db, state, code, ws_id=ws_id)
+    return account_public(await db.sarvam_account_connections.find_one({"workspace_id": ws_id}))
 
 
 @router.delete("/workspaces/{ws_id}/voice-providers/sarvam/account")

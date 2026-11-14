@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import api, { formatError } from "../lib/api";
+import SarvamPasteSignIn from "./SarvamPasteSignIn";
 
 const VoiceProviders = lazy(() => import("./VoiceProviders"));
 const input = "w-full border rounded px-3 py-2 bg-background text-sm";
@@ -25,6 +26,7 @@ export default function DedicatedAgentSetup({ workspaceId, profile, configured, 
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [manual, setManual] = useState(false);
+  const [pasting, setPasting] = useState(false);
   const listener = useRef(null);
   const connected = account.status === "connected";
 
@@ -67,6 +69,8 @@ export default function DedicatedAgentSetup({ workspaceId, profile, configured, 
       const { data } = await api.post(`${base}/sarvam/account/connect`, {});
       const popup = window.open(data.authorization_url, "Sarvam Connect", "width=560,height=720");
       if (!popup) { setMessage("Allow pop-ups for this site, then connect again."); return; }
+      if (data.mode === "paste") { setPasting(true); setMessage(""); return; }
+      setPasting(false);
       setMessage("Finish signing in to Sarvam in the window that opened.");
       if (listener.current) window.removeEventListener("message", listener.current);
       const handle = (event) => {
@@ -128,6 +132,8 @@ export default function DedicatedAgentSetup({ workspaceId, profile, configured, 
           {account.status === "unavailable" ? "Retry" : connected ? "Reconnect" : "Connect Sarvam account"}
         </button>
       </div>
+      {pasting && <SarvamPasteSignIn workspaceId={workspaceId} onCancel={() => setPasting(false)}
+        onConnected={async () => { setPasting(false); setMessage("Sarvam account connected."); await loadAccount(); }} />}
       {account.status === "expired" && <p className="text-xs text-muted-foreground">Sarvam sign-ins last about a day. Your existing agent keeps calling; reconnect only to create a new agent.</p>}
       {connected && <>
         <div className="grid sm:grid-cols-2 gap-3">

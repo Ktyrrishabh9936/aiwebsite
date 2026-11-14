@@ -274,7 +274,8 @@ def test_rejected_bearer_token_triggers_one_refresh_then_retry(sarvam):
 def test_oauth_connect_round_trip_binds_state_and_stores_tokens_encrypted(sarvam):
     async def run(db):
         ws = str(ObjectId())
-        url = await builder.begin_connect(db, ws, USER)
+        url, mode = await builder.begin_connect(db, ws, USER)
+        assert mode == "popup"
         params = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
         assert url.startswith(builder.MCP_URL + "/authorize?") and params["code_challenge_method"] == "S256"
         assert params["redirect_uri"] == "https://crm.example/api/sarvam/oauth/callback" and params["client_id"] == "client-1"
@@ -359,4 +360,44 @@ def test_env_key_for_another_account_keeps_agent_and_asks_for_key(sarvam, monkey
         assert result["creation"]["status"] == "connected" and len(sarvam.creates()) == 1
         _, secrets = await load_config(db, ws, "sarvam")
         assert secrets["api_key"] == "rest-key"
+    asyncio.run(isolated(run))
+
+
+def test_paste_sign_in_when_sarvam_refuses_the_https_callback(sarvam):
+    """Sarvam registers https callbacks only once allow-listed; loopback always works, and the user pastes the address back."""
+    original = sarvam.handle
+    registered = []
+    def handle(request):
+        if str(request.url) == builder.MCP_URL + "/register":
+            uri = json.loads(request.content)["redirect_uris"][0]
+            registered.append(uri)
+            if uri.startswith("https://"):
+                return httpx.Response(400, json={"error": "invalid_redirect_uri", "error_description": "not allow-listed"})
+            return httpx.Response(201, json={"client_id": "client-1"})
+        return original(request)
+    sarvam.handle = handle
+    async def run(db):
+        ws = str(ObjectId())
+        url, mode = await builder.begin_connect(db, ws, USER)
+        params = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
+        assert mode == "paste" and params["redirect_uri"] == builder.PASTE_REDIRECT_URI and params["client_id"] == "client-1"
+        # The refusal is remembered: the next click neither re-registers https nor fails.
+        url2, mode2 = await builder.begin_connect(db, ws, USER)
+        assert mode2 == "paste" and registered.count("https://crm.example/api/sarvam/oauth/callback") == 1
+        state = {k: v[0] for k, v in parse_qs(urlsplit(url2).query).items()}["state"]
+        with pytest.raises(HTTPException) as junk:
+            builder.pasted_callback("https://example.com/not-it")
+        assert junk.value.detail["code"] == "invalid_paste"
+        code, got_state, error = builder.pasted_callback(f"{builder.PASTE_REDIRECT_URI}?code=code-1&state={state}")
+        assert (code, got_state, error) == ("code-1", state, "")
+        with pytest.raises(HTTPException):  # another workspace cannot finish this sign-in
+            await builder.finish_connect(db, state, code, ws_id=str(ObjectId()))
+        assert await builder.finish_connect(db, state, code, ws_id=ws) == ws
+        doc = await db.sarvam_account_connections.find_one({"workspace_id": ws})
+        assert doc["status"] == "connected" and doc["client_id"] == "client-1"
+        # After REDIRECT_RECHECK the https callback is tried again, so allow-listing switches back to the popup flow.
+        await db.sarvam_oauth_clients.update_one({"redirect_uri": "https://crm.example/api/sarvam/oauth/callback"},
+                                                 {"$set": {"rejected_at": "2020-01-01T00:00:00+00:00"}})
+        await builder.begin_connect(db, ws, USER)
+        assert registered.count("https://crm.example/api/sarvam/oauth/callback") == 2
     asyncio.run(isolated(run))
