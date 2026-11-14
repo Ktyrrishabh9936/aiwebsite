@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { PhoneCall, Sparkles } from "lucide-react";
 import api, { formatError } from "../lib/api";
 import DedicatedAgentSetup from "./DedicatedAgentSetup";
+import InboundCallsSetup from "./InboundCallsSetup";
 
 const input = "w-full border rounded px-3 py-2 bg-background text-sm";
 const errorMessage = (error, fallback) => {
@@ -234,6 +235,7 @@ export default function VoiceAgentSetup({ workspaceId, onSaved }) {
           {!confirm && trialActive && <button type="button" disabled={!!busy} onClick={() => askSwitch("master")} className="rounded-lg border px-4 py-2 text-sm">Switch to free-trial agent</button>}
           {!confirm && trial?.status === "available" && <button type="button" disabled={!!busy || !valid} onClick={askTrialFromOwn} className="rounded-lg border px-4 py-2 text-sm">Try the {trial.days}-day free trial</button>}
         </div>
+        <InboundCallsSetup workspaceId={workspaceId} />
         <details className="rounded-lg border p-3" open={showOwn} onToggle={(e) => setShowOwn(e.currentTarget.open)}>
           <summary className="cursor-pointer text-sm font-medium">Agent details and Sarvam connection</summary>
           {showOwn && <div className="mt-3 space-y-3">

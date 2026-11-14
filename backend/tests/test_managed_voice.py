@@ -10,6 +10,7 @@ from bson import ObjectId
 from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException
 
+import llm_service  # noqa: F401  loads backend/.env with override at import; must happen before fixtures set test keys
 import managed_voice as mv
 import sarvam_agent_builder as builder
 from tests.test_qualification_integration import isolated, seed

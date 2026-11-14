@@ -48,6 +48,7 @@ def sarvam_runtime_prompt(business_name, offer, objective, instructions):
     offer = " ".join((offer or "the configured product or service").split())
     objective = " ".join((objective or "qualify the lead and identify the appropriate next step").split())
     instructions = " ".join((instructions or "No additional business instructions.").split())
+    from sarvam_inbound import INBOUND_PROMPT
     return f"""# ROLE
 You are the voice lead-qualification assistant for {business_name}.
 
@@ -76,6 +77,8 @@ Every call receives exactly these three String variables:
 
 # BUSINESS-SPECIFIC INSTRUCTIONS
 {instructions}
+
+{INBOUND_PROMPT}
 
 # RESULT
 Capture the qualification facts required by the agent's existing output variables so AREVEI can update the CRM after the call."""

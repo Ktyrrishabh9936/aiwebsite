@@ -4,7 +4,8 @@ import VoiceAgentSetup, { VoiceAgentBanner, canCall } from "./VoiceAgentSetup";
 import api from "../lib/api";
 
 jest.mock("react-router-dom", () => ({ Link: ({ to, children, ...rest }) => <a href={to} {...rest}>{children}</a> }), { virtual: true });
-jest.mock("./DedicatedAgentSetup", () => (props) => <div data-testid="dedicated-setup">dedicated setup for {props.profile?.business_name}</div>);
+jest.mock("./InboundCallsSetup", () => () => <div data-testid="inbound-setup" />);
+jest.mock("./DedicatedAgentSetup",() => (props) => <div data-testid="dedicated-setup">dedicated setup for {props.profile?.business_name}</div>);
 jest.mock("../lib/api", () => ({
   __esModule: true,
   default: { get: jest.fn(), put: jest.fn(), post: jest.fn() },

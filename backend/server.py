@@ -1300,6 +1300,8 @@ from sarvam_agent_builder import router as sarvam_agent_builder_router
 api.include_router(sarvam_agent_builder_router)
 from managed_voice import router as managed_voice_router
 api.include_router(managed_voice_router)
+from sarvam_inbound import router as sarvam_inbound_router
+api.include_router(sarvam_inbound_router)
 api.include_router(qualification_router)
 api.include_router(crm_performance_router)
 api.include_router(crm_workspace_router)
@@ -1359,6 +1361,8 @@ async def startup():
         app.state.sales_leadership_job = asyncio.create_task(leadership_loop(db))
         asyncio.create_task(scheduler_loop())
         asyncio.create_task(google_sheets_poller_loop())
+        from sarvam_inbound import sweep_loop as sarvam_inbound_sweep_loop
+        app.state.sarvam_inbound_sweep = asyncio.create_task(sarvam_inbound_sweep_loop(db))
         if not os.environ.get("VERCEL"):
             app.state.push_scheduler = asyncio.create_task(push_scheduler(db))
     else:

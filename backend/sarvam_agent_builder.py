@@ -360,6 +360,11 @@ def parse_rpc_response(response):
 
 def safe_tool_message(text):
     """Surface Sarvam's validation message without URLs, tokens or oversized bodies."""
+    if "internal diagnostic" in (text or ""):
+        # Sarvam marks these details as not for end users; keep them in the server log only.
+        logger.warning(json.dumps({"event": "sarvam_tool_rejected", "detail": safe_tool_message(text.replace("internal diagnostic", "diagnostic"))}))
+        tool = re.match(r"Error executing tool (\w+)", text)
+        return f"Sarvam rejected the {tool.group(1) if tool else 'agent'} request. Check the server log for details."
     text = re.sub(r"https?://\S+", "", text or "")
     text = re.sub(r"(?i)(api[_-]?key|token|secret|authorization)\s*[:=]\s*\S+", r"\1=[redacted]", text)
     text = " ".join(text.split())
@@ -661,6 +666,8 @@ async def connect_created_agent(db, ws_id, record, supplied_key="", revision=Non
     await db.sarvam_agent_creations.update_one(query, {"$set": {"status": "connected", "error": None, "error_code": None, "updated_at": now_iso()}})
     from managed_voice import on_dedicated_connected
     await on_dedicated_connected(db, ws_id)
+    from sarvam_inbound import sync_after_agent_change
+    await sync_after_agent_change(db, ws_id)  # inbound calls follow a re-created agent; never raises
     logger.info(json.dumps({"event": "sarvam_agent_connected", "workspace_id": ws_id, "creation_key": record["creation_key"],
                             "app_id": record["app_id"], "app_version": int(record["app_version"]), "verification": saved.get("status")}))
     record = await db.sarvam_agent_creations.find_one(query)

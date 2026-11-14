@@ -339,3 +339,38 @@ npm run build
 ```
 
 Validation results: the expanded 160-test backend regression run passed; after adding media/migration coverage, the updated provider and Plivo suites passed 76 tests. The independent model-selection suite passed 7 tests. Six frontend tests and the final production build passed. Live provider accounts were not exercised.
+
+## Sarvam inbound calls (dedicated agents only)
+
+`backend/sarvam_inbound.py`. Settings → Voice agent → "Inbound calls" turns it on for the workspace's own agent.
+The free-trial (shared master) agent cannot take inbound calls.
+
+**Setup (automatic, via the Sarvam MCP server):** on enable, AREVEI
+1. refuses if the number already answers calls for another Sarvam agent or another AREVEI workspace;
+2. appends the `# INBOUND CALLS` prompt section and a `caller_name` output variable to the agent (new agents already include the section);
+3. adds an `on_start` API tool `arevei_caller_lookup` → `POST /api/sarvam/inbound/{ws}/context` with header `X-Arevei-Inbound-Token`;
+4. commits a new agent version (outbound uses it too) and creates or patches a 24/7 deployment (no `inbound_config`) whose webhook is
+   `POST /api/sarvam/inbound/{ws}/result` with the token in `metadata.inbound_token`.
+
+Re-creating the agent re-runs this automatically (`sync_after_agent_change`); a moved agent deletes the old deployment first
+(the number is briefly unanswered). The sweep also re-syncs version drift every 15 minutes.
+
+**Caller lookup:** the tool sends `caller_phone` (`{{user_identifier}}`) plus the current `lead_name`/`lead_context`.
+Outbound calls already carry `lead_context`, so the endpoint echoes it unchanged. If Sarvam refuses the caller binding the tool
+is created without it (`caller_lookup: manual`): map `caller_phone` to User Identifier once in the Sarvam console. Settings shows
+whether the caller number is arriving. Recognition after the call never depends on this.
+
+**Call-end processing:** authenticated by token + app id + dialled number, stored once per `interaction_id`
+(`sarvam_inbound_events`), acknowledged immediately, then processed in the background:
+- caller matched by phone (E.164; `0`/`00`/no-prefix forms normalised) among non-deleted leads; open leads first, then customers;
+  other matches get `possible_duplicate_of`;
+- unknown caller → one lead per number (`sarvam_inbound_callers` claim), source `sarvam_inbound`, name from `caller_name`;
+- silent/short calls (< 10 s and < 3 words, or no caller speech) and unknown callers with no enquiry facts create no lead;
+- a pending outbound retry is cancelled; earlier qualification answers are kept where the call said nothing new;
+- the result then runs through the shared `QualificationWebhookController` like an outbound result.
+
+**Recovery:** Sarvam does not retry inbound webhooks. Every 5 minutes the sweep retries failed events (max 6 attempts) and,
+every 15 minutes per route, reads Sarvam analytics for inbound interactions in the last 6 hours that never arrived.
+
+**Not yet verified on a live call:** whether `{{user_identifier}}` binds in an API tool, whether `on_start` sees outbound
+variables before it fires, the analytics transcript field shape, and whether one number can take outbound and inbound calls together.

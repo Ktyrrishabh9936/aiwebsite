@@ -82,6 +82,9 @@ async def migrate():
         (db.lead_form_rate, "expires_at", {"expireAfterSeconds": 0}),
         (db.crm_leads, [("workspace_id", 1), ("phone", 1)], {}),
         (db.crm_leads, [("workspace_id", 1), ("email", 1)], {}),
+        (db.sarvam_inbound_routes, "agent_phone_number", {"unique": True}),
+        (db.sarvam_inbound_events, [("status", 1), ("received_at", 1)], {}),
+        (db.sarvam_inbound_events, [("workspace_id", 1), ("received_at", -1)], {}),
     ]
     for collection, keys, options in indexes:
         name = await collection.create_index(keys, **options)
