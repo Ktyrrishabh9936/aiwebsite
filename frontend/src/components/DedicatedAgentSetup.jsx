@@ -3,7 +3,6 @@ import api, { formatError } from "../lib/api";
 import SarvamPasteSignIn from "./SarvamPasteSignIn";
 
 const VoiceProviders = lazy(() => import("./VoiceProviders"));
-const input = "w-full border rounded px-3 py-2 bg-background text-sm";
 const LANGUAGES = ["English", "Hindi", "Bengali", "Gujarati", "Kannada", "Konkani", "Malayalam", "Tamil", "Telugu", "Punjabi", "Odia", "Marathi", "Assamese"];
 const newKey = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `k-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const detail = (error) => { const d = error?.response?.data?.detail; return d && typeof d === "object" && !Array.isArray(d) ? d : null; };
@@ -27,6 +26,7 @@ export default function DedicatedAgentSetup({ workspaceId, profile, configured, 
   const [message, setMessage] = useState("");
   const [manual, setManual] = useState(false);
   const [pasting, setPasting] = useState(false);
+  const [more, setMore] = useState(false);
   const listener = useRef(null);
   const connected = account.status === "connected";
 
@@ -124,45 +124,69 @@ export default function DedicatedAgentSetup({ workspaceId, profile, configured, 
   };
 
   const numbers = connections.find((c) => c.connection_id === form.connection_id)?.phone_numbers || [];
+  const connection = connections.find((c) => c.connection_id === form.connection_id);
+  const needsKey = !keySaved || unsaved;
+  // What was filled in automatically stays out of the way, unless something is missing and needs the user.
+  const needsAttention = connected && (needsKey || !form.connection_id || !form.agent_phone_number);
+  const accountText = account.status === "loading" ? "Checking…" : connected ? `Connected${account.connected_by ? ` as ${account.connected_by}` : ""}`
+    : account.status === "expired" ? "Sign-in expired" : account.status === "unavailable" ? "Status unavailable" : "Not connected";
+  const field = "mt-1 h-11 w-full rounded-xl border bg-background px-3.5 text-sm";
   return (
-    <div className="space-y-3" aria-label="Your own agent">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm font-medium">Sarvam account: {account.status === "loading" ? "checking…" : account.status === "connected" ? `connected${account.connected_by ? ` (${account.connected_by})` : ""}` : account.status === "expired" ? "sign-in expired" : account.status === "unavailable" ? "status unavailable" : "not connected"}</p>
-        <button type="button" disabled={busy || account.status === "loading"} onClick={account.status === "unavailable" ? loadAccount : connect} className="border rounded-lg px-3 py-1.5 text-sm disabled:opacity-50">
+    <div className="space-y-4" aria-label="Your own agent">
+      <div className="flex flex-wrap items-center gap-3 rounded-2xl border bg-background p-4">
+        <span className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl text-sm font-bold ${connected ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-primary/10 text-primary"}`} aria-hidden="true">S</span>
+        <div className="min-w-0 flex-1">
+          <p className="font-semibold">Sarvam account</p>
+          <p className="truncate text-sm text-muted-foreground">{accountText}</p>
+        </div>
+        <button type="button" disabled={busy || account.status === "loading"} onClick={account.status === "unavailable" ? loadAccount : connect}
+          className={`inline-flex h-10 items-center rounded-xl px-4 text-sm font-semibold disabled:opacity-50 ${connected ? "border font-medium hover:bg-accent" : "bg-primary text-primary-foreground hover:bg-primary/90"}`}>
           {account.status === "unavailable" ? "Retry" : connected ? "Reconnect" : "Connect Sarvam account"}
         </button>
       </div>
       {pasting && <SarvamPasteSignIn workspaceId={workspaceId} onCancel={() => setPasting(false)}
         onConnected={async () => { setPasting(false); setMessage("Sarvam account connected."); await loadAccount(); }} />}
       {account.status === "expired" && <p className="text-xs text-muted-foreground">Sarvam sign-ins last about a day. Your existing agent keeps calling; reconnect only to create a new agent.</p>}
-      {connected && <>
-        <div className="grid sm:grid-cols-2 gap-3">
-          <label className="text-sm">Agent name in Sarvam<input className={input} maxLength={50} value={form.agent_name} placeholder={agentNameFor(profile?.business_name)} onChange={(e) => setForm({ ...form, agent_name: e.target.value })} /></label>
-          <label className="text-sm">Language<select className={input} value={form.initial_language} onChange={(e) => setForm({ ...form, initial_language: e.target.value, voice_id: "" })}>{LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}</select></label>
-          <label className="text-sm">Telephony connection<select className={input} value={form.connection_id} onChange={(e) => { const item = connections.find((c) => c.connection_id === e.target.value); setForm({ ...form, connection_id: e.target.value, agent_phone_number: item?.phone_numbers?.[0] || "" }); }}>
-            {!connections.length && <option value="">No telephony connection in Sarvam yet</option>}
-            {connections.map((c) => <option key={c.connection_id} value={c.connection_id}>{c.name}{c.provider ? ` · ${c.provider}` : ""}</option>)}
-          </select></label>
-          <label className="text-sm">Calling number<select className={input} value={form.agent_phone_number} onChange={(e) => setForm({ ...form, agent_phone_number: e.target.value })}>
-            {!numbers.length && <option value="">No onboarded number</option>}
-            {numbers.map((n) => <option key={n} value={n}>{n}</option>)}
-          </select></label>
-          <label className="text-sm">Voice (optional)<select className={input} value={form.voice_id} onChange={(e) => setForm({ ...form, voice_id: e.target.value })}>
-            <option value="">Default voice</option>
-            {voices.map((v) => <option key={v.voice_id} value={v.voice_id}>{v.name}{v.gender ? ` · ${v.gender}` : ""}</option>)}
-          </select></label>
-          {(!keySaved || unsaved) && <label className="text-sm">Sarvam Voice Agents API key<input type="password" autoComplete="new-password" className={input} value={form.api_key} placeholder="Used to place calls" onChange={(e) => setForm({ ...form, api_key: e.target.value })} /></label>}
+
+      {connected && (
+        <div className="space-y-4 rounded-2xl border bg-background p-4 sm:p-5">
+          <div>
+            <p className="font-semibold">{configured ? "Create a new agent" : "Create your agent"}</p>
+            <p className="text-sm text-muted-foreground">It is created with your business details and behaviour, then connected and checked automatically.</p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="text-sm font-medium">Agent name in Sarvam<input className={field} maxLength={50} value={form.agent_name} placeholder={agentNameFor(profile?.business_name)} onChange={(e) => setForm({ ...form, agent_name: e.target.value })} /></label>
+            <label className="text-sm font-medium">Language<select className={field} value={form.initial_language} onChange={(e) => setForm({ ...form, initial_language: e.target.value, voice_id: "" })}>{LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}</select></label>
+          </div>
+          {form.agent_phone_number && <p className="text-sm text-muted-foreground">Calls will come from <span className="font-semibold text-foreground">{form.agent_phone_number}</span>{connection?.name ? ` (${connection.name})` : ""}.</p>}
+          <details className="rounded-xl border" open={more || needsAttention} onToggle={(e) => setMore(e.currentTarget.open)}>
+            <summary className="cursor-pointer px-4 py-3 text-sm font-medium">More options{needsAttention && <span className="ml-2 text-xs font-semibold text-amber-600 dark:text-amber-400">needs your input</span>}</summary>
+            <div className="grid gap-3 border-t p-4 sm:grid-cols-2">
+              <label className="text-sm font-medium">Telephony connection<select className={field} value={form.connection_id} onChange={(e) => { const item = connections.find((c) => c.connection_id === e.target.value); setForm({ ...form, connection_id: e.target.value, agent_phone_number: item?.phone_numbers?.[0] || "" }); }}>
+                {!connections.length && <option value="">No telephony connection in Sarvam yet</option>}
+                {connections.map((c) => <option key={c.connection_id} value={c.connection_id}>{c.name}{c.provider ? ` · ${c.provider}` : ""}</option>)}
+              </select></label>
+              <label className="text-sm font-medium">Calling number<select className={field} value={form.agent_phone_number} onChange={(e) => setForm({ ...form, agent_phone_number: e.target.value })}>
+                {!numbers.length && <option value="">No onboarded number</option>}
+                {numbers.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select></label>
+              <label className="text-sm font-medium">Voice (optional)<select className={field} value={form.voice_id} onChange={(e) => setForm({ ...form, voice_id: e.target.value })}>
+                <option value="">Default voice</option>
+                {voices.map((v) => <option key={v.voice_id} value={v.voice_id}>{v.name}{v.gender ? ` · ${v.gender}` : ""}</option>)}
+              </select></label>
+              {needsKey && <label className="text-sm font-medium">Sarvam Voice Agents API key<input type="password" autoComplete="new-password" className={field} value={form.api_key} placeholder="Used to place calls" onChange={(e) => setForm({ ...form, api_key: e.target.value })} /></label>}
+            </div>
+          </details>
+          <button type="button" disabled={busy || !form.connection_id || !form.agent_phone_number || (!keySaved && !form.api_key.trim())} onClick={create} className="inline-flex h-11 items-center rounded-xl bg-primary px-5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
+            {busy ? "Working…" : configured ? "Create a new dedicated agent" : "Create my agent"}
+          </button>
         </div>
-        <p className="text-xs text-muted-foreground">The agent is created with the business details and behaviour above, then connected and verified automatically.</p>
-        <button type="button" disabled={busy || !form.connection_id || !form.agent_phone_number || (!keySaved && !form.api_key.trim())} onClick={create} className="rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold disabled:opacity-50">
-          {busy ? "Working…" : configured ? "Create a new dedicated agent" : "Create my agent"}
-        </button>
-      </>}
-      {unsaved && <button type="button" disabled={busy} onClick={finishConnecting} className="border rounded-lg px-3 py-2 text-sm">Finish connecting</button>}
+      )}
+      {unsaved && <button type="button" disabled={busy} onClick={finishConnecting} className="inline-flex h-10 items-center rounded-xl border px-4 text-sm font-medium">Finish connecting</button>}
       {message && <p role="status" className="text-sm">{message}</p>}
-      <details className="rounded-lg border p-3" onToggle={(e) => { const open = e.currentTarget.open; setManual(open); if (!open) onConnected?.(); }}>
-        <summary className="cursor-pointer text-sm">Advanced: set up an existing agent manually</summary>
-        {manual && <div className="mt-3"><Suspense fallback={<p className="text-sm text-muted-foreground">Loading…</p>}><VoiceProviders workspaceId={workspaceId} /></Suspense></div>}
+      <details className="rounded-xl border" onToggle={(e) => { const open = e.currentTarget.open; setManual(open); if (!open) onConnected?.(); }}>
+        <summary className="cursor-pointer px-4 py-3 text-sm text-muted-foreground">Advanced: set up an existing agent manually</summary>
+        {manual && <div className="border-t p-4"><Suspense fallback={<p className="text-sm text-muted-foreground">Loading…</p>}><VoiceProviders workspaceId={workspaceId} /></Suspense></div>}
       </details>
     </div>
   );

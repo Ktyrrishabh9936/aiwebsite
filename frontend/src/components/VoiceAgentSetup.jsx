@@ -4,6 +4,7 @@ import { PhoneCall, Sparkles } from "lucide-react";
 import api, { formatError } from "../lib/api";
 import DedicatedAgentSetup from "./DedicatedAgentSetup";
 import InboundCallsSetup from "./InboundCallsSetup";
+import VoiceAgentDetails from "./VoiceAgentDetails";
 
 const input = "w-full border rounded px-3 py-2 bg-background text-sm";
 const errorMessage = (error, fallback) => {
@@ -167,7 +168,7 @@ export default function VoiceAgentSetup({ workspaceId, onSaved }) {
   });
 
   return (
-    <section className="border rounded-md bg-card p-4 sm:p-6 space-y-4" aria-label="AI voice agent">
+    <section className="rounded-2xl border bg-card p-4 sm:p-6 space-y-5" aria-label="AI voice agent">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <h2 className="font-display text-xl font-bold">AI Voice Agent</h2>
@@ -224,10 +225,14 @@ export default function VoiceAgentSetup({ workspaceId, onSaved }) {
       </>}
 
       {type === "dedicated" && <>
-        <div className="rounded-lg border p-3 text-sm space-y-1">
-          <p><span className="font-semibold">{dedicated?.agent_name || "Your dedicated agent"}</span>{dedicated?.calling_number ? ` · calls from ${dedicated.calling_number}` : ""}</p>
-          <p className="text-muted-foreground">Connection: {(dedicated?.status || "unverified").replaceAll("_", " ")}{dedicated?.last_verified_at ? ` · checked ${formatDate(dedicated.last_verified_at)}` : ""}</p>
+        <div className="flex flex-wrap items-center gap-3 rounded-2xl border bg-background p-4">
+          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><PhoneCall className="h-5 w-5" /></span>
+          <div className="min-w-0 flex-1 text-sm">
+            <p className="text-base font-semibold">{dedicated?.agent_name || "Your dedicated agent"}</p>
+            <p className="text-muted-foreground">{dedicated?.calling_number ? `Calls from ${dedicated.calling_number} · ` : ""}Connection: {(dedicated?.status || "unverified").replaceAll("_", " ")}{dedicated?.last_verified_at ? ` · checked ${formatDate(dedicated.last_verified_at)}` : ""}</p>
+          </div>
         </div>
+        <VoiceAgentDetails workspaceId={workspaceId} refreshKey={`${dedicated?.agent_name}:${state.profile?.business_details}:${state.profile?.behaviour}`} />
         <div className="flex flex-wrap gap-2">
           {state.calling_enabled
             ? <button type="button" disabled={!!busy} onClick={() => setCalling(false)} className="rounded-lg border px-4 py-2 text-sm disabled:opacity-50">Pause calling</button>
@@ -236,9 +241,9 @@ export default function VoiceAgentSetup({ workspaceId, onSaved }) {
           {!confirm && trial?.status === "available" && <button type="button" disabled={!!busy || !valid} onClick={askTrialFromOwn} className="rounded-lg border px-4 py-2 text-sm">Try the {trial.days}-day free trial</button>}
         </div>
         <InboundCallsSetup workspaceId={workspaceId} />
-        <details className="rounded-lg border p-3" open={showOwn} onToggle={(e) => setShowOwn(e.currentTarget.open)}>
-          <summary className="cursor-pointer text-sm font-medium">Agent details and Sarvam connection</summary>
-          {showOwn && <div className="mt-3 space-y-3">
+        <details className="rounded-xl border" open={showOwn} onToggle={(e) => setShowOwn(e.currentTarget.open)}>
+          <summary className="cursor-pointer px-4 py-3 text-sm font-medium">Edit business details, or create a new agent</summary>
+          {showOwn && <div className="space-y-3 border-t p-4">
             {profileFields}
             <p className="text-xs text-muted-foreground">These details are used when you create a new dedicated agent and by the free-trial agent. Your current agent's own instructions are managed in your Sarvam account.</p>
             <button type="button" disabled={!!busy || !valid} onClick={saveProfile} className="rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50">{busy === "save" ? "Saving…" : "Save details"}</button>

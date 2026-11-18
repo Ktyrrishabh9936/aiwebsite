@@ -25,3 +25,19 @@ test("acknowledgement persists per user and clears feature highlights",async()=>
  await act(async()=>root.render(<ProductUpdates userId="other" wsId="ws" onExplore={jest.fn()}/>));
  expect(container.querySelector("style")).not.toBeNull();
 });
+test("the dot clears once the list is opened and each badge clears when its feature is first opened",async()=>{
+ const nav=document.createElement("a");nav.setAttribute("data-testid","nav-customers");document.body.appendChild(nav);
+ await act(async()=>root.render(<ProductUpdates userId="owner" wsId="ws" onExplore={jest.fn()}/>));
+ await act(async()=>container.querySelector('button[aria-label="New updates, unread"]').click());
+ expect(container.querySelector('button[aria-label="New updates, unread"]')).toBeNull();
+ expect(container.querySelector('button[aria-label="New updates"] span[aria-hidden="true"]')).toBeNull();
+ expect(container.querySelector("style").textContent).toContain("nav-customers");
+ await act(async()=>nav.click());
+ expect(container.querySelector("style").textContent).not.toContain("nav-customers");
+ expect(container.querySelector("style").textContent).toContain("nav-crm");
+ act(()=>root.unmount());root=createRoot(container);
+ await act(async()=>root.render(<ProductUpdates userId="owner" wsId="ws" onExplore={jest.fn()}/>));
+ expect(container.querySelector('button[aria-label="New updates, unread"]')).toBeNull();
+ expect(container.querySelector("style").textContent).not.toContain("nav-customers");
+ nav.remove();
+});

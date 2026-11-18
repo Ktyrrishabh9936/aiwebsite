@@ -7,6 +7,7 @@ from mangum import Mangum
 from push_notifications import dispatch_due
 from google_sheets import retry_sheet_statuses, sync_active_sheet_connections
 from sarvam_inbound import sweep as sarvam_inbound_sweep
+from ai_ops import tick as ai_ops_tick
 from server import app, db
 
 
@@ -19,7 +20,7 @@ app.state.voice_storage_ready = True
 asgi_handler = Mangum(app, lifespan="off")
 
 
-def _run_scheduled_maintenance():
+def _run_scheduled_maintenance(context=None):
     """Run the scheduled coroutine without closing Lambda's shared event loop.
 
     Mangum reuses the current thread's event loop for Function URL requests.
@@ -47,7 +48,12 @@ def _run_scheduled_maintenance():
             inbound = "ok"
         except Exception as exc:  # never block push or sheet maintenance
             inbound = type(exc).__name__
-        return {"push": push, "google_sheets": sheets, "sarvam_inbound": inbound}
+        try:  # daily AI run: start due runs, execute due actions, follow up finished calls
+            remaining = context.get_remaining_time_in_millis() / 1000 if context is not None else 25
+            daily = await ai_ops_tick(db, budget_seconds=max(0, remaining - 4)) if remaining > 12 else "skipped_no_time"
+        except Exception as exc:  # never block the other maintenance work
+            daily = type(exc).__name__
+        return {"push": push, "google_sheets": sheets, "sarvam_inbound": inbound, "ai_ops": daily}
 
     return loop.run_until_complete(run())
 
@@ -61,5 +67,5 @@ def handler(event, context):
     Mangum.
     """
     if isinstance(event, dict) and event.get("action") == "dispatch_due_followups":
-        return _run_scheduled_maintenance()
+        return _run_scheduled_maintenance(context)
     return asgi_handler(event, context)

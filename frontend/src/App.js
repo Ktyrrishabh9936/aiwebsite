@@ -40,6 +40,9 @@ const Projects = lazy(() => import("./pages/sections/Projects"));
 const Properties = lazy(() => import("./pages/sections/Properties"));
 const ProductsServices = lazy(() => import("./pages/sections/ProductsServices"));
 const Settings = lazy(() => import("./pages/sections/Settings"));
+const DailyPlan = lazy(() => import("./pages/sections/DailyPlan"));
+const AiControl = lazy(() => import("./pages/sections/AiControl"));
+const PlanApproval = lazy(() => import("./pages/PlanApproval"));
 
 function Protected() {
   const location = useLocation();
@@ -67,6 +70,7 @@ function App() {
               <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route path="/reset-password" element={<ResetPassword />} />
               <Route path="/blog/:slug" element={<PublicBlog />} />
+              <Route path="/plan" element={<PlanApproval />} />
               <Route element={<Protected />}>
                 <Route path="/welcome" element={<Onboarding />} />
                 <Route path="/app" element={<Dashboard />} />
@@ -82,6 +86,8 @@ function App() {
                   <Route path="settings" element={<Settings />} />
                   <Route path="brain" element={<Brain />} />
                   <Route path="manager" element={<Manager />} />
+                  <Route path="daily-plan" element={<DailyPlan />} />
+                  <Route path="ai" element={<AiControl />} />
                   <Route path="agents" element={<Agents />} />
                   <Route path="qualification" element={<Qualification />} />
                   <Route path="tasks" element={<Tasks />} />

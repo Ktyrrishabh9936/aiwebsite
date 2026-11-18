@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
-import { LayoutDashboard, Users, Building2, Boxes, ListChecks, Brain, MessageSquare, Bot, Workflow, Settings, Search, PackageOpen } from "lucide-react";
+import { LayoutDashboard, Users, Building2, Boxes, ListChecks, Brain, MessageSquare, Bot, Workflow, Settings, Search, PackageOpen, CalendarClock, Sparkles } from "lucide-react";
 
 export const navigationGroups = [
   { label: "Workspace", items: [{ to: "", label: "Overview", icon: LayoutDashboard }, { to: "crm", label: "CRM", icon: Users }, { to: "customers", label: "Customers", icon: Users }, { to: "properties", label: "Properties", icon: Building2, module: "real_estate" }, { to: "products-services", label: "Products & Services", icon: PackageOpen, module: "agency" }, { to: "projects", label: "Projects", icon: Boxes }, { to: "tasks", label: "Tasks", icon: ListChecks }] },
-  { label: "AI & automation", items: [{ to: "manager", label: "AI Manager", icon: MessageSquare }, { to: "agents", label: "AI Agents", icon: Bot }, { to: "qualification", label: "Qualification", icon: ListChecks }, { to: "brain", label: "Brain", icon: Brain }, { to: "workflows", label: "Workflows", icon: Workflow }] },
+  { label: "AI & automation", items: [{ to: "ai", label: "AI Control", icon: Sparkles }, { to: "daily-plan", label: "Daily AI Plan", icon: CalendarClock }, { to: "manager", label: "AI Manager", icon: MessageSquare }, { to: "agents", label: "AI Agents", icon: Bot }, { to: "qualification", label: "Qualification", icon: ListChecks }, { to: "brain", label: "Brain", icon: Brain }, { to: "workflows", label: "Workflows", icon: Workflow }] },
   { label: "Preferences", items: [{ to: "settings", label: "Settings", icon: Settings }] },
 ];
 

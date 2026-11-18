@@ -1319,6 +1319,15 @@ from lead_forms import router as lead_forms_router, public_router as lead_forms_
 api.include_router(onboarding_router)
 api.include_router(lead_forms_router)
 api.include_router(lead_forms_public_router)
+from connectors import router as connectors_router
+from ai_ops import router as ai_ops_router, public_router as ai_ops_public_router, ai_ops_loop
+from ai_agents import router as ai_agents_router
+from ai_ops_meetings import router as ai_ops_meetings_router
+api.include_router(connectors_router)
+api.include_router(ai_ops_router)
+api.include_router(ai_ops_public_router)
+api.include_router(ai_agents_router)
+api.include_router(ai_ops_meetings_router)
 api.include_router(build_voice_router(db, manager_service, owned_workspace, require_user))
 
 app.include_router(build_auth_router(db))
@@ -1363,6 +1372,7 @@ async def startup():
         asyncio.create_task(google_sheets_poller_loop())
         from sarvam_inbound import sweep_loop as sarvam_inbound_sweep_loop
         app.state.sarvam_inbound_sweep = asyncio.create_task(sarvam_inbound_sweep_loop(db))
+        app.state.ai_ops_job = asyncio.create_task(ai_ops_loop(db))
         if not os.environ.get("VERCEL"):
             app.state.push_scheduler = asyncio.create_task(push_scheduler(db))
     else:

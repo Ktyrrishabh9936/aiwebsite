@@ -25,7 +25,7 @@ ASSIST_EMAIL = os.environ.get("ONBOARDING_ASSIST_EMAIL", "admin@arevei.com")
 CONTACT = {"name": "arevei", "email": "admin@arevei.com"}
 ROLES = {"founder", "marketer", "real_estate_broker", "sales_leader", "agency", "other"}
 HEARD_FROM = {"social_media", "chatgpt_ai", "whatsapp", "google_search", "referral", "event", "other"}
-STEPS = {"about", "setup", "interview", "channels", "done"}
+STEPS = {"about", "schedule", "setup", "interview", "channels", "done"}
 SECONDS_PER_QUESTION = 40
 
 
@@ -85,7 +85,7 @@ async def save_profile(request: Request, body: ProfileInput):
     if body.role == "other" and not body.role_other.strip():
         raise HTTPException(422, "Tell us your role")
     current = user.get("onboarding") or {}
-    step = current.get("step") if current.get("step") not in (None, "about") else "setup"
+    step = current.get("step") if current.get("step") not in (None, "about") else "schedule"
     return await _set_user_onboarding(db, user, {**body.model_dump(), "step": step})
 
 
@@ -532,6 +532,8 @@ async def checklist(ws_id: str, request: Request):
          "done": ws.get("brain_status") == "ready", "href": f"{base}/brain", "minutes": 2},
         {"key": "strategy", "title": "Build your sales strategy", "description": "A month-by-month plan tied to your revenue target.",
          "done": bool(ws.get("sales_strategy")), "href": f"{base}/setup", "minutes": 6},
+        {"key": "daily_run", "title": "Choose your daily AI run time", "description": "Your AI reviews the CRM every day, plans the work and emails you the strategy.",
+         "done": bool((ws.get("ai_ops") or {}).get("enabled")), "href": f"{base}/settings#daily-ai", "minutes": 1},
         {"key": "voice", "title": "Connect the voice agent", "description": "Call every new lead within minutes, day or night.",
          "done": bool(voice), "href": f"{base}/settings#voice", "minutes": 5},
         {"key": "lead_source", "title": "Connect a lead source", "description": "Landing page forms or Meta lead ads straight into your CRM.",

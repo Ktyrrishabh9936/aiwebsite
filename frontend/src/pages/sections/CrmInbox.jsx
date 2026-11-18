@@ -23,15 +23,18 @@ import ReferralLeadDialog from "../../components/ReferralLeadDialog";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { VoiceAgentBanner, canCall, useVoiceAgent } from "../../components/VoiceAgentSetup";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../../components/ui/sheet";
 import {
   Users, Calendar, Info, Search, XCircle, Save, BadgeIndianRupee,
   Plus, CheckCircle2, Settings, Trash2, Columns3, Palette, Building2,
   ReceiptText, FileText, ExternalLink, RefreshCw, FileCode2, MessageSquare, Send,
-  Download, RotateCcw, PhoneCall, Ban, Bot, Power, Star, KeyRound
+  Download, RotateCcw, PhoneCall, Ban, Bot, Power, Star, KeyRound, Plug
 } from "lucide-react";
 import { toast } from "sonner";
 import api, { API, formatError } from "../../lib/api";
 
+const AgentControlPanel = lazy(() => import("../../components/AgentControlPanel"));
+const ConnectorsSettings = lazy(() => import("../../components/ConnectorsSettings"));
 const CrmPerformance = lazy(() => import("./CrmPerformance"));
 
 const FIELD_TYPES = ["text", "long_text", "email", "phone", "number", "currency", "date", "datetime", "boolean", "select", "multi_select", "url", "json"];
@@ -215,6 +218,7 @@ export default function CrmInbox({ member } = {}) {
   const [activeTab, setActiveTab] = useState(() => (!member && linkedCrmTab(window.location.search)) || "records");
   useEffect(() => { const tab = !member && linkedCrmTab(location.search); if (tab) setActiveTab(tab); }, [location.search, member]);
   const [accessError, setAccessError] = useState("");
+  const [aiPanel, setAiPanel] = useState(""); // "agents", "voice" or "connectors"
   const [recordsLayout, setRecordsLayout] = useState("list");
   const [pipelineRevision, setPipelineRevision] = useState(0);
   const openLead = async (leadOrId) => {
@@ -878,15 +882,35 @@ export default function CrmInbox({ member } = {}) {
           <h1 className="font-display text-3xl sm:text-4xl font-bold tracking-tight">CRM</h1>
           <p className="text-sm text-muted-foreground mt-2">{member ? `Leads ${member.organization || member.name} shared with you. Stages, follow-ups, payments, receipts and invoices you record here update the owner's CRM.` : "Move leads forward. Keep every follow-up and payment in view."}</p>
         </div>
-        {!member && <div className="flex rounded-lg border bg-card p-1 w-fit max-w-full overflow-x-auto" role="group" aria-label="CRM sections">
+        {!member && <div className="flex flex-col items-start gap-2 lg:ml-auto lg:items-end">
+          <div className="flex rounded-lg border border-primary/30 bg-primary/5 p-1" role="group" aria-label="AI shortcuts">
+            {[["agents", "AI agents", Bot], ["voice", "Voice agent", PhoneCall], ["connectors", "Connectors", Plug]].map(([key, label, Icon]) => (
+              <button key={key} type="button" onClick={() => setAiPanel(key)} aria-haspopup="dialog" className="inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm font-semibold text-primary transition hover:bg-primary/10"><Icon className="w-4 h-4" /> {label}</button>
+            ))}
+          </div>
+          <div className="flex rounded-lg border bg-card p-1 w-fit max-w-full overflow-x-auto" role="group" aria-label="CRM sections">
           <TabButton active={activeTab === "records"} onClick={() => setActiveTab("records")} icon={Users} label="Records" />
           <TabButton active={activeTab === "reminders"} onClick={() => { setActiveTab("reminders"); setSelectedLead(null); }} icon={Calendar} label="Follow-up" />
           <TabButton active={activeTab === "settings"} onClick={() => setActiveTab("settings")} icon={Settings} label="Settings" />
           <TabButton active={activeTab === "sales-team"} onClick={() => setActiveTab("sales-team")} icon={Users} label="Sales team" />
           <TabButton active={activeTab === "performance"} onClick={() => setActiveTab("performance")} icon={CheckCircle2} label="Performance" />
-        </div>}
+        </div></div>}
       </div>
       {accessError && <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{accessError}<button type="button" onClick={() => loadAll()} className="ml-3 underline">Retry</button></div>}
+      {!member && <Sheet open={Boolean(aiPanel)} onOpenChange={(open) => { if (!open) setAiPanel(""); }}>
+        <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-2xl">
+          <SheetHeader>
+            <SheetTitle>{aiPanel === "connectors" ? "Connectors" : aiPanel === "voice" ? "Voice agent" : "AI agents"}</SheetTitle>
+            <SheetDescription>{aiPanel === "connectors" ? "Connect email, calendar and calling. Email already works without any setup." : "Choose an agent to see what it does and tell it how to work."}</SheetDescription>
+          </SheetHeader>
+          <div className="mt-5">
+            <Suspense fallback={<p className="text-sm text-muted-foreground">Loading…</p>}>
+              {aiPanel === "connectors" && <ConnectorsSettings wsId={wsId} onOpenVoice={() => setAiPanel("voice")} />}
+              {(aiPanel === "agents" || aiPanel === "voice") && <AgentControlPanel wsId={wsId} compact initial={aiPanel === "voice" ? "voice" : null} />}
+            </Suspense>
+          </div>
+        </SheetContent>
+      </Sheet>}
 
       {activeTab === "sales-team" ? <SalesTeam wsId={wsId} /> : activeTab === "reminders" ? <CrmReminders wsId={wsId} onOpenLead={async (id) => { await openLead(id); setActiveTab("records"); }} /> : activeTab === "performance" ? <Suspense fallback={<div className="rounded-xl border bg-card p-8 text-sm text-muted-foreground">Loading performance…</div>}><CrmPerformance wsId={wsId} states={states} /></Suspense> : activeTab === "settings" ? (
         <SettingsPanel

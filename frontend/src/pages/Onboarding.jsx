@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
-  ArrowLeft, ArrowRight, Bot, Briefcase, Building2, Check, CheckCircle2, Clock, Globe, Headphones, Home, Loader2,
+  ArrowLeft, ArrowRight, Bot, Briefcase, Building2, CalendarClock, Check, CheckCircle2, Clock, Globe, Headphones, Home, Loader2,
   Megaphone, MessageCircle, Mic, Rocket, Search, Share2, Sparkles, Store, UserRound, Users, Wand2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -14,6 +14,7 @@ import SetupHelpCard, { AREVEI_CONTACT } from "../components/onboarding/SetupHel
 import InterviewChat from "../components/onboarding/InterviewChat";
 import ChannelsStep from "../components/onboarding/ChannelsStep";
 import SetupChecklist from "../components/onboarding/SetupChecklist";
+import DailyAiSettings from "../components/DailyAiSettings";
 
 const ROLES = [
   { value: "founder", label: "Founder / Owner", icon: Rocket },
@@ -37,8 +38,8 @@ const SUBSTEPS = [
   { key: "channels", label: "Voice & SMS" },
   { key: "done", label: "Ready" },
 ];
-const ORDER = ["about", "setup", "interview", "channels", "done"];
-const MOBILE_INDEX = { about: 0, setup: 1, interview: 1, channels: 2, done: 3 };
+const ORDER = ["about", "schedule", "setup", "interview", "channels", "done"];
+const MOBILE_INDEX = { about: 0, schedule: 1, setup: 2, interview: 2, channels: 3, done: 4 };
 
 function Choice({ option, selected, onSelect }) {
   const Icon = option.icon;
@@ -57,7 +58,8 @@ function Stepper({ step }) {
   const main = [
     { label: "Create account", done: true },
     { label: "About you", done: at > 0, active: at === 0 },
-    { label: "AI Manager setup", done: false, active: at >= 1 },
+    { label: "Daily AI run time", done: at > 1, active: at === 1 },
+    { label: "AI Manager setup", done: false, active: at >= 2 },
   ];
   return (
     <ol className="space-y-1" aria-label="Onboarding progress">
@@ -67,7 +69,7 @@ function Stepper({ step }) {
             <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-full text-xs font-bold ${item.done ? "bg-emerald-500 text-white" : item.active ? "bg-primary text-primary-foreground" : "border bg-background"}`}>{item.done ? <Check className="h-3.5 w-3.5" /> : i + 1}</span>
             {item.label}
           </div>
-          {i === 2 && at >= 2 && (
+          {i === 3 && at >= 3 && (
             <ol className="ml-[22px] mt-1 space-y-1 border-l pl-5">
               {SUBSTEPS.map((s) => {
                 const sat = ORDER.indexOf(s.key);
@@ -119,7 +121,7 @@ function AboutStep({ initial, onDone }) {
         workspaceId = data.id;
         localStorage.setItem("arevei_onboarded", "1");
       }
-      const { data } = await api.put("/onboarding/step", { step: "setup", workspace_id: workspaceId });
+      const { data } = await api.put("/onboarding/step", { step: "schedule", workspace_id: workspaceId });
       onDone(data, workspaceId);
     } catch (err) {
       setError(formatError(err.response?.data?.detail) || "Something went wrong. Please try again.");
@@ -128,7 +130,7 @@ function AboutStep({ initial, onDone }) {
 
   return (
     <form onSubmit={submit} className="space-y-8">
-      <StepHeader eyebrow="Step 2 of 3 · About you" title="Tell us a little about yourself" description="This helps your AI Manager tailor its questions, suggestions and setup to you." />
+      <StepHeader eyebrow="Step 2 of 4 · About you" title="Tell us a little about yourself" description="This helps your AI Manager tailor its questions, suggestions and setup to you." />
       <fieldset>
         <legend className="mb-3 text-sm font-semibold">What best describes you?</legend>
         <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">{ROLES.map((o) => <Choice key={o.value} option={o} selected={role === o.value} onSelect={setRole} />)}</div>
@@ -194,7 +196,7 @@ function SetupChoiceStep({ wsId, onAi, onSkip, onAssisted }) {
   }
   return (
     <div>
-      <StepHeader eyebrow="Step 3 of 3 · AI Manager setup" title="How would you like to set up your AI Manager?" description="Your AI Manager needs to understand your business and sales goals to run your pipeline. Pick what works for you." />
+      <StepHeader eyebrow="Step 4 of 4 · AI Manager setup" title="How would you like to set up your AI Manager?" description="Your AI Manager needs to understand your business and sales goals to run your pipeline. Pick what works for you." />
       <div className="grid gap-3 lg:grid-cols-3">
         {cards.map((c) => (
           <button key={c.key} type="button" onClick={c.action} className={`group relative flex flex-col rounded-2xl border p-5 text-left transition hover:-translate-y-0.5 hover:shadow-md ${c.primary ? "border-primary/50 bg-gradient-to-br from-primary/10 via-card to-card ring-1 ring-primary/20" : "bg-card hover:border-primary/30"} ${assist && c.key === "assist" ? "ring-2 ring-primary/30" : ""}`}>
@@ -319,13 +321,13 @@ export default function Onboarding() {
           <span className="lg:hidden"><Logo /></span>
           <div className="flex items-center gap-2">
             {["interview", "channels"].includes(step) && <button type="button" onClick={() => go(step === "channels" ? "interview" : "setup")} className="hidden h-9 items-center gap-1.5 rounded-lg px-3 text-sm text-muted-foreground hover:bg-accent sm:inline-flex"><ArrowLeft className="h-4 w-4" />Back</button>}
-            {step !== "about" && step !== "done" && <button type="button" onClick={() => finish(true)} className="h-9 rounded-lg px-3 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-foreground">Skip to dashboard</button>}
+            {!["about", "schedule", "done"].includes(step) && <button type="button" onClick={() => finish(true)} className="h-9 rounded-lg px-3 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-foreground">Skip to dashboard</button>}
             <ThemeToggle />
           </div>
         </header>
         <div className="border-b px-4 py-3 lg:hidden">
           <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-            {["About you", "AI setup", "Voice & SMS", "Ready"].map((label, i) => (
+            {["About you", "Daily run", "AI setup", "Voice & SMS", "Ready"].map((label, i) => (
               <span key={label} className={`flex-1 rounded-full py-1 text-center ${MOBILE_INDEX[step] === i ? "bg-primary text-primary-foreground" : MOBILE_INDEX[step] > i ? "bg-primary/15 text-primary" : "bg-muted"}`}>{label}</span>
             ))}
           </div>
@@ -334,7 +336,16 @@ export default function Onboarding() {
           <div className="mx-auto w-full max-w-4xl">
             <AnimatePresence mode="wait">
               <motion.div key={step} initial={reduce ? false : { opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={reduce ? undefined : { opacity: 0, y: -8 }} transition={{ duration: 0.2 }}>
-                {step === "about" && <AboutStep initial={{ ...state, workspace_id: state.fresh ? undefined : wsId || state.workspace_id }} onDone={(data, id) => { setWsId(id); setState({ ...data, step: "setup" }); updateOnboarding(data); }} />}
+                {step === "about" && <AboutStep initial={{ ...state, workspace_id: state.fresh ? undefined : wsId || state.workspace_id }} onDone={(data, id) => { setWsId(id); setState({ ...data, step: "schedule" }); updateOnboarding(data); }} />}
+                {step === "schedule" && wsId && (
+                  <div>
+                    <StepHeader eyebrow="Step 3 of 4 · Daily AI run time" title="When should your AI start work each day?" description="Every day at this time your AI reads your CRM, decides which leads need attention, emails you the day's strategy, then calls and emails leads according to the plan. You can change this anytime in Settings." />
+                    <div className="rounded-2xl border bg-card p-5 sm:p-6">
+                      <p className="mb-5 flex items-center gap-2 text-sm font-semibold"><CalendarClock className="h-4 w-4 text-primary" />Pick the time your working day starts</p>
+                      <DailyAiSettings wsId={wsId} onboarding submitLabel="Save and continue" onSaved={() => go("setup")} />
+                    </div>
+                  </div>
+                )}
                 {step === "setup" && <SetupChoiceStep wsId={wsId} onAi={() => go("interview")} onSkip={() => finish(true)} onAssisted={() => finish(true)} />}
                 {step === "interview" && wsId && (
                   <div>

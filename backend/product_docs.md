@@ -74,6 +74,31 @@ You get a clear plan tied to your revenue goal and a daily nudge on what moves t
 ## Questions people ask
 - Can I skip the questions? Yes. Every question can be skipped, but the strategy needs at least your business, offers, ideal customer, team and revenue target.
 
+# Daily AI plan and automatic follow-ups
+Keywords: daily plan, daily run, run time, autopilot, automatic follow-up, email connector, smtp, gmail, calendar, google calendar, calendly, booking link, connectors, meeting, schedule meeting, approve, approve plan, agents, ai control, first call agent, follow-up agent, proposal agent, customer care agent
+## What it does
+Every day at the time you choose, your AI reads the whole CRM, decides which leads need attention for their stage (new, contacted, qualified, customer), writes the day's strategy and emails it to you. It then carries out the plan through the day: AI calls using your existing voice agent, emails, and suggestions for your team. When a lead asks for a meeting on a call, it finds a free time, books it and emails you and the lead.
+## Why it matters
+No lead is forgotten. New leads are contacted, quiet leads are followed up, qualified leads are pushed towards a meeting, and customers get payment reminders and check-ins without you planning any of it.
+## How to set it up
+1. Choose the daily run time during onboarding, or open AI Control → Daily plan.
+2. Choose whether you approve the plan each day (one approval for the whole plan) or it runs automatically.
+3. Open AI Control → Agents (or the AI agents and Voice agent buttons at the top of the CRM) to see the First Call, Follow-up, Proposal and Customer Care agents, the pipeline stages each handles, what each is connected to, and to write instructions for each. You can add your own agents.
+4. Optional: open Connectors (a button at the top of the CRM, or AI Control → Connectors) to send from your own email, connect Google Calendar, or add your Calendly link. Email works without any setup. With Calendly connected, a lead who asks for a meeting is emailed your booking link.
+5. The plan is emailed to you, grouped by agent. Approve it from the email or on the Daily AI Plan page, where you can also remove or change an action, add a lead, answer lead requests and change meeting times.
+## Tips to get the most out of it
+- Approve the plan yourself for a few days, then switch to automatic once you trust it.
+- Write short instructions for each agent, such as what to offer and what never to promise.
+- Connect Google Calendar so meetings are only booked when you are free.
+- Use Run now on the Daily AI Plan page to get a fresh plan at any time.
+## Questions people ask
+- Do I have to connect my email? No. Emails are sent from the built-in address with replies going to you. Connecting your own is optional.
+- Can I change a meeting time? Yes. Choose a different time on the Daily AI Plan page and the lead is emailed the new time.
+- Will it call the same lead again and again? No. A lead gets at most one AI call a day and three a week, only inside your calling hours, and never if marked do-not-call.
+- Does it change my voice agent? No. Every agent's calls go through the voice agent exactly as it is set up; the agent only tells it why the call is being made.
+- Why was a lead left out of the plan? Leads that said they have no requirement, or were followed up several times without a reply, are rested so they are not chased.
+- What if no agent handles a stage? Leads in that stage come to you as tasks until you give the stage to an agent in AI Control.
+
 # CRM and pipeline
 Keywords: crm, leads, pipeline, stages, fields, inbox, customers, payments, receipts, invoice, tags
 ## What it does

@@ -6,21 +6,39 @@ import AIUsageDashboard from "../../components/AIUsageDashboard";
 import BillingDashboard from "../../components/BillingDashboard";
 import { useEffect, useState } from "react";
 import { Link, useOutletContext } from "react-router-dom";
-import { Building2, Check, Copy, KeyRound, Loader2, PackageOpen, Phone, PhoneOff, RotateCw, Save, ShieldCheck, Smartphone } from "lucide-react";
+import { Bot, Building2, Check, Code2, Copy, CreditCard, KeyRound, Loader2, PackageOpen, Phone, PhoneOff, Plug, RotateCw, Save, ShieldCheck, SlidersHorizontal, Smartphone } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../../context/AuthContext";
 import api from "../../lib/api";
 import TimezoneSettings from "../../components/TimezoneSettings";
+import DailyAiSettings from "../../components/DailyAiSettings";
+import ConnectorsSettings from "../../components/ConnectorsSettings";
+
+const SETTINGS_TABS = [
+  { key: "general", label: "General", icon: SlidersHorizontal },
+  { key: "ai", label: "AI & calling", icon: Bot },
+  { key: "connections", label: "Connections", icon: Plug },
+  { key: "app", label: "App & alerts", icon: Smartphone },
+  { key: "billing", label: "Billing & usage", icon: CreditCard },
+  { key: "developer", label: "Developer", icon: Code2 },
+];
+const HASH_TABS = { "daily-ai": "ai", voice: "ai", connectors: "connections", sms: "connections" };
 
 export default function Settings() {
   const { user } = useAuth();
   const { ws, setWs, refresh } = useOutletContext();
+  const [tab, setTab] = useState(() => HASH_TABS[window.location.hash.slice(1)] || "general");
   useEffect(() => {
-    const hash = window.location.hash;
-    if (!hash) return undefined;
-    // Setup checklist links deep-link to #voice and #sms.
-    const timer = setTimeout(() => document.getElementById(hash.slice(1))?.scrollIntoView({ behavior: "smooth", block: "start" }), 300);
-    return () => clearTimeout(timer);
+    // Older links such as #voice, #sms and #daily-ai open the tab that now holds that section.
+    const open = () => {
+      const id = window.location.hash.slice(1);
+      if (!HASH_TABS[id]) return;
+      setTab(HASH_TABS[id]);
+      setTimeout(() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" }), 300);
+    };
+    open();
+    window.addEventListener("hashchange", open);
+    return () => window.removeEventListener("hashchange", open);
   }, []);
   const [originsText, setOriginsText] = useState("");
   const [savingOrigins, setSavingOrigins] = useState(false);
@@ -144,7 +162,16 @@ export default function Settings() {
         <h1 className="font-display text-3xl font-black tracking-tight">Settings</h1>
         <p className="text-muted-foreground mt-1">Manage your account and workspace preferences.</p>
       </div>
+      <div role="tablist" aria-label="Settings sections" className="flex max-w-full gap-1 overflow-x-auto rounded-xl border bg-card p-1">
+        {SETTINGS_TABS.map(({ key, label, icon: Icon }) => (
+          <button key={key} type="button" role="tab" aria-selected={tab === key} onClick={() => setTab(key)}
+            className={`inline-flex h-9 shrink-0 items-center gap-2 rounded-lg px-3 text-sm font-medium transition ${tab === key ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-accent hover:text-foreground"}`}>
+            <Icon className="h-4 w-4" />{label}
+          </button>
+        ))}
+      </div>
 
+      {tab === "general" && <>
       <TimezoneSettings />
       <section className="border border-border rounded-md bg-card p-6 space-y-5">
         <div>
@@ -160,6 +187,77 @@ export default function Settings() {
         <button onClick={saveWorkspaceCurrency} disabled={savingModules} className="inline-flex h-10 items-center gap-2 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground disabled:opacity-60">{savingModules ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save currency</button>
       </section>
 
+      <section className="border border-border rounded-md bg-card p-6 space-y-5">
+        <div>
+          <h2 className="font-display text-xl font-bold">Account</h2>
+          <p className="text-sm text-muted-foreground mt-1">Your signed-in profile for Arevei.</p>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <InfoItem label="Name" value={user?.name || "Not set"} />
+          <InfoItem label="Email" value={user?.email || "Not available"} />
+          <InfoItem label="Role" value={user?.role || "User"} />
+        </div>
+      </section>
+
+      <section className="border border-border rounded-md bg-card p-6">
+        <h2 className="font-display text-xl font-bold">Workspace</h2>
+        <p className="text-sm text-muted-foreground mt-1">Use the account menu in the top bar to switch website workspaces or create a new one.</p>
+      </section>
+      </>}
+      {tab === "ai" && <>
+      {(ws.access_role === "owner" || !ws.access_role || user?.role === "admin") && <>
+        <section id="daily-ai" className="scroll-mt-20 border border-border rounded-md bg-card p-6 space-y-5">
+          <div>
+            <h2 className="font-display text-xl font-bold">Daily AI run</h2>
+            <p className="text-sm text-muted-foreground mt-1">Every day at this time your AI reads the CRM, writes the strategy, emails it to you and works through the plan. <Link to={`/app/w/${ws.id}/daily-plan`} className="font-semibold text-primary hover:underline">Open today's plan</Link> · <Link to={`/app/w/${ws.id}/ai`} className="font-semibold text-primary hover:underline">Manage agents</Link></p>
+          </div>
+          <DailyAiSettings wsId={ws.id} />
+        </section>
+      </>}
+      <div id="voice" className="scroll-mt-20"><VoiceAgentSetup workspaceId={ws.id} /></div>
+      <section className="border border-border rounded-md bg-card p-6 space-y-5">
+        <div className="flex items-start gap-3">
+          <div className="grid h-10 w-10 place-items-center rounded-md bg-primary/10 text-primary"><Phone className="h-5 w-5" /></div>
+          <div>
+            <h2 className="font-display text-xl font-bold">Call your AI Manager</h2>
+            <p className="text-sm text-muted-foreground mt-1">Connect the phone you will call from. Incoming Sarvam calls from this number will use this workspace's AI Manager and business context.</p>
+          </div>
+        </div>
+        <div className="space-y-2">
+          <label className="text-sm font-semibold" htmlFor="voice-phone">Your calling phone number</label>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input id="voice-phone" value={voicePhone} onChange={(e) => setVoicePhone(e.target.value)} placeholder="+919876543210" className="h-10 flex-1 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-1 focus:ring-ring" />
+            <button onClick={connectVoice} disabled={savingVoice || !voicePhone.trim()} className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground disabled:opacity-60">
+              {savingVoice ? <Loader2 className="h-4 w-4 animate-spin" /> : <Phone className="h-4 w-4" />} {voice.connected ? "Update connection" : "Connect phone"}
+            </button>
+            {voice.connected && <button onClick={disconnectVoice} disabled={savingVoice} className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-border px-4 text-sm font-medium hover:bg-accent disabled:opacity-60"><PhoneOff className="h-4 w-4" /> Disconnect</button>}
+          </div>
+          <p className="text-xs leading-5 text-muted-foreground">Use international E.164 format with country code. Connecting the same phone from another workspace moves your calls to that workspace.</p>
+          {voice.connected && <p className="text-sm text-primary">Connected to {ws.name}</p>}
+          {!voice.service_enabled && <p className="text-xs text-amber-600">The connection can be saved, but the Sarvam voice service is currently disabled by the server administrator.</p>}
+        </div>
+      </section>
+
+      <section className="border border-border rounded-md bg-card p-6 space-y-3">
+        <h2 className="font-display text-xl font-bold">Lead Qualification</h2>
+        <p className="text-sm text-muted-foreground">Manage product and campaign rules, scoring, retries and next actions.</p>
+        <Link className="text-sm text-primary" to={`/app/w/${ws.id}/qualification`}>Open qualification profiles</Link>
+      </section>
+      </>}
+      {tab === "connections" && <>
+      {(ws.access_role === "owner" || !ws.access_role || user?.role === "admin") && <>
+        <section id="connectors" className="scroll-mt-20 border border-border rounded-md bg-card p-6 space-y-5">
+          <div>
+            <h2 className="font-display text-xl font-bold">Connectors</h2>
+            <p className="text-sm text-muted-foreground mt-1">Email already works. Connect your own email, a calendar or Calendly if you want to use your accounts.</p>
+          </div>
+          <ConnectorsSettings wsId={ws.id} />
+        </section>
+      </>}
+      {(ws.access_role === "owner" || user?.role === "admin") && <div id="sms" className="scroll-mt-20"><TwilioSmsSettings wsId={ws.id} /></div>}
+      {!(ws.access_role === "owner" || !ws.access_role || user?.role === "admin") && <p className="rounded-md border border-border bg-card p-6 text-sm text-muted-foreground">Only the workspace owner can change email, calendar and SMS connections.</p>}
+      </>}
+      {tab === "app" && <>
       <section aria-labelledby="mobile-app-heading" className="border border-border rounded-md bg-card p-6 space-y-5">
         <div className="flex items-start gap-3">
           <div className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-primary/10 text-primary"><Smartphone className="h-5 w-5" /></div>
@@ -194,44 +292,12 @@ export default function Settings() {
       </section>
 
       <PushNotificationSettings wsId={ws.id} />
+      </>}
+      {tab === "billing" && <>
       {(ws.access_role === "owner" || user?.role === "admin") && <BillingDashboard wsId={ws.id} />}
       <AIUsageDashboard wsId={ws.id} />
-
-      <section className="border border-border rounded-md bg-card p-6 space-y-5">
-        <div className="flex items-start gap-3">
-          <div className="grid h-10 w-10 place-items-center rounded-md bg-primary/10 text-primary"><Phone className="h-5 w-5" /></div>
-          <div>
-            <h2 className="font-display text-xl font-bold">Call your AI Manager</h2>
-            <p className="text-sm text-muted-foreground mt-1">Connect the phone you will call from. Incoming Sarvam calls from this number will use this workspace's AI Manager and business context.</p>
-          </div>
-        </div>
-        <div className="space-y-2">
-          <label className="text-sm font-semibold" htmlFor="voice-phone">Your calling phone number</label>
-          <div className="flex flex-col sm:flex-row gap-2">
-            <input id="voice-phone" value={voicePhone} onChange={(e) => setVoicePhone(e.target.value)} placeholder="+919876543210" className="h-10 flex-1 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-1 focus:ring-ring" />
-            <button onClick={connectVoice} disabled={savingVoice || !voicePhone.trim()} className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground disabled:opacity-60">
-              {savingVoice ? <Loader2 className="h-4 w-4 animate-spin" /> : <Phone className="h-4 w-4" />} {voice.connected ? "Update connection" : "Connect phone"}
-            </button>
-            {voice.connected && <button onClick={disconnectVoice} disabled={savingVoice} className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-border px-4 text-sm font-medium hover:bg-accent disabled:opacity-60"><PhoneOff className="h-4 w-4" /> Disconnect</button>}
-          </div>
-          <p className="text-xs leading-5 text-muted-foreground">Use international E.164 format with country code. Connecting the same phone from another workspace moves your calls to that workspace.</p>
-          {voice.connected && <p className="text-sm text-primary">Connected to {ws.name}</p>}
-          {!voice.service_enabled && <p className="text-xs text-amber-600">The connection can be saved, but the Sarvam voice service is currently disabled by the server administrator.</p>}
-        </div>
-      </section>
-
-      <section className="border border-border rounded-md bg-card p-6 space-y-5">
-        <div>
-          <h2 className="font-display text-xl font-bold">Account</h2>
-          <p className="text-sm text-muted-foreground mt-1">Your signed-in profile for Arevei.</p>
-        </div>
-        <div className="grid sm:grid-cols-2 gap-4">
-          <InfoItem label="Name" value={user?.name || "Not set"} />
-          <InfoItem label="Email" value={user?.email || "Not available"} />
-          <InfoItem label="Role" value={user?.role || "User"} />
-        </div>
-      </section>
-
+      </>}
+      {tab === "developer" && <>
       <section className="border border-border rounded-md bg-card p-6 space-y-5">
         <div className="flex items-start gap-3">
           <div className="grid h-10 w-10 place-items-center rounded-md bg-primary/10 text-primary">
@@ -276,19 +342,7 @@ export default function Settings() {
           </button>
         </div>
       </section>
-
-      <section className="border border-border rounded-md bg-card p-6 space-y-3">
-        <h2 className="font-display text-xl font-bold">Lead Qualification</h2>
-        <p className="text-sm text-muted-foreground">Manage product and campaign rules, scoring, retries and next actions.</p>
-        <Link className="text-sm text-primary" to={`/app/w/${ws.id}/qualification`}>Open qualification profiles</Link>
-      </section>
-
-      <section className="border border-border rounded-md bg-card p-6">
-        <h2 className="font-display text-xl font-bold">Workspace</h2>
-        <p className="text-sm text-muted-foreground mt-1">Use the account menu in the top bar to switch website workspaces or create a new one.</p>
-      </section>
-      <div id="voice" className="scroll-mt-20"><VoiceAgentSetup workspaceId={ws.id} /></div>
-      {(ws.access_role === "owner" || user?.role === "admin") && <div id="sms" className="scroll-mt-20"><TwilioSmsSettings wsId={ws.id} /></div>}
+      </>}
     </div>
   );
 }

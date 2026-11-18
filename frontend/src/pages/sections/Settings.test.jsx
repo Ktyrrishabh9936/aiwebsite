@@ -8,6 +8,8 @@ const mockRefresh = jest.fn(async () => ({}));
 const mockWorkspace = { id: "ws", name: "Studio", modules: { real_estate: true, agency: false }, currency: "INR", allowed_blog_origins: [] };
 
 jest.mock("../../components/VoiceAgentSetup", () => () => null);
+jest.mock("../../components/DailyAiSettings", () => () => null);
+jest.mock("../../components/ConnectorsSettings", () => () => null);
 jest.mock("../../context/AuthContext", () => ({ useAuth: () => ({ user: { name: "User", email: "user@example.com" } }) }));
 jest.mock("react-router-dom", () => ({ Link: ({ children, ...props }) => <a {...props}>{children}</a>, useOutletContext: () => ({ ws: mockWorkspace, setWs: mockSetWs, refresh: mockRefresh }) }), { virtual: true });
 jest.mock("sonner", () => ({ toast: { success: jest.fn(), error: jest.fn() } }));

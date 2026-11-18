@@ -341,7 +341,12 @@ async def google_oauth_callback(request: Request, code: str = None, state: str =
         return HTMLResponse(f"<h3>Authentication error: {error}</h3>")
     if not code or not state:
         raise HTTPException(status_code=400, detail="Missing authorization code or state parameter.")
-    
+
+    # Calendar/Gmail connectors share this registered callback URL; their state is a signed token.
+    from connectors import google_oauth_callback as connector_callback, is_connector_state
+    if is_connector_state(state):
+        return await connector_callback(request, code, state)
+
     client_id, client_secret = get_google_creds()
     redirect_uri = get_redirect_uri(request)
     
