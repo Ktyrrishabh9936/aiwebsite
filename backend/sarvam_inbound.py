@@ -90,6 +90,34 @@ NO_NUMBER = ("INBOUND CALL: the caller's number is not available. Welcome them, 
              "then qualify them.")
 
 
+# Hosts that only exist while a developer's tunnel is open. A real server may take the agent's tools back from
+# one of these automatically; nothing is ever moved onto one automatically.
+DEV_TUNNEL_HOSTS = ("ngrok-free.dev", "ngrok-free.app", "ngrok.io", "ngrok.app", "trycloudflare.com", "loca.lt", "devtunnels.ms")
+
+
+def is_dev_tunnel(base):
+    host = (urlsplit(base or "").hostname or "").lower()
+    return any(host == name or host.endswith("." + name) for name in DEV_TUNNEL_HOSTS)
+
+
+def current_base():
+    from voice_config import public_base
+    try:
+        return public_base()
+    except HTTPException:
+        return None
+
+
+def base_needs_repair(route, base):
+    """True when the agent's lookup tools call a tunnel (or an unrecorded address) and this server is a real one.
+
+    The tools keep the address of whichever server set them up. Set up from a laptop, they call a tunnel that
+    later closes: calls are still answered, but no caller is recognised.
+    """
+    stored = route.get("callback_base")
+    return bool(base) and stored != base and not is_dev_tunnel(base) and (not stored or is_dev_tunnel(stored))
+
+
 def token_hash(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -282,7 +310,7 @@ async def prepare_agent(mcp, route, app_id, ws_id, token, welcome):
     """
     from sarvam_agent_builder import SarvamBuilderError
     from voice_config import public_base
-    if route and route.get("app_id") == app_id and route.get("setup_version") == SETUP_VERSION and route.get("context_tool_id"):
+    if route and route.get("app_id") == app_id and route.get("setup_version") == SETUP_VERSION and route.get("context_tool_id")             and route.get("callback_base") == public_base():
         return {"changed": False, "tool_id": route["context_tool_id"], "caller_lookup": route.get("caller_lookup") or "manual",
                 "token": token, "find_tool_id": route.get("find_tool_id"), "opening_line_ready": bool(route.get("opening_line_ready"))}
     agent = await mcp.tool("agents", {"operation": "get", "id": app_id, "params": {"include": ["variables", "prompt_text", "tools", "intro"]}})
@@ -493,6 +521,7 @@ async def enable_inbound(db, ws_id, user=None):
             "app_id": app_id, "app_version": version, "deployment_id": deployment_id, "organization_id": config.get("organization_id"),
             "sarvam_workspace_id": config.get("workspace_id"), "context_tool_id": setup["tool_id"], "caller_lookup": lookup,
             "find_tool_id": setup["find_tool_id"], "opening_line_ready": setup["opening_line_ready"], "setup_version": SETUP_VERSION,
+            "callback_base": public_base(),
             "token_hash": token_hash(token), "encrypted_token": encrypt(ws_id, TOKEN_ENVELOPE, {"token": token}),
             "enabled_by": str(user["_id"]) if user else route.get("enabled_by"), "updated_at": now_iso()}})
     except DuplicateKeyError:
@@ -524,12 +553,16 @@ async def sync_after_agent_change(db, ws_id):
     try:
         doc = await db.workspace_voice_provider_configs.find_one({"workspace_id": ws_id, "provider": "sarvam"})
         config = (doc or {}).get("config") or {}
-        if config.get("app_id") == route.get("app_id") and int(config.get("app_version") or 0) == int(route.get("app_version") or 0) \
-                and config.get("agent_phone_number") == route.get("agent_phone_number") and route.get("setup_version") == SETUP_VERSION                 and bool(config.get("opening_line_ready")) == bool(route.get("opening_line_ready")):
+        current = config.get("app_id") == route.get("app_id") and int(config.get("app_version") or 0) == int(route.get("app_version") or 0)             and config.get("agent_phone_number") == route.get("agent_phone_number") and route.get("setup_version") == SETUP_VERSION             and bool(config.get("opening_line_ready")) == bool(route.get("opening_line_ready"))
+        if current and not base_needs_repair(route, current_base()):
             return
         await enable_inbound(db, ws_id)
     except Exception as exc:  # recorded on the route and shown in Settings
-        message = (exc.detail.get("message") if isinstance(getattr(exc, "detail", None), dict) else None) or "Inbound calls could not follow the agent change"
+        detail = exc.detail if isinstance(getattr(exc, "detail", None), dict) else {}
+        message = detail.get("message") or "Inbound calls could not follow the agent change"
+        if detail.get("code") in ("account_not_connected", "account_reconnect_required"):
+            message = ("Calls are still answered, but the caller lookup needs updating in Sarvam. "
+                       "Sign in to Sarvam once in the voice settings and it updates by itself.")
         logger.warning(json.dumps({"event": "sarvam_inbound_sync_failed", "workspace_id": ws_id, "error_type": type(exc).__name__}))
         await db.sarvam_inbound_routes.update_one({"_id": ws_id}, {"$set": {"status": "needs_attention", "error": message, "updated_at": now_iso()}})
 

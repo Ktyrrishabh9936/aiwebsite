@@ -134,21 +134,68 @@ def daily_brief_email(ws, run, actions, meetings, zone_name, approve_link=""):
     return _base_email(title[:120], f"Daily AI plan · {run.get('day', '')}", "".join(parts), "Open today's plan", app_link)
 
 
+def meeting_who(meeting):
+    """Who wants to meet and what about, so the owner never has to open the CRM to find out."""
+    contact = " · ".join(part for part in (meeting.get("lead_phone"), meeting.get("lead_email")) if part)
+    lines = [f"Who: {meeting['lead_name']}" + (f" ({contact})" if contact else " (no phone or email on file)")]
+    if meeting.get("lead_stage"):
+        lines.append(f"Stage: {meeting['lead_stage']}")
+    if meeting.get("topic"):
+        lines.append(f"Wants to talk about: {meeting['topic']}")
+    if meeting.get("call_summary"):
+        lines.append(f"From the call: {meeting['call_summary']}")
+    return lines
+
+
 def meeting_admin_email(ws, meeting, zone_name, calendar_connected):
     confirmed = meeting["status"] == "confirmed"
     lines = [f"{meeting['lead_name']} asked for a meeting during a call." + (f" They said: “{meeting['requested_text']}”" if meeting.get("requested_text") else "")]
-    lines.append(("I booked it for " if confirmed else "Proposed time: ") + when_text(meeting["start"], zone_name) + f" ({meeting['duration_minutes']} minutes).")
+    lines.extend(meeting_who(meeting))
+    if meeting.get("requested_start"):
+        lines.append("Time they asked for: " + when_text(meeting["requested_start"], zone_name) + ".")
+    lines.append((("I booked it for " if confirmed else "Proposed time: ") + when_text(meeting["start"], zone_name) + f" ({meeting['duration_minutes']} minutes).")
+                 if meeting.get("start") else "No time is set yet.")
     if meeting.get("slot_note"):
         lines.append(meeting["slot_note"])
     if not calendar_connected:
         lines.append("No calendar is connected, so I could not check your availability. Connect Google Calendar in Settings to avoid clashes.")
     if confirmed:
         lines.append("The lead has been emailed this time." if meeting.get("lead_notified") else "The lead has no email on file, so please confirm the time with them by phone.")
-        lines.append("If this time does not suit you, choose another and I will email the lead the new time.")
+        if meeting.get("meeting_link"):
+            lines.append(f"Meeting link: {meeting['meeting_link']}")
+        lines.append("If this time does not suit you, choose another. I will email the lead the new time and call them to agree it.")
     else:
-        lines.append("Confirm this time or choose another. The lead is emailed only after you decide.")
+        lines.append("Confirm this time or choose another. The lead hears only after you decide. If you choose a different time from the one "
+                     "they asked for, I email them and call them to agree it, then tell you what they said.")
     return simple_email("Meeting booked" if confirmed else "Meeting request needs your decision", "Meeting", lines,
                         "Change the time" if confirmed else "Confirm or change", plan_url(str(ws["_id"]), f"?meeting={meeting['_id']}"))
+
+
+def meeting_reply_email(ws, meeting, zone_name, outcome, said=""):
+    """Tells the owner what the lead answered about a meeting time (on a follow-up call)."""
+    name, when = meeting["lead_name"], when_text(meeting["start"], zone_name) if meeting.get("start") else ""
+    said_line = [f"They said: “{said}”"] if said else []
+    if outcome == "accepted":
+        title, lines, cta = "The lead agreed to the meeting time", [f"{name} agreed to meet on {when}.", *said_line], "Open the meeting"
+        if meeting.get("meeting_link"):
+            lines.append(f"Meeting link: {meeting['meeting_link']}")
+    elif outcome == "moved":
+        title, cta = "The meeting was moved to the lead's time", "Change the time"
+        lines = [f"{name} could not make the earlier time and asked for another. It was free, so the meeting is now on {when}.", *said_line,
+                 "The lead has been emailed this time." if meeting.get("lead_notified") else "The lead has no email on file.",
+                 "If it does not suit you, choose another and I will ask them again."]
+    elif outcome == "proposed":
+        title, cta = "The lead asked for a different meeting time", "Confirm or change"
+        lines = [f"{name} could not make the time you chose and asked for another.", *said_line, f"Nearest free time: {when}.",
+                 *([meeting["slot_note"]] if meeting.get("slot_note") else []), "Confirm it or choose another. I will let them know."]
+    elif outcome == "needs_time":
+        title, cta = "The lead asked for a different meeting time", "Choose a time"
+        lines = [f"{name} could not make the time you chose, but did not give a clear new time.", *said_line, "Choose a time and I will let them know."]
+    else:
+        title, cta = "The lead no longer wants the meeting", "Open the meeting"
+        lines = [f"{name} said they do not want the meeting" + (f" planned for {when}." if when else "."), *said_line,
+                 "Nothing was cancelled. Cancel it from the daily plan if you agree."]
+    return simple_email(title, "Meeting", [*lines[:1], *meeting_who(meeting), *lines[1:]], cta, plan_url(str(ws["_id"]), f"?meeting={meeting['_id']}"))
 
 
 def meeting_lead_text(business_name, lead_name, meeting, zone_name, change):
@@ -158,8 +205,16 @@ def meeting_lead_text(business_name, lead_name, meeting, zone_name, change):
         body = f"Hi {first},\n\nOur meeting planned for {when} has been cancelled. We will be in touch to arrange a new time.\n\nReply to this email if you have any questions."
     elif change == "rescheduled":
         body = f"Hi {first},\n\nWe need to move our meeting. The new time is {when} ({meeting['duration_minutes']} minutes).\n\nIf this does not work for you, reply to this email with a time that suits you."
+    elif change == "changed":  # the owner cannot make the time the lead asked for
+        asked = when_text(meeting["requested_start"], zone_name) if meeting.get("requested_start") else "the time you asked for"
+        body = (f"Hi {first},\n\nThank you for speaking with us. Unfortunately we are not available on {asked}. Could we meet on {when} "
+                f"({meeting['duration_minutes']} minutes) instead?\n\nIf this does not work for you, reply to this email with a time that suits you.")
     else:
         body = f"Hi {first},\n\nThank you for speaking with us. Your meeting is confirmed for {when} ({meeting['duration_minutes']} minutes).\n\nIf you need a different time, reply to this email and we will rearrange it."
+    if change != "cancelled" and meeting.get("will_call"):
+        body += "\n\nWe will also call you shortly to agree the time."
+    if change != "cancelled" and meeting.get("meeting_link"):
+        body += f"\n\nJoin the meeting here: {meeting['meeting_link']}"
     if meeting.get("admin_note"):
         body += f"\n\n{meeting['admin_note']}"
     return body + f"\n\n{business_name}"

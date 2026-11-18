@@ -61,7 +61,7 @@ DEFAULTS = {
 LEAD_FIELDS = {key: 1 for key in (
     "field_values.full_name", "field_values.phone", "field_values.email", "full_name", "phone", "email", "status",
     "customer_status", "customer_id", "created_at", "last_call_at", "last_call_outcome", "call_attempt_count",
-    "do_not_call", "do_not_email", "lead_status", "lead_temperature", "qualification_score", "next_action", "callback_at",
+    "do_not_call", "do_not_email", "contact_preference", "lead_status", "lead_temperature", "qualification_score", "next_action", "callback_at",
     "qualification_call.status", "qualification_call.qualification_category", "communication_summary.latest_summary",
     "communication_summary.pending_discussion", "communication_summary.objections", "communication_summary.answers", "converted_at",
     "sales_assignment.sales_agent_name", "assigned_salesperson", "repeat_request", "ai_ops")}
@@ -71,9 +71,9 @@ PURPOSES = {
     "first_call": "First call", "retry_call": "Call again", "callback": "Callback", "follow_up_call": "Follow-up call", "proposal_call": "Proposal call",
     "intro_email": "Introduction email", "missed_call_email": "Missed-call email", "follow_up_email": "Follow-up email", "meeting_email": "Meeting invite",
     "proposal_email": "Proposal follow-up", "payment_reminder": "Payment reminder", "check_in": "Customer check-in", "re_engage": "Re-engagement email",
-    "task": "For you",
+    "task": "For you", "meeting_call": "Meeting time call",
 }
-CALL_PURPOSES = {"first_call", "retry_call", "callback", "follow_up_call", "proposal_call"}
+CALL_PURPOSES = {"first_call", "retry_call", "callback", "follow_up_call", "proposal_call", "meeting_call"}
 EMAIL_PURPOSES = {"intro": "intro_email", "missed_call": "missed_call_email", "follow_up": "follow_up_email", "meeting_invite": "meeting_email",
                   "proposal": "proposal_email", "payment_reminder": "payment_reminder", "check_in": "check_in", "re_engage": "re_engage"}
 PROPOSAL_WORDS = re.compile(r"propos|quot|negoti|pricing|price|estimate", re.I)
@@ -311,6 +311,10 @@ def assess(lead, ctx):
     """One lead in, one candidate out (or None when nothing should be done today)."""
     now, lead_id = ctx["now"], str(lead["_id"])
     category = stage_category(lead, ctx["states"])
+    if lead.get("contact_preference") == "no_contact":
+        # Finished with us (work complete, or the owner closed contact): the AI never calls, emails or raises work for them.
+        ctx.setdefault("resting", []).append({"lead_id": lead_id, "name": lead_contact(lead)["name"], "why": "Marked complete: no contact unless you start it."})
+        return None
     if category == "lost" or lead_id in ctx["open_leads"] or lead_id in ctx["meeting_leads"]:
         return None
     pending = ctx["tasks"].get(lead_id, [])
@@ -740,7 +744,8 @@ async def start_run(db, ws, now, trigger="schedule"):
     ws_id, settings = str(ws["_id"]), settings_of(ws)
     previous = await db.ai_ops_runs.find_one({"workspace_id": ws_id}, sort=[("created_at", -1)])
     # Yesterday's unexecuted plan is replaced by today's; requests awaiting the owner's answer stay.
-    await db.ai_ops_actions.update_many({"workspace_id": ws_id, "status": {"$in": PLANNED}, "kind": {"$in": ["call", "email", "task"]}},
+    await db.ai_ops_actions.update_many({"workspace_id": ws_id, "status": {"$in": PLANNED}, "kind": {"$in": ["call", "email", "task"]},
+                                         "purpose": {"$ne": "meeting_call"}},  # a meeting-time call the owner triggered still has to happen
                                         {"$set": {"status": "superseded", "updated_at": now.isoformat()}})
     stats, candidates = await analyse(db, ws, now)
     results = {"calls": 0, "emails": 0, "meetings": 0, "failed": 0}
@@ -1043,15 +1048,19 @@ BACKGROUND = set()  # keeps manual-run tasks referenced until they finish
 REQUEST_WORDS = re.compile(r"\b(meet|meeting|demo|appointment|site visit|visit|call ?back|brochure|quote|quotation|proposal|pricing|price list|send (me|us|the)|share (the|your)|discount|details)\b", re.I)
 
 
-async def extract_call_requests(ws, settings, lead, now, timeout):
-    """What did the lead ask for on the call? Model first; the engine's own next action as the fallback."""
+async def extract_call_requests(ws, settings, lead, now, timeout, proposed=None):
+    """What did the lead ask for on the call? Model first; the engine's own next action as the fallback.
+
+    ``proposed`` is the time of a meeting already offered to the lead: the model then also reports their answer to it.
+    """
     call = lead.get("qualification_call") or {}
     summary = clean(call.get("summary") or lead.get("conversation_summary") or (lead.get("communication_summary") or {}).get("latest_summary"), 2000)
     transcript = str(call.get("transcript") or "")[-6000:]
     next_action = str(lead.get("next_action") or "")
     # Without the model, only the calling system's own verdict counts as a meeting request.
-    fallback = {"meeting_requested": next_action in {"BOOK_DEMO", "SITE_VISIT"}, "preferred_time": None, "preferred_time_text": "", "meeting_topic": "", "requests_for_admin": []}
-    if not (next_action in {"BOOK_DEMO", "SITE_VISIT", "SEND_QUOTATION"} or REQUEST_WORDS.search(summary) or REQUEST_WORDS.search(transcript)):
+    fallback = {"meeting_requested": next_action in {"BOOK_DEMO", "SITE_VISIT"}, "preferred_time": None, "preferred_time_text": "", "meeting_topic": "",
+                "requests_for_admin": [], "meeting_response": None}
+    if not proposed and not (next_action in {"BOOK_DEMO", "SITE_VISIT", "SEND_QUOTATION"} or REQUEST_WORDS.search(summary) or REQUEST_WORDS.search(transcript)):
         return {**fallback, "meeting_requested": False}
     if timeout < 6:
         return fallback
@@ -1061,7 +1070,13 @@ async def extract_call_requests(ws, settings, lead, now, timeout):
               "preferred_time is the customer's stated date and time as YYYY-MM-DDTHH:MM in the business timezone, resolved against the current time; null when no clear time was stated. "
               "requests_for_admin lists questions or requirements the business owner must answer or act on (pricing, documents, special terms); empty when there are none. Never invent anything. "
               'Return JSON {"meeting_requested": bool, "preferred_time": string|null, "preferred_time_text": string, "meeting_topic": string, "requests_for_admin": [string]}.')
-    prompt = json.dumps({"current_time": local.strftime("%A %Y-%m-%dT%H:%M"), "timezone": settings["timezone"], "summary": summary, "transcript": transcript}, ensure_ascii=False)
+    details = {"current_time": local.strftime("%A %Y-%m-%dT%H:%M"), "timezone": settings["timezone"], "summary": summary, "transcript": transcript}
+    if proposed:
+        system += (' The business already offered the customer a meeting at proposed_meeting_time. Add "meeting_response": "accepted" if the customer agreed '
+                   'to that time, "other_time" if they asked for a different time (put it in preferred_time and their words in preferred_time_text), '
+                   '"declined" if they no longer want a meeting, or null if the meeting time was not discussed or their answer is unclear.')
+        details["proposed_meeting_time"] = proposed.astimezone(zone_of(settings)).strftime("%A %Y-%m-%dT%H:%M")
+    prompt = json.dumps(details, ensure_ascii=False)
     try:
         import llm_service
         from ai_usage import usage_scope
@@ -1073,7 +1088,8 @@ async def extract_call_requests(ws, settings, lead, now, timeout):
             preferred = moment if now < moment < now + timedelta(days=60) else None
         return {"meeting_requested": bool(data.get("meeting_requested")), "preferred_time": preferred,
                 "preferred_time_text": clean(data.get("preferred_time_text"), 200), "meeting_topic": clean(data.get("meeting_topic"), 200),
-                "requests_for_admin": [clean(item, 300) for item in (data.get("requests_for_admin") or []) if clean(item, 300)][:6]}
+                "requests_for_admin": [clean(item, 300) for item in (data.get("requests_for_admin") or []) if clean(item, 300)][:6],
+                "meeting_response": data.get("meeting_response") if proposed and data.get("meeting_response") in {"accepted", "other_time", "declined"} else None}
     except Exception as exc:
         logger.warning("ai_ops_call_extraction_unavailable workspace=%s error_type=%s", ws["_id"], type(exc).__name__)
         return fallback
@@ -1107,8 +1123,14 @@ async def process_finished_calls(db, now, deadline, ws_ids):
             if since and (parse(lead["last_call_at"]) or now) < since:
                 continue
             settings = settings_of(ws)
-            found = await extract_call_requests(ws, settings, lead, now, min(20, deadline - time.monotonic() - 6))
-            if found["meeting_requested"]:
+            from ai_ops_meetings import lead_reply, open_meeting
+            meeting = await open_meeting(db, ws_id, lead_id, now)
+            found = await extract_call_requests(ws, settings, lead, now, min(20, deadline - time.monotonic() - 6),
+                                                proposed=parse(meeting.get("start")) if meeting else None)
+            if meeting and found.get("meeting_response"):
+                # They answered about a meeting that is already being arranged: agreed, asked for another time, or dropped it.
+                await lead_reply(db, ws, lead, meeting, found, now)
+            elif found["meeting_requested"]:
                 from ai_agents import ensure_agents, handles
                 from ai_ops_meetings import request_meeting
                 from crm import ensure_crm_settings

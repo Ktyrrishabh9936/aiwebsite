@@ -390,14 +390,21 @@ function MeetingRow({ meeting, wsId, zone, at, act, busy, leadLink }) {
   const [changing, setChanging] = useState(false);
   const [when, setWhen] = useState(meeting.start ? zonedInput(meeting.start, zone) : "");
   const [note, setNote] = useState("");
+  const [callLead, setCallLead] = useState(true);
   const confirmed = meeting.status === "confirmed";
   const save = async (useNewTime) => {
     let start;
     try { start = useNewTime ? inputToUtc(when, zone) : undefined; } catch (err) { toast.error(err.message); return; }
-    const result = await act(`meeting-${meeting.id}`, () => api.post(`/workspaces/${wsId}/ai-ops/meetings/${meeting.id}/confirm`, { start, note }),
-      (r) => (r.data.conflict ? "Saved, but this time overlaps something else in your calendar" : r.data.lead_notified ? "Saved. The lead has been emailed." : "Saved. The lead has no email, so tell them by phone."));
+    const result = await act(`meeting-${meeting.id}`, () => api.post(`/workspaces/${wsId}/ai-ops/meetings/${meeting.id}/confirm`, { start, note, call_lead: callLead }),
+      (r) => (r.data.conflict ? "Saved, but this time overlaps something else in your calendar"
+        : r.data.lead_call === "queued" ? `Saved. The lead ${r.data.lead_notified ? "has been emailed and " : ""}will be called to agree the new time.`
+        : r.data.lead_notified ? "Saved. The lead has been emailed." : "Saved. The lead has no email, so tell them by phone."));
     if (result) setChanging(false);
   };
+  const contact = [meeting.lead_phone, meeting.lead_email].filter(Boolean).join(" · ");
+  const replyText = meeting.lead_reply === "accepted" ? "The lead agreed to this time on a call."
+    : meeting.lead_reply === "declined" ? "On a call the lead said they no longer want this meeting. Cancel it if you agree."
+    : meeting.lead_reply === "other_time" ? `On a call the lead asked for a different time${meeting.lead_reply_text ? `: “${meeting.lead_reply_text}”` : "."}` : "";
   return (
     <li id={`item-${meeting.id}`} className="rounded-xl border bg-background p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -405,7 +412,13 @@ function MeetingRow({ meeting, wsId, zone, at, act, busy, leadLink }) {
         <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${confirmed ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-amber-500/10 text-amber-600 dark:text-amber-400"}`}>{confirmed ? "Confirmed" : meeting.status === "link_sent" ? "Booking link sent" : meeting.status === "needs_time" ? "Needs a time" : "Proposed"}</span>
       </div>
       <p className="mt-1 text-sm">{meeting.start ? `${at(meeting.start, { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })} · ${meeting.duration_minutes} min` : meeting.status === "link_sent" ? "Waiting for the lead to pick a time" : "No time chosen yet"}</p>
+      {(contact || meeting.lead_stage) && <p className="mt-1 text-xs text-muted-foreground">{[contact, meeting.lead_stage].filter(Boolean).join(" · ")}</p>}
+      {meeting.call_summary && <p className="mt-1 text-xs text-muted-foreground">From the call: {meeting.call_summary}</p>}
       {meeting.requested_text && <p className="mt-1 text-xs text-muted-foreground">The lead said: “{meeting.requested_text}”</p>}
+      {meeting.awaiting_lead_reply && <p className="mt-1 text-xs font-medium text-amber-600 dark:text-amber-400">The Follow-up Agent is calling the lead to agree this time. You will be emailed their answer.</p>}
+      {!meeting.awaiting_lead_reply && replyText && <p className="mt-1 text-xs font-medium">{replyText}</p>}
+      {meeting.call_note && <p className="mt-1 text-xs text-muted-foreground">{meeting.call_note}</p>}
+      {meeting.meeting_link && <p className="mt-1 text-xs"><a href={meeting.meeting_link} target="_blank" rel="noreferrer" className="font-semibold text-primary hover:underline">Join link: {meeting.meeting_link}</a></p>}
       {meeting.slot_note && <p className="mt-1 text-xs text-muted-foreground">{meeting.slot_note}</p>}
       {meeting.calendar_error && <p role="alert" className="mt-1 text-xs text-amber-600">{meeting.calendar_error}</p>}
       {confirmed && <p className="mt-1 text-xs text-muted-foreground">{meeting.lead_notified ? "The lead has been emailed this time." : "The lead has not been emailed (no email address). Confirm by phone."}{meeting.calendar_link && <> · <a href={meeting.calendar_link} target="_blank" rel="noreferrer" className="font-semibold text-primary hover:underline">Open in calendar</a></>}</p>}
@@ -413,11 +426,13 @@ function MeetingRow({ meeting, wsId, zone, at, act, busy, leadLink }) {
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
           <label className="text-xs font-semibold">New time ({zone.replaceAll("_", " ")})<input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} className={control} /></label>
           <label className="text-xs font-semibold">Note for the lead (optional)<input value={note} onChange={(e) => setNote(e.target.value)} maxLength={500} className={control} /></label>
+          <label className="flex items-start gap-2 text-xs sm:col-span-2"><input type="checkbox" checked={callLead} onChange={(e) => setCallLead(e.target.checked)} className="mt-0.5 h-4 w-4" />
+            <span>Also have the Follow-up Agent call the lead to agree the new time. If they ask for another time, you are emailed and decide.</span></label>
         </div>
       )}
       <div className="mt-3 flex flex-wrap gap-2">
         {changing
-          ? <><button type="button" disabled={!when || busy === `meeting-${meeting.id}`} onClick={() => save(true)} className={primary}>{busy === `meeting-${meeting.id}` && <Loader2 className="h-3.5 w-3.5 animate-spin" />}Save and email the lead</button><button type="button" onClick={() => setChanging(false)} className={small}>Back</button></>
+          ? <><button type="button" disabled={!when || busy === `meeting-${meeting.id}`} onClick={() => save(true)} className={primary}>{busy === `meeting-${meeting.id}` && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{callLead ? "Save, email and call the lead" : "Save and email the lead"}</button><button type="button" onClick={() => setChanging(false)} className={small}>Back</button></>
           : <>
             {!confirmed && meeting.start && <button type="button" disabled={busy === `meeting-${meeting.id}`} onClick={() => save(false)} className={primary}><Check className="h-3.5 w-3.5" />Confirm this time</button>}
             <button type="button" onClick={() => setChanging(true)} className={small}><CalendarClock className="h-3.5 w-3.5" />{meeting.start ? "Choose a different time" : meeting.status === "link_sent" ? "Set the time myself" : "Choose a time"}</button>

@@ -15,7 +15,7 @@ const agentNameFor = (business) => `${(business || "AREVEI").replace(/[^\w\- ()]
 const errorDetail = (error) => { const detail = error?.response?.data?.detail; return detail && typeof detail === "object" && !Array.isArray(detail) ? detail : null; };
 const errorMessage = (error, fallback) => errorDetail(error)?.message || (error?.response?.data?.detail != null ? formatError(error.response.data.detail)
   : !error?.response ? (error?.message && !error?.request ? error.message : fallback) : `The backend returned HTTP ${error.response.status}.`);
-const ACCOUNT_LABELS = { connected: "connected", expired: "sign-in expired, reconnect", disconnected: "not connected", unavailable: "status unavailable" };
+const ACCOUNT_LABELS = { connected: "connected", expired: "signed out (Sarvam ends sign-ins after 24 hours; calls keep working)", disconnected: "not connected", unavailable: "status unavailable" };
 
 export default function VoiceProviders({ workspaceId }) {
   const [providers, setProviders] = useState([]);

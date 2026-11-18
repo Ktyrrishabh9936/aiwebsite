@@ -1,6 +1,8 @@
 """Meetings arranged by the AI: a lead asks on a call, the calendar is checked, admin and lead are told.
 
-The owner can always pick a different time; the lead is then emailed the new time.
+The owner can always pick a different time. The lead is then emailed the new time and, when they can be
+called, the Follow-up Agent phones them to agree it. What the lead answers on that call comes back here
+(``lead_reply``): the owner is told, and a new time the lead asks for goes through the same steps again.
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -9,8 +11,8 @@ from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ai_ops import (access, add_lead_note, clean, lead_contact, minutes_of, out, owner_email, parse, settings_of,
-                    stable_id, utcnow, zone_of)
+from ai_ops import (PURPOSES, access, add_lead_note, clean, lead_contact, minutes_of, out, owner_email, parse, settings_of,
+                    stable_id, stage_category, utcnow, zone_of)
 from connectors import booking_link, calendar_for, send_workspace_email
 
 logger = logging.getLogger("ai_ops.meetings")
@@ -100,20 +102,22 @@ async def book(db, ws, meeting, calendar, change):
             event = await (calendar.update(meeting["calendar_event_id"], summary, description, start, end, meeting.get("lead_email") or "")
                            if meeting.get("calendar_event_id") else calendar.create(summary, description, start, end, meeting.get("lead_email") or ""))
             updates.update({"calendar_event_id": event["event_id"], "calendar_link": event["link"], "calendar_provider": calendar.name, "calendar_error": None})
+            if event.get("meet_link"):  # the video link both sides join from
+                updates["meeting_link"] = event["meet_link"]
         except Exception as exc:
             logger.warning("calendar_booking_failed workspace=%s error_type=%s", ws_id, type(exc).__name__)
             updates["calendar_error"] = "The calendar event could not be saved. Add it to your calendar manually."
     business = ws.get("name") or "our team"
     if meeting.get("lead_email"):
-        subject = {"rescheduled": "Your meeting time has changed", "confirmed": "Your meeting is confirmed"}[change]
+        subject = {"rescheduled": "Your meeting time has changed", "changed": "A new time for our meeting", "confirmed": "Your meeting is confirmed"}[change]
         sent = await send_workspace_email(db, ws, meeting["lead_email"], f"{subject} · {business}",
-                                          lead_email(business, meeting_lead_text(business, meeting["lead_name"], meeting, settings["timezone"], change)),
+                                          lead_email(business, meeting_lead_text(business, meeting["lead_name"], {**meeting, **updates}, settings["timezone"], change)),
                                           reply_to=await owner_email(db, ws, settings))
         updates["lead_notified"] = bool(sent["sent"])
         updates["lead_notified_at"] = utcnow().isoformat() if sent["sent"] else meeting.get("lead_notified_at")
     else:
         updates["lead_notified"] = False
-    label = "Meeting moved to" if change == "rescheduled" else "Meeting confirmed for"
+    label = "Meeting moved to" if change == "rescheduled" else "New meeting time offered:" if change == "changed" else "Meeting confirmed for"
     await add_lead_note(db, ws_id, meeting["lead_id"], f"{label} {when_text(start, settings['timezone'])}."
                         + (" The lead was emailed." if updates["lead_notified"] else " The lead was not emailed (no email address or delivery failed)."),
                         f"{label} {when_text(start, settings['timezone'])}", extra={"ai_ops.meeting_at": start.isoformat()})
@@ -154,12 +158,124 @@ async def send_booking_link(db, ws, lead, contact, found, link, now):
     return meeting
 
 
+async def open_meeting(db, ws_id, lead_id, now):
+    """The lead's meeting that is still being arranged or is yet to happen, if any."""
+    return await db.ai_ops_meetings.find_one({"workspace_id": ws_id, "lead_id": lead_id, "status": {"$in": ["proposed", "confirmed", "needs_time"]},
+                                              "$or": [{"start": None}, {"start": {"$gte": now.isoformat()}}]})
+
+
+async def lead_details(db, ws_id, lead):
+    """What the owner needs to know about who is asking: their stage and what the call was about."""
+    from crm import ensure_crm_settings
+    stage = str(lead.get("status") or "new")
+    states = (await ensure_crm_settings(db, ws_id)).get("states") or []
+    call = lead.get("qualification_call") or {}
+    summary = call.get("summary") or lead.get("conversation_summary") or (lead.get("communication_summary") or {}).get("latest_summary")
+    return {"lead_stage": next((state.get("label") for state in states if state.get("key") == stage), None) or stage.replace("_", " ").title(),
+            "call_summary": clean(summary, 600)}
+
+
+async def time_call_plan(db, ws, lead):
+    """(action fields, "") when the Follow-up Agent can phone the lead about a meeting time, else (None, why not)."""
+    from ai_agents import ensure_agents, handles
+    from crm import ensure_crm_settings
+    ws_id, settings, contact = str(ws["_id"]), settings_of(ws), lead_contact(lead)
+    if not settings["enabled"] or settings["calls"] == "off":
+        return None, "AI calls are switched off, so the lead was not called."
+    if lead.get("do_not_call") or not contact["phone"]:
+        return None, "The lead is marked do-not-call or has no phone number, so they were not called."
+    states = (await ensure_crm_settings(db, ws_id)).get("states") or []
+    category, stage = stage_category(lead, states), str(lead.get("status") or "new")
+    if category in {"customer", "lost"}:
+        return None, "The AI does not call customers or lost leads, so they were not called."
+    agents = [agent for agent in await ensure_agents(db, ws_id) if agent.get("enabled") and "call" in (agent.get("actions") or [])]
+    agent = next((a for a in agents if a.get("role") == "follow_up"), None) or next((a for a in agents if handles(a, stage, category)), None)
+    if not agent:
+        return None, "No active agent can make calls, so the lead was not called."
+    label = next((state.get("label") for state in states if state.get("key") == stage), None) or stage.replace("_", " ").title()
+    return {"kind": "call", "category": category, "stage": stage, "stage_label": label, "segment": "pipeline", "agent_id": str(agent["_id"]),
+            "agent_name": agent["name"], "agent_role": agent.get("role"), "purpose": "meeting_call", "purpose_label": PURPOSES["meeting_call"]}, ""
+
+
+async def queue_time_call(db, ws, meeting, fields, expected, now):
+    """Queue the call that tells the lead the owner's time and asks whether it works. Runs in calling hours."""
+    from ai_ops_emails import when_text
+    ws_id, zone, meeting_id = str(ws["_id"]), settings_of(ws)["timezone"], str(meeting["_id"])
+    business = ws.get("name") or "The team"
+    was = f"They expected to meet on {when_text(expected, zone)}. " if expected else ""
+    reason = clean(f"Meeting time change. {was}{business} is not available then and proposes {when_text(meeting['start'], zone)}. Tell them, and ask if "
+                   "that works. If it does not, ask which day and time suits them and say the team will confirm it.", 420)
+    # Only the newest time is ever phoned through.
+    await db.ai_ops_actions.update_many({"workspace_id": ws_id, "payload.meeting_id": meeting_id, "status": "scheduled"},
+                                        {"$set": {"status": "superseded", "updated_at": now.isoformat()}})
+    run = await db.ai_ops_runs.find_one({"workspace_id": ws_id}, sort=[("created_at", -1)])
+    action_id = stable_id("meeting_call", meeting_id, meeting["start"])
+    doc = {**fields, "workspace_id": ws_id, "run_id": str(run["_id"]) if run else None, "day": (run or {}).get("day"), "lead_id": meeting["lead_id"],
+           "lead_name": meeting["lead_name"], "allowed": ["call"], "reason": reason, "priority": 100, "status": "scheduled",
+           "scheduled_for": now.isoformat(), "payload": {"meeting_id": meeting_id}, "decided_by": "owner", "attempts": 0, "proposal": False,
+           "result": None, "created_at": now.isoformat(), "updated_at": now.isoformat()}
+    await db.ai_ops_actions.update_one({"_id": action_id}, {"$set": doc}, upsert=True)
+    return action_id
+
+
+async def lead_reply(db, ws, lead, meeting, found, now):
+    """The lead answered about the meeting time on a call. Act on it and tell the owner. Returns the outcome, or None."""
+    from ai_ops_emails import meeting_reply_email, when_text
+    response = found.get("meeting_response")
+    if response not in {"accepted", "other_time", "declined"} or (response == "accepted" and not meeting.get("start")):
+        return None
+    ws_id, settings = str(ws["_id"]), settings_of(ws)
+    zone, said = settings["timezone"], clean(found.get("preferred_time_text"), 200)
+    updates = {"awaiting_lead_reply": False, "lead_reply": response, "lead_reply_text": said, "lead_reply_at": now.isoformat(), "will_call": False}
+    meeting = {**meeting, "will_call": False}
+    if response == "accepted":
+        outcome, event, updates["lead_confirmed"] = "accepted", "the lead agreed to the time", True
+        note = f"On the call the lead agreed to meet on {when_text(meeting['start'], zone)}."
+    elif response == "declined":
+        outcome, event, updates["lead_confirmed"] = "declined", "the lead said they no longer want the meeting", False
+        note = "On the call the lead said they no longer want the meeting. The owner was told; nothing was cancelled."
+    else:
+        preferred = found.get("preferred_time")
+        calendar = await calendar_for(db, ws_id)
+        start, slot_note = None, ""
+        if preferred:
+            busy, _ = await busy_times(db, ws_id, calendar, max(now, preferred - timedelta(hours=2)), preferred + timedelta(days=SEARCH_DAYS + 2), exclude_id=meeting["_id"])
+            start, slot_note = find_slot(preferred, busy, settings, now)
+        updates.update({"lead_confirmed": False, "requested_text": said or meeting.get("requested_text"), "requested_start": preferred.isoformat() if preferred else None})
+        if not start:
+            outcome, event = "needs_time", "the lead asked for a different time"
+            updates.update({"status": "needs_time", "start": None, "slot_note": "The lead could not make your time. Choose a new one."})
+            note = "On the call the lead asked for a different meeting time. Waiting for the owner to choose one."
+        else:
+            meeting.update({"start": start.isoformat(), "requested_start": updates["requested_start"], "requested_text": updates["requested_text"]})
+            updates["start"] = start.isoformat()
+            if settings["meeting_mode"] == "auto" and start == preferred:  # their time is free: move it straight away
+                outcome, event = "moved", "moved to the time the lead asked for"
+                updates.update({"status": "confirmed", "slot_note": "", "lead_confirmed": True})
+                updates.update(await book(db, ws, {**meeting, "status": "confirmed"}, calendar, "rescheduled"))
+                note = ""  # book() already wrote the note
+            else:
+                outcome, event = "proposed", "the lead asked for a different time"
+                updates.update({"status": "proposed", "slot_note": slot_note or "This is the time the lead asked for on the follow-up call."})
+                note = f"On the call the lead asked to move the meeting ({said or when_text(start, zone)}). Waiting for the owner to confirm."
+    updates["updated_at"] = now.isoformat()
+    await db.ai_ops_meetings.update_one({"_id": meeting["_id"]}, {"$set": updates, "$push": {"history": {
+        "at": now.isoformat(), "by": "the lead, on a call", "event": event, "start": updates.get("start", meeting.get("start"))}}})
+    if note:
+        await add_lead_note(db, ws_id, meeting["lead_id"], note, "Meeting: " + event)
+    recipient = await owner_email(db, ws, settings)
+    if recipient:
+        subject = {"accepted": "Meeting time agreed", "moved": "Meeting moved", "declined": "Meeting no longer wanted"}.get(outcome, "Meeting time needs your decision")
+        await send_workspace_email(db, ws, recipient, f"{subject}: {meeting['lead_name']}",
+                                   meeting_reply_email(ws, {**meeting, **updates, **await lead_details(db, ws_id, lead)}, zone, outcome, said))
+    return outcome
+
+
 async def request_meeting(db, ws, lead, found, now):
     """A lead asked for a meeting on a call: find a time, then book or propose it and email the owner."""
     from ai_ops_emails import meeting_admin_email
     ws_id, lead_id, settings = str(ws["_id"]), str(lead["_id"]), settings_of(ws)
-    if await db.ai_ops_meetings.find_one({"workspace_id": ws_id, "lead_id": lead_id, "status": {"$in": ["proposed", "confirmed", "needs_time"]},
-                                          "$or": [{"start": None}, {"start": {"$gte": now.isoformat()}}]}):
+    if await open_meeting(db, ws_id, lead_id, now):
         return None  # one open meeting per lead; the owner can change its time
     contact = lead_contact(lead)
     link = await booking_link(db, ws_id)
@@ -177,7 +293,7 @@ async def request_meeting(db, ws, lead, found, now):
                "requested_start": found["preferred_time"].isoformat() if found.get("preferred_time") else None,
                "start": start.isoformat() if start else None, "duration_minutes": settings["meeting_duration_minutes"],
                "status": "confirmed" if automatic else "proposed" if start else "needs_time", "slot_note": note,
-               "calendar_checked": calendar_read, "lead_notified": False, "source": "call",
+               "calendar_checked": calendar_read, "lead_notified": False, "source": "call", **await lead_details(db, ws_id, lead),
                "history": [{"at": now.isoformat(), "by": "AI Manager", "event": "requested on a call", "start": start.isoformat() if start else None}],
                "created_at": now.isoformat(), "updated_at": now.isoformat()}
     created = await db.ai_ops_meetings.update_one({"_id": meeting["_id"]}, {"$setOnInsert": {k: v for k, v in meeting.items() if k != "_id"}}, upsert=True)
@@ -201,6 +317,7 @@ class MeetingTime(BaseModel):
     model_config = ConfigDict(extra="forbid")
     start: datetime | None = None
     note: str = Field(default="", max_length=500)
+    call_lead: bool = True  # when the time differs from what the lead expects, also phone them to agree it
 
     @field_validator("start")
     @classmethod
@@ -231,7 +348,7 @@ async def list_meetings(ws_id: str, request: Request):
 
 @router.post("/{meeting_id}/confirm")
 async def confirm_meeting(ws_id: str, meeting_id: str, request: Request, body: MeetingTime):
-    """Confirm the proposed time, or set the owner's own time. The lead is emailed the result."""
+    """Confirm the proposed time, or set the owner's own time. The lead is emailed the result, and phoned when the time is not the one they expect."""
     db, user, ws = await access(request, ws_id)
     meeting = await load(db, ws_id, meeting_id)
     if meeting["status"] == "cancelled":
@@ -248,14 +365,26 @@ async def confirm_meeting(ws_id: str, meeting_id: str, request: Request, body: M
     calendar = await calendar_for(db, ws_id)
     busy, _ = await busy_times(db, ws_id, calendar, start - timedelta(hours=4), start + timedelta(hours=4), exclude_id=meeting["_id"])
     conflict = overlaps(start, start + timedelta(minutes=meeting["duration_minutes"]), busy)
-    change = "rescheduled" if meeting.get("lead_notified") and moved else "confirmed"
-    meeting.update({"start": start.isoformat(), "status": "confirmed", "admin_note": body.note.strip(), "slot_note": ""})
+    # What the lead currently expects: the time they were last told, otherwise the time they asked for.
+    expected = parse(meeting.get("start")) if meeting.get("lead_notified") else parse(meeting.get("requested_start"))
+    differs = expected is not None and abs((expected - start).total_seconds()) >= 60
+    change = "confirmed" if not differs else "rescheduled" if meeting.get("lead_notified") else "changed"
+    lead = await db.crm_leads.find_one({"_id": ObjectId(meeting["lead_id"]), "workspace_id": ws_id}) if ObjectId.is_valid(str(meeting["lead_id"])) else None
+    call_fields, call_note = (None, "")
+    if differs and body.call_lead and lead:
+        call_fields, call_note = await time_call_plan(db, ws, lead)
+    meeting.update({"start": start.isoformat(), "status": "confirmed", "admin_note": body.note.strip(), "slot_note": "", "will_call": bool(call_fields)})
     updates = await book(db, ws, meeting, calendar, change)
     event = {"at": now.isoformat(), "by": user.get("email") or "owner", "event": "time changed by the owner" if moved else "confirmed by the owner", "start": start.isoformat()}
+    if call_fields:
+        updates["time_call_action_id"] = str(await queue_time_call(db, ws, meeting, call_fields, expected, now))
+        event["lead_call"] = "queued"
     await db.ai_ops_meetings.update_one({"_id": meeting["_id"]}, {
-        "$set": {**updates, "start": start.isoformat(), "status": "confirmed", "admin_note": body.note.strip(), "slot_note": "", "updated_at": now.isoformat()},
+        "$set": {**updates, "start": start.isoformat(), "status": "confirmed", "admin_note": body.note.strip(), "slot_note": "", "updated_at": now.isoformat(),
+                 "will_call": bool(call_fields), "awaiting_lead_reply": bool(call_fields), "lead_confirmed": not differs,
+                 "call_note": call_note if differs else ""},
         "$push": {"history": event}})
-    return {**out(await load(db, ws_id, meeting_id)), "conflict": conflict}
+    return {**out(await load(db, ws_id, meeting_id)), "conflict": conflict, "lead_call": "queued" if call_fields else "none"}
 
 
 @router.post("/{meeting_id}/cancel")

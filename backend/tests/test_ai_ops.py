@@ -384,7 +384,8 @@ def test_admin_first_mode_waits_and_a_changed_time_is_emailed_to_the_lead(world,
     assert [m["to"] for m in world.sent[:before]] == ["owner@example.com"]  # only the admin hears about a proposal
     assert confirmed["status"] == "confirmed" and confirmed["start"] == "2026-11-20T06:00:00+00:00"
     lead_mail = [m for m in world.sent[before:] if m["to"] == "asha@example.com"]
-    assert "Your meeting is confirmed" in lead_mail[0]["subject"] and "Please bring your ID." in lead_mail[0]["html"]
+    # Friday is not the Thursday the lead asked for, so they are offered it rather than told it is confirmed.
+    assert "A new time for our meeting" in lead_mail[0]["subject"] and "Please bring your ID." in lead_mail[0]["html"]
     assert "Your meeting time has changed" in lead_mail[1]["subject"] and moved["start"] == "2026-11-20T07:00:00+00:00"
     assert past == 422
 
@@ -498,3 +499,169 @@ def test_email_uses_the_platform_account_by_default_and_when_the_own_mailbox_fai
     assert deliveries[0] == ("smtp.platform.test", "lead@example.com", "Studio via Arevei", "owner@example.com")
     assert fallback["sent"] and fallback["via"] == "platform" and fallback["error"] == "OSError" and saved["last_email_error"] == "OSError"
     assert invalid["sent"] is False and len(deliveries) == 2
+
+
+# ------------------------------------------------------------ agreeing a meeting time with the lead
+def answer(world, target, summary, **model):
+    """The lead finishes another call; the model reports what they said about the meeting."""
+    asyncio.run(world.db.crm_leads.update_one({"_id": target["_id"]}, {"$set": {
+        "last_call_at": NOW.isoformat(), "last_call_outcome": "CONNECTED", "next_action": "",
+        "qualification_call": {"status": "completed", "summary": summary, "transcript": ""}}}))
+    world.model.return_value = {"meeting_requested": False, "preferred_time": None, "preferred_time_text": "", "meeting_topic": "", "requests_for_admin": [], **model}
+
+
+def test_owner_changes_the_time_the_lead_is_called_and_their_answer_comes_back(world, monkeypatch):
+    import plivo_calls
+    target = finished_call(world)
+    world.model.return_value = {"meeting_requested": True, "preferred_time": "2026-11-19T15:00", "preferred_time_text": "Thursday 3 pm",
+                                "meeting_topic": "Product demo", "requests_for_admin": []}
+    briefs = []
+
+    async def spy_call(db_, ws_id_, lead_id, request, auto=False, raise_on_error=True, agent_config_id=None):
+        doc = await db_.crm_leads.find_one({"_id": ObjectId(lead_id)})
+        briefs.append(list((doc.get("communication_summary") or {}).get("pending_discussion") or []))
+        return {"status": "started", "session_id": "s"}
+
+    monkeypatch.setattr(plivo_calls, "start_qualification_call", spy_call)
+    owner_time = datetime(2026, 11, 20, 6, 0, tzinfo=timezone.utc)   # Friday 11:30 Kolkata
+    lead_time = datetime(2026, 11, 21, 10, 30, tzinfo=timezone.utc)  # Saturday 16:00 Kolkata
+
+    async def first_part():
+        await world.db.workspaces.update_one({"_id": ObjectId(world.ws_id)}, {"$set": {"ai_ops.meeting_mode": "admin_first"}})
+        await ai_ops.process_finished_calls(world.db, NOW, time.monotonic() + 60, [world.ws_id])
+        proposed = await world.db.ai_ops_meetings.find_one({})
+        request_mail = world.sent[-1]
+        ws = await world.db.workspaces.find_one({"_id": ObjectId(world.ws_id)})
+        monkeypatch.setattr(meetings, "access", AsyncMock(return_value=(world.db, {"email": "owner@example.com"}, ws)))
+        before = len(world.sent)
+        changed = await meetings.confirm_meeting(world.ws_id, str(proposed["_id"]), None, meetings.MeetingTime(start=owner_time))
+        mail = world.sent[before:]
+        queued = await world.db.ai_ops_actions.find_one({"purpose": "meeting_call"})
+        # A new daily plan must not throw the owner's call away.
+        await world.db.ai_ops_actions.update_many({"workspace_id": world.ws_id, "status": {"$in": ai_ops.PLANNED}, "kind": {"$in": ["call", "email", "task"]},
+                                                   "purpose": {"$ne": "meeting_call"}}, {"$set": {"status": "superseded"}})
+        await ai_ops.execute_due(world.db, NOW, time.monotonic() + 60)
+        return proposed, request_mail, changed, mail, queued, await world.db.ai_ops_actions.find_one({"purpose": "meeting_call"})
+
+    proposed, request_mail, changed, mail, queued, placed = asyncio.run(first_part())
+    # 1. The owner's request email says who is asking, how to reach them, what about and when.
+    assert request_mail["to"] == "owner@example.com" and "Meeting requested" in request_mail["subject"]
+    for expected in ("Asha Rao", "+919876543210", "asha@example.com", "Product demo", "AI Qualified", "Thu 19 Nov, 3:00 PM", "Wants a demo on Thursday"):
+        assert expected in request_mail["html"]
+    # 2. The owner picks another time: the lead is emailed and the Follow-up Agent is queued to call.
+    assert changed["status"] == "confirmed" and changed["lead_call"] == "queued" and changed["awaiting_lead_reply"] is True
+    assert [m["to"] for m in mail] == ["asha@example.com"] and "A new time for our meeting" in mail[0]["subject"]
+    assert "not available on Thu 19 Nov, 3:00 PM" in mail[0]["html"] and "Fri 20 Nov, 11:30 AM" in mail[0]["html"] and "We will also call you" in mail[0]["html"]
+    assert queued["status"] == "scheduled" and queued["agent_role"] == "follow_up" and queued["payload"]["meeting_id"] == str(proposed["_id"])
+    # 3. The call is placed with the reason, and the lead record is left clean.
+    assert placed["status"] == "in_progress" and len(briefs) == 1
+    assert "Meeting time change" in briefs[0][-1] and "Fri 20 Nov, 11:30 AM" in briefs[0][-1] and "Thu 19 Nov, 3:00 PM" in briefs[0][-1]
+
+    # 4. On that call the lead asks for Saturday 4 pm instead: the owner is told and decides.
+    answer(world, target, "Cannot do Friday. Asked to meet on Saturday at 4 pm instead.", meeting_response="other_time",
+           preferred_time="2026-11-21T16:00", preferred_time_text="Saturday at 4 pm")
+
+    async def second_part():
+        before = len(world.sent)
+        await ai_ops.process_finished_calls(world.db, NOW, time.monotonic() + 60, [world.ws_id])
+        countered, mail = await world.db.ai_ops_meetings.find_one({}), world.sent[before:]
+        before = len(world.sent)
+        agreed = await meetings.confirm_meeting(world.ws_id, str(countered["_id"]), None, meetings.MeetingTime())
+        return countered, mail, agreed, world.sent[before:], await world.db.ai_ops_actions.find({"purpose": "meeting_call"}).to_list(10), await world.db.ai_ops_meetings.find({}).to_list(10)
+
+    countered, mail, agreed, final_mail, calls, held = asyncio.run(second_part())
+    assert world.model.call_args.args[2].count("proposed_meeting_time") == 1  # the model was told which time was on offer
+    assert countered["status"] == "proposed" and ai_ops.parse(countered["start"]) == lead_time and countered["lead_reply"] == "other_time"
+    assert [m["to"] for m in mail] == ["owner@example.com"] and "Meeting time needs your decision" in mail[0]["subject"]
+    assert "Saturday at 4 pm" in mail[0]["html"] and "+919876543210" in mail[0]["html"]
+    # 5. The owner accepts the lead's time: one confirmation email, no second call, still one meeting.
+    assert agreed["status"] == "confirmed" and agreed["lead_call"] == "none" and ai_ops.parse(agreed["start"]) == lead_time
+    assert [m["to"] for m in final_mail] == ["asha@example.com"] and "Your meeting is confirmed" in final_mail[0]["subject"]
+    assert len(calls) == 1 and len(held) == 1
+
+
+def test_lead_agreeing_or_dropping_the_meeting_is_reported_to_the_owner(world, monkeypatch):
+    target = finished_call(world)
+    world.model.return_value = {"meeting_requested": True, "preferred_time": "2026-11-19T15:00", "preferred_time_text": "Thursday 3 pm",
+                                "meeting_topic": "", "requests_for_admin": []}
+
+    async def run():
+        await ai_ops.process_finished_calls(world.db, NOW, time.monotonic() + 60, [world.ws_id])  # booked automatically for Thursday
+
+    asyncio.run(run())
+    answer(world, target, "Confirmed the meeting on Thursday.", meeting_response="accepted")
+
+    async def after():
+        before = len(world.sent)
+        await ai_ops.process_finished_calls(world.db, NOW, time.monotonic() + 60, [world.ws_id])
+        return world.sent[before:], await world.db.ai_ops_meetings.find({}).to_list(10)
+
+    mail, held = asyncio.run(after())
+    assert len(held) == 1 and held[0]["status"] == "confirmed" and held[0]["lead_confirmed"] is True
+    assert [m["to"] for m in mail] == ["owner@example.com"] and "Meeting time agreed" in mail[0]["subject"]
+
+    answer(world, target, "Said they no longer need the meeting.", meeting_response="declined")
+    asyncio.run(world.db.crm_leads.update_one({"_id": target["_id"]}, {"$set": {"last_call_at": (NOW + timedelta(minutes=1)).isoformat()}}))
+    mail, held = asyncio.run(after())
+    assert held[0]["status"] == "confirmed" and held[0]["lead_reply"] == "declined"  # the owner decides whether to cancel
+    assert "Meeting no longer wanted" in mail[0]["subject"]
+
+
+def test_a_do_not_call_lead_is_emailed_the_new_time_but_never_called(world, monkeypatch):
+    target = finished_call(world, do_not_call=True)
+    world.model.return_value = {"meeting_requested": True, "preferred_time": "2026-11-19T15:00", "preferred_time_text": "Thursday 3 pm",
+                                "meeting_topic": "", "requests_for_admin": []}
+
+    async def scenario():
+        await ai_ops.process_finished_calls(world.db, NOW, time.monotonic() + 60, [world.ws_id])
+        meeting = await world.db.ai_ops_meetings.find_one({})
+        ws = await world.db.workspaces.find_one({"_id": ObjectId(world.ws_id)})
+        monkeypatch.setattr(meetings, "access", AsyncMock(return_value=(world.db, {"email": "owner@example.com"}, ws)))
+        moved = await meetings.confirm_meeting(world.ws_id, str(meeting["_id"]), None, meetings.MeetingTime(start=datetime(2026, 11, 20, 6, 0, tzinfo=timezone.utc)))
+        return moved, await world.db.ai_ops_actions.find({"purpose": "meeting_call"}).to_list(5)
+
+    moved, calls = asyncio.run(scenario())
+    assert moved["lead_call"] == "none" and "do-not-call" in moved["call_note"] and calls == []
+    assert "Your meeting time has changed" in world.sent[-1]["subject"] and "We will also call you" not in world.sent[-1]["html"]
+
+
+# ------------------------------------------------------------ who the AI may contact
+def test_completed_leads_are_never_contacted_and_do_not_call_blocks_only_calls():
+    ctx = context()
+    done = lead("won", contact_preference="no_contact", do_not_call=True, do_not_email=True, customer_status="customer", converted_at=iso(days=60), created_at=iso(days=70))
+    assert ai_ops.assess(done, ctx) is None and "Marked complete" in ctx["resting"][0]["why"]
+    overdue = {str(done["_id"]): [{"title": "Check in", "scheduled_time": iso(days=1)}]}
+    assert ai_ops.assess(done, context(tasks=overdue)) is None                       # not even a reminder for the team
+    ordinary = ai_ops.assess(lead("won", customer_status="customer", converted_at=iso(days=60), created_at=iso(days=70)), context())
+    assert ordinary and ordinary["suggested"]["kind"] == "email"                     # an ordinary quiet customer still gets a check-in
+    blocked = ai_ops.assess(lead("contacted", last_call_at=iso(days=3), last_call_outcome="CONNECTED", contact_preference="do_not_call", do_not_call=True), context())
+    assert "call" not in blocked["allowed"] and blocked["suggested"]["kind"] == "email"
+
+
+def test_contact_setting_is_separate_from_the_stage_and_stops_queued_work(world):
+    import crm
+    request = type("Request", (), {"app": type("App", (), {"state": type("State", (), {"db": world.db})()})()})()
+    target = world.leads["contacted"]
+    lead_id = str(target["_id"])
+
+    async def scenario():
+        base = {"workspace_id": world.ws_id, "lead_id": lead_id, "created_at": NOW.isoformat()}
+        await world.db.ai_ops_actions.insert_one({**base, "kind": "call", "status": "scheduled"})
+        await world.db.ai_ops_actions.insert_one({**base, "kind": "email", "status": "awaiting_approval"})
+        dnc = await crm.set_contact_preference(world.ws_id, lead_id, request, {"preference": "do_not_call", "reason": "Asked us to stop calling"})
+        after_dnc = {a["kind"]: a["status"] for a in await world.db.ai_ops_actions.find({"lead_id": lead_id}).to_list(5)}
+        refused = await ai_ops.perform(world.db, {**base, "kind": "call", "segment": "pipeline", "attempts": 1}, NOW)
+        closed = await crm.set_contact_preference(world.ws_id, lead_id, request, {"preference": "no_contact"})
+        after_closed = {a["kind"]: a["status"] for a in await world.db.ai_ops_actions.find({"lead_id": lead_id}).to_list(5)}
+        reopened = await crm.set_contact_preference(world.ws_id, lead_id, request, {"preference": "normal"})
+        with pytest.raises(HTTPException) as bad:
+            await crm.set_contact_preference(world.ws_id, lead_id, request, {"preference": "sometimes"})
+        return dnc, after_dnc, refused, closed, after_closed, reopened, bad.value.status_code
+
+    dnc, after_dnc, refused, closed, after_closed, reopened, bad = asyncio.run(scenario())
+    assert dnc["do_not_call"] is True and dnc["do_not_email"] is False and dnc["status"] == "contacted"   # the stage is untouched
+    assert after_dnc == {"call": "cancelled", "email": "awaiting_approval"} and refused[0] == "skipped"
+    assert closed["contact_preference"] == "no_contact" and closed["do_not_call"] is True and closed["do_not_email"] is True
+    assert after_closed == {"call": "cancelled", "email": "cancelled"}
+    assert reopened["do_not_call"] is False and reopened["do_not_email"] is False and bad == 422
+    assert any("Asked us to stop calling" in note["body"] for note in dnc["lead_notes"])

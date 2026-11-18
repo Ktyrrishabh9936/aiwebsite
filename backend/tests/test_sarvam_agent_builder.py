@@ -401,3 +401,13 @@ def test_paste_sign_in_when_sarvam_refuses_the_https_callback(sarvam):
         await builder.begin_connect(db, ws, USER)
         assert registered.count("https://crm.example/api/sarvam/oauth/callback") == 2
     asyncio.run(isolated(run))
+
+
+def test_account_status_says_when_the_day_long_sign_in_has_ended():
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    fresh = builder.account_public({"status": "connected", "connected_at": now.isoformat(), "session_expires_at": (now + timedelta(hours=23)).isoformat()})
+    assert fresh["status"] == "connected" and fresh["expires_at"]
+    legacy = builder.account_public({"status": "connected", "connected_at": (now - timedelta(hours=30)).isoformat()})
+    assert legacy["status"] == "expired" and legacy["expires_at"] is None
+    assert builder.account_public({"status": "connected"})["status"] == "connected"  # nothing to judge by

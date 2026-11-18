@@ -1701,6 +1701,51 @@ async def set_test_lead(ws_id: str, lead_id: str, request: Request, body: dict =
     return decorate_lead(await db.crm_leads.find_one(query), settings)
 
 
+CONTACT_PREFERENCES = {
+    # value: (do_not_call, do_not_email, label)
+    "normal": (False, False, "Normal contact"),
+    "do_not_call": (True, False, "Do not call"),
+    "no_contact": (True, True, "Completed: no contact"),
+}
+
+
+@router.patch("/leads/{lead_id}/contact-preference")
+async def set_contact_preference(ws_id: str, lead_id: str, request: Request, body: dict = Body(...)):
+    """Who the AI may contact, kept apart from the pipeline stage (won / lost / customer).
+
+    do_not_call: no AI calls ever again (emails still allowed). no_contact: the relationship is complete,
+    so the AI neither calls nor emails nor raises work for this lead; only a person contacts them.
+    Every calling path already refuses a do-not-call lead, so these flags are the whole enforcement.
+    """
+    preference = body.get("preference")
+    if preference not in CONTACT_PREFERENCES:
+        raise HTTPException(status_code=422, detail="Choose normal, do_not_call or no_contact")
+    reason = str(body.get("reason") or "").strip()[:300]
+    db = db_from(request)
+    query = {"workspace_id": ws_id, "_id": oid(lead_id), "deleted_at": None}
+    lead = await db.crm_leads.find_one(query)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Active lead not found")
+    no_call, no_email, label = CONTACT_PREFERENCES[preference]
+    now = now_iso()
+    note = normalize_lead_note({"body": f"Contact setting changed to: {label}." + (f" Reason: {reason}" if reason else ""), "author": "Team", "source": "contact_preference"})
+    note["created_at"] = now
+    await db.crm_leads.update_one(query, {"$set": {
+        "contact_preference": preference, "contact_preference_reason": reason, "contact_preference_at": now,
+        "do_not_call": no_call, "do_not_email": no_email, "updated_at": now,
+    }, "$push": {"lead_notes": note}})
+    if preference != "normal":
+        # Anything the AI still had queued for this lead stops now, not at the next plan.
+        kinds = ["call"] if preference == "do_not_call" else ["call", "email", "task"]
+        await db.ai_ops_actions.update_many(
+            {"workspace_id": ws_id, "lead_id": lead_id, "kind": {"$in": kinds}, "status": {"$in": ["suggested", "awaiting_approval", "scheduled"]}},
+            {"$set": {"status": "cancelled", "result": f"Cancelled: the lead was marked “{label}”.", "updated_at": now, "completed_at": now}})
+        scheduled = (lead.get("qualification_call") or {}).get("status") == "scheduled"
+        if scheduled:
+            await db.crm_leads.update_one(query, {"$set": {"qualification_call.status": "blocked"}, "$unset": {"qualification_call.scheduled_for": ""}})
+    return decorate_lead(await db.crm_leads.find_one(query), await ensure_crm_settings(db, ws_id))
+
+
 def status_side_effects(doc, status):
     """Updates shared by owner and member stage changes: sheet sync and clearing a junk verdict on reopen."""
     updates = pending_sheet_sync(doc, status)

@@ -14,6 +14,7 @@ import re
 import smtplib
 import socket
 import urllib.parse
+import uuid
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -320,17 +321,24 @@ class GoogleCalendar:
             body["attendees"] = [{"email": attendee_email}]
         return body
 
+    @staticmethod
+    def _event(data, event_id=""):
+        video = next((point.get("uri") for point in (data.get("conferenceData") or {}).get("entryPoints") or []
+                      if isinstance(point, dict) and point.get("entryPointType") == "video"), "")
+        return {"event_id": data.get("id", event_id), "link": data.get("htmlLink", ""), "meet_link": data.get("hangoutLink") or video or ""}
+
     async def create(self, summary, description, start, end, attendee_email=""):
         data = await _google(self.db, self.ws_id, "POST",
-                             f"https://www.googleapis.com/calendar/v3/calendars/{self.calendar_id}/events?sendUpdates=all",
-                             self.connector, json=self._body(summary, description, start, end, attendee_email))
-        return {"event_id": data.get("id", ""), "link": data.get("htmlLink", "")}
+                             f"https://www.googleapis.com/calendar/v3/calendars/{self.calendar_id}/events?sendUpdates=all&conferenceDataVersion=1",
+                             self.connector, json={**self._body(summary, description, start, end, attendee_email),
+                                                   "conferenceData": {"createRequest": {"requestId": uuid.uuid4().hex, "conferenceSolutionKey": {"type": "hangoutsMeet"}}}})
+        return self._event(data)
 
     async def update(self, event_id, summary, description, start, end, attendee_email=""):
         data = await _google(self.db, self.ws_id, "PATCH",
                              f"https://www.googleapis.com/calendar/v3/calendars/{self.calendar_id}/events/{urllib.parse.quote(event_id, safe='')}?sendUpdates=all",
                              self.connector, json=self._body(summary, description, start, end, attendee_email))
-        return {"event_id": data.get("id", event_id), "link": data.get("htmlLink", "")}
+        return self._event(data, event_id)  # moving an event keeps its Meet link
 
     async def cancel(self, event_id):
         token = await google_access_token(self.db, self.ws_id, self.connector)

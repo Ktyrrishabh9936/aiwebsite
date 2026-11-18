@@ -16,6 +16,7 @@ import LeadSmsCompose from "../../components/LeadSmsCompose";
 import TwilioSmsSettings from "../../components/TwilioSmsSettings";
 import SalesTeam, { SalesAssignment, useSalesPeople } from "../../components/SalesTeam";
 import ShareLead from "../../components/ShareLead";
+import LeadContactSetting, { ContactBadge } from "../../components/LeadContactSetting";
 import OpportunitySelector from "../../components/OpportunitySelector";
 import LeadQualificationPanel from "../../components/LeadQualificationPanel";
 import DynamicField from "../../components/LeadField";
@@ -1115,6 +1116,7 @@ function LeadTable({ wsId, apiBase, member, leads, fields, states, selectedLead,
                   <td className="p-4">
                     <div className="flex flex-wrap items-center gap-2"><button type="button" onClick={(e) => { e.stopPropagation(); onSelect(lead); }} className="text-left text-base font-semibold text-foreground underline-offset-4 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={`Open details for ${leadName}`}>{leadName}</button>{lead.customer_status === "customer" && <span className="text-[11px] uppercase px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-600 dark:text-emerald-400">Customer</span>}{isJunk && <span className="text-[11px] uppercase px-1.5 py-0.5 rounded border border-destructive/40 text-destructive">Junk</span>}{qualificationStatus && <span className={`text-[11px] uppercase px-1.5 py-0.5 rounded border ${qualificationStatus === "qualified" ? "border-emerald-500/40 text-emerald-600 dark:text-emerald-400" : qualificationStatus === "not_qualified" ? "border-destructive/40 text-destructive" : "border-border text-muted-foreground"}`}>{qualificationStatus.replace("_", " ")}</span>}</div>
                     {lead.is_test_lead && <span className="inline-block mt-1 text-[11px] uppercase px-1.5 py-0.5 rounded border border-amber-500/40 text-amber-700 dark:text-amber-400">Test lead</span>}
+                    {(lead.do_not_call || lead.contact_preference) && <span className="mt-1 mr-1 inline-block"><ContactBadge lead={lead} /></span>}
                     {lead.opportunity_kind && <span className="inline-block mt-2 rounded-full bg-primary/15 text-primary px-2 py-1 text-xs font-bold">{lead.opportunity_kind === "upsell" ? "UPSELL" : lead.opportunity_kind.replaceAll("_", " ").toUpperCase()}</span>}{lead.tags?.length > 0 && <div className="mt-2"><LeadTagBadges tags={lead.tags} library={tagLibrary} /></div>}
                     {summaryFields.length > 0 && <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5 text-sm text-foreground/70">{summaryFields.map((field) => <span key={field.key}><span className="text-muted-foreground">{field.label}:</span> {String(values[field.key])}</span>)}</div>}
                     {(lead.sales_assignment?.sales_agent_name || lead.sales_assignment?.channel_partner_name) && <p className="mt-1.5 text-xs text-muted-foreground">{[lead.sales_assignment.sales_agent_name && `Agent: ${lead.sales_assignment.sales_agent_name}`, lead.sales_assignment.channel_partner_name && `Partner: ${lead.sales_assignment.channel_partner_name}`].filter(Boolean).join(" ? ")}</p>}
@@ -1306,6 +1308,7 @@ function LeadDetail(props) {
             <MetaAttribution lead={lead} wsId={wsId} onUpdate={setLead} />
             {!isTrashed && <SalesAssignment wsId={wsId} lead={lead} onUpdated={setLead} />}
             {!isTrashed && <ShareLead wsId={wsId} lead={lead} onUpdated={setLead} />}
+            {!isTrashed && <LeadContactSetting wsId={wsId} lead={lead} onUpdated={setLead} disabled={saving} />}
             <label className="flex items-start gap-3 rounded-lg border bg-background p-3">
               <input type="checkbox" checked={lead.is_test_lead === true} disabled={saving || isTrashed} onChange={(event) => props.setTestLead(event.target.checked)} className="mt-1 h-4 w-4" />
               <span><span className="block text-sm font-semibold">Test lead</span><span className="block text-xs text-muted-foreground mt-1">{saving ? "Saving..." : lead.is_test_lead ? "Saved as a test lead. Excluded from performance reports, sales metrics and pipeline value." : "Select to exclude this lead from performance reports, sales metrics and pipeline value. Saves automatically."} Uncheck to include it again.</span></span>

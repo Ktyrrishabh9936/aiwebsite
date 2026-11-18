@@ -13,6 +13,7 @@ registration, refresh tokens). This module:
 
 Nothing here touches call initiation, callbacks, the qualification engine or Plivo.
 """
+import asyncio
 import base64
 import hashlib
 import json
@@ -139,10 +140,30 @@ def pkce_pair():
     return verifier, challenge
 
 
+SESSION_LENGTH = timedelta(hours=24)
+
+
+def session_end(doc):
+    """When Sarvam ends this sign-in. It is fixed at consent: about 24 hours later, and refreshing does not extend it.
+
+    Verified live 2026-11-18: a refresh 0.2h and 21.8h after consent returned tokens expiring at the same 24h mark,
+    and after that mark the refresh token no longer exists. So this is a daily sign-in by Sarvam's design.
+    """
+    if doc.get("session_expires_at"):
+        return doc["session_expires_at"]
+    try:
+        return (datetime.fromisoformat(doc["connected_at"]) + SESSION_LENGTH).isoformat()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def account_public(doc):
     if not doc or doc.get("status") in (None, "pending", "disconnected"):
         return {"status": "disconnected", "connected_at": None, "sarvam_org_id": None, "sarvam_workspace_id": None, "error": None}
-    return {"status": doc.get("status", "disconnected"), "connected_at": doc.get("connected_at"),
+    status, end = doc.get("status", "disconnected"), session_end(doc)
+    if status == "connected" and end and datetime.fromisoformat(end) < datetime.now(timezone.utc):
+        status = "expired"  # say so up front instead of failing on the next click
+    return {"status": status, "connected_at": doc.get("connected_at"), "expires_at": end if status == "connected" else None,
             "sarvam_org_id": doc.get("sarvam_org_id"), "sarvam_workspace_id": doc.get("sarvam_workspace_id"),
             "error": doc.get("error"), "connected_by": doc.get("connected_by_email")}
 
@@ -210,13 +231,25 @@ async def finish_connect(db, state, code, ws_id=None):
             "grant_type": "authorization_code", "code": code, "redirect_uri": pending["redirect_uri"],
             "client_id": pending["client_id"], "code_verifier": verifier, "resource": MCP_URL})
     now = now_iso()
+    ends = (datetime.now(timezone.utc) + timedelta(seconds=float(tokens.get("expires_in") or SESSION_LENGTH.total_seconds()))).isoformat()
     await db.sarvam_account_connections.update_one({"_id": doc["_id"], "pending.state": state}, {
         "$set": {"status": "connected", "encrypted_tokens": token_envelope(ws_id, tokens), "client_id": pending["client_id"],
+                 "session_expires_at": ends,
                  "token_revision": int(doc.get("token_revision") or 0) + 1, "connected_at": now, "updated_at": now,
                  "connected_by_user_id": pending.get("user_id"), "connected_by_email": pending.get("user_email"),
                  "error": None, "sarvam_org_id": doc.get("sarvam_org_id"), "sarvam_workspace_id": doc.get("sarvam_workspace_id")},
         "$unset": {"pending": ""}})
     return ws_id
+
+
+async def after_sign_in(db, ws_id):
+    """A sign-in is the only window in which AREVEI can reach Sarvam for this workspace, so use it:
+    finish any inbound-call update that was waiting for one. Never raises, never holds the sign-in up for long."""
+    from sarvam_inbound import sync_after_agent_change
+    try:
+        await asyncio.wait_for(sync_after_agent_change(db, ws_id), timeout=20)
+    except Exception:  # the scheduled sweep finishes whatever did not fit
+        pass
 
 
 def token_envelope(ws_id, tokens):
@@ -751,6 +784,7 @@ async def complete_account(ws_id: str, body: PastedCallback, request: Request):
         raise SarvamBuilderError(400, "consent_failed", "Sarvam sign-in was cancelled" if error == "access_denied" else "Sarvam sign-in did not complete")
     db = db_from(request)
     await finish_connect(db, state, code, ws_id=ws_id)
+    await after_sign_in(db, ws_id)
     return account_public(await db.sarvam_account_connections.find_one({"workspace_id": ws_id}))
 
 
@@ -769,7 +803,7 @@ async def oauth_callback(request: Request, code: str = "", state: str = "", erro
         message = "Sarvam sign-in was cancelled" if error == "access_denied" else "Sarvam sign-in did not complete"
         return result_page(origin, "SARVAM_CONNECT_FAILED", message, status_code=400)
     try:
-        await finish_connect(db_from(request), state, code)
+        await after_sign_in(db_from(request), await finish_connect(db_from(request), state, code))
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
         return result_page(origin, "SARVAM_CONNECT_FAILED", detail.get("message", "Sarvam sign-in failed"), status_code=exc.status_code)

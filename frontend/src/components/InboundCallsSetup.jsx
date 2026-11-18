@@ -5,8 +5,13 @@ const detail = (error) => { const d = error?.response?.data?.detail; return d &&
 const errorMessage = (error, fallback) => detail(error)?.message || (error?.response?.data?.detail != null ? formatError(error.response.data.detail) : fallback);
 const when = (value) => { try { return value ? new Date(value).toLocaleString() : ""; } catch { return ""; } };
 
+// The lookup runs when a call starts, so it is always a little older than the call. Much older means it did not run.
+const lookupMissed = (route) => Boolean(route.caller_lookup !== "off" && route.last_call_at
+  && (!route.last_context_at || new Date(route.last_call_at) - new Date(route.last_context_at) > 30 * 60 * 1000));
+
 function lookupText(route) {
   if (route.caller_lookup === "off") return "Callers are matched to leads after the call. Recognising them during the call is not available for this agent.";
+  if (lookupMissed(route)) return "The caller lookup did not run on the latest call, so the caller was not recognised by name. Callers are still matched to leads after each call.";
   if (route.last_context_at && route.last_context_caller_seen) return "Returning callers are recognised by name during the call.";
   if (route.last_context_at && !route.last_context_caller_seen) return "Sarvam is not sending the caller's number to the lookup yet. In your Sarvam console, open the agent's \"arevei_caller_lookup\" tool and map caller_phone to User Identifier. Callers are still matched to leads after each call.";
   return "Returning callers will be recognised once the first inbound call comes in.";
@@ -56,7 +61,8 @@ export default function InboundCallsSetup({ workspaceId }) {
         <button type="button" disabled={busy} onClick={() => toggle(true)} className="ml-2 underline disabled:opacity-50">Fix now</button>
       </div>}
       {on && <>
-        <p className="text-xs text-muted-foreground">{lookupText(route)}</p>
+        <p className="text-xs text-muted-foreground">{lookupText(route)}{lookupMissed(route)
+          && <button type="button" disabled={busy} onClick={() => toggle(true)} className="ml-2 underline disabled:opacity-50">Fix now</button>}</p>
         <p className="text-xs text-muted-foreground">{route.last_call_at ? `Last inbound call: ${when(route.last_call_at)}` : "No inbound calls yet."}</p>
       </>}
       {message && <p role="status" className="text-sm">{message}</p>}

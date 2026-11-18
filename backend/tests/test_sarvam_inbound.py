@@ -465,3 +465,63 @@ def test_serverless_processes_the_call_before_answering(monkeypatch):
         event = await db.sarvam_inbound_events.find_one({"_id": inbound.event_key(ws, "int-lambda")})
         assert event["status"] == "processed" and event["lead_id"] == lead_id  # done before the response, no background task
     asyncio.run(isolated(run))
+
+
+def test_tools_set_up_from_a_tunnel_are_taken_back_by_the_real_server(sarvam, monkeypatch):
+    """Set up from a laptop, the lookup tools call a tunnel that later closes and nobody is recognised."""
+    fake, _ = sarvam
+    tunnel, real_base = "https://some-name.ngrok-free.dev", "https://api.crm.example"
+    async def run(db):
+        monkeypatch.setenv("PUBLIC_BASE_URL", tunnel)
+        ws = await dedicated_workspace(db)
+        await inbound.enable_inbound(db, ws, USER)
+        assert (await inbound.route_for(db, ws))["callback_base"] == tunnel
+        assert calls(fake, "configure_app_tool")[-1]["connector_config"]["url"].startswith(tunnel)
+        before = len(fake.tool_calls)
+        await inbound.sync_after_agent_change(db, ws)  # still on the tunnel: nothing to do
+        assert len(fake.tool_calls) == before
+
+        monkeypatch.setenv("PUBLIC_BASE_URL", real_base)
+        await inbound.sync_after_agent_change(db, ws)  # the hosted server's scheduled sweep
+        route = await inbound.route_for(db, ws)
+        assert route["callback_base"] == real_base and route["status"] == "active"
+        assert calls(fake, "configure_app_tool")[-1]["connector_config"]["url"] == f"{real_base}/api/sarvam/inbound/{ws}/context"
+        assert calls(fake, "create_api_tool")[-1]["url"] == f"{real_base}/api/sarvam/inbound/{ws}/find"
+        assert calls(fake, "configure_deployment")[-1]["webhook_config"]["url"] == f"{real_base}/api/sarvam/inbound/{ws}/result"
+        doc, _ = await load_config(db, ws, "sarvam")
+        assert doc["config"]["app_version"] == route["app_version"]  # outbound stays on the same committed version
+
+        after = len(fake.tool_calls)
+        await inbound.sync_after_agent_change(db, ws)  # repaired: quiet again
+        monkeypatch.setenv("PUBLIC_BASE_URL", tunnel)
+        await inbound.sync_after_agent_change(db, ws)  # a laptop sharing the database never takes them back
+        assert len(fake.tool_calls) == after and (await inbound.route_for(db, ws))["callback_base"] == real_base
+    asyncio.run(isolated(run))
+
+
+def test_repair_waits_for_a_sarvam_sign_in_and_says_so(sarvam, monkeypatch):
+    fake, _ = sarvam
+    async def run(db):
+        ws = await dedicated_workspace(db)
+        await inbound.enable_inbound(db, ws, USER)
+        # A route from before the address was recorded, and the day-long Sarvam sign-in has ended.
+        await db.sarvam_inbound_routes.update_one({"_id": ws}, {"$unset": {"callback_base": ""}})
+        await db.sarvam_account_connections.update_one({"workspace_id": ws}, {"$set": {"status": "expired"}})
+        before = len(fake.tool_calls)
+        await inbound.sync_after_agent_change(db, ws)
+        route = await inbound.route_for(db, ws)
+        assert len(fake.tool_calls) == before and route["status"] == "needs_attention" and "Sign in to Sarvam once" in route["error"]
+        assert route["enabled"]  # calls are still answered
+        # Signing in is enough: the repair runs by itself.
+        await db.sarvam_account_connections.update_one({"workspace_id": ws}, {"$set": {"status": "connected"}})
+        await builder.after_sign_in(db, ws)
+        route = await inbound.route_for(db, ws)
+        assert route["status"] == "active" and route["error"] is None and route["callback_base"] == "https://crm.example"
+    asyncio.run(isolated(run))
+
+
+def test_tunnel_hosts():
+    assert inbound.is_dev_tunnel("https://bookless-triform-lukas.ngrok-free.dev") and inbound.is_dev_tunnel("https://x.trycloudflare.com")
+    assert not inbound.is_dev_tunnel("https://api.arevei.com") and not inbound.is_dev_tunnel("https://ngrok-free.dev.example.com")
+    assert not inbound.base_needs_repair({"callback_base": "https://old.example"}, "https://new.example")  # two real servers: explicit only
+    assert not inbound.base_needs_repair({}, None)

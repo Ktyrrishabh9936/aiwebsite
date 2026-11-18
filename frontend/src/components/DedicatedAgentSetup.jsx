@@ -7,6 +7,7 @@ const LANGUAGES = ["English", "Hindi", "Bengali", "Gujarati", "Kannada", "Konkan
 const newKey = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `k-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const detail = (error) => { const d = error?.response?.data?.detail; return d && typeof d === "object" && !Array.isArray(d) ? d : null; };
 const errorMessage = (error, fallback) => detail(error)?.message || (error?.response?.data?.detail != null ? formatError(error.response.data.detail) : fallback);
+const until = (value) => { try { return value ? new Date(value).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : ""; } catch { return ""; } };
 const agentNameFor = (business) => `${(business || "My").replace(/[^\w\- ()]/g, " ").replace(/\s+/g, " ").trim().slice(0, 34) || "My"} Lead Qualifier`;
 
 /**
@@ -128,8 +129,8 @@ export default function DedicatedAgentSetup({ workspaceId, profile, configured, 
   const needsKey = !keySaved || unsaved;
   // What was filled in automatically stays out of the way, unless something is missing and needs the user.
   const needsAttention = connected && (needsKey || !form.connection_id || !form.agent_phone_number);
-  const accountText = account.status === "loading" ? "Checking…" : connected ? `Connected${account.connected_by ? ` as ${account.connected_by}` : ""}`
-    : account.status === "expired" ? "Sign-in expired" : account.status === "unavailable" ? "Status unavailable" : "Not connected";
+  const accountText = account.status === "loading" ? "Checking…" : connected ? `Connected${account.connected_by ? ` as ${account.connected_by}` : ""}${until(account.expires_at) ? ` · signed in until ${until(account.expires_at)}` : ""}`
+    : account.status === "expired" ? (configured ? "Signed out · your agent keeps working" : "Signed out") : account.status === "unavailable" ? "Status unavailable" : "Not connected";
   const field = "mt-1 h-11 w-full rounded-xl border bg-background px-3.5 text-sm";
   return (
     <div className="space-y-4" aria-label="Your own agent">
@@ -141,12 +142,12 @@ export default function DedicatedAgentSetup({ workspaceId, profile, configured, 
         </div>
         <button type="button" disabled={busy || account.status === "loading"} onClick={account.status === "unavailable" ? loadAccount : connect}
           className={`inline-flex h-10 items-center rounded-xl px-4 text-sm font-semibold disabled:opacity-50 ${connected ? "border font-medium hover:bg-accent" : "bg-primary text-primary-foreground hover:bg-primary/90"}`}>
-          {account.status === "unavailable" ? "Retry" : connected ? "Reconnect" : "Connect Sarvam account"}
+          {account.status === "unavailable" ? "Retry" : connected ? "Reconnect" : account.status === "expired" ? "Sign in to Sarvam" : "Connect Sarvam account"}
         </button>
       </div>
       {pasting && <SarvamPasteSignIn workspaceId={workspaceId} onCancel={() => setPasting(false)}
         onConnected={async () => { setPasting(false); setMessage("Sarvam account connected."); await loadAccount(); }} />}
-      {account.status === "expired" && <p className="text-xs text-muted-foreground">Sarvam sign-ins last about a day. Your existing agent keeps calling; reconnect only to create a new agent.</p>}
+      {(connected || account.status === "expired") && <p className="text-xs text-muted-foreground">Sarvam ends every sign-in after 24 hours. That is normal and nothing breaks: your agent keeps making and answering calls. Sign in again only when you want to create an agent or change inbound calls.</p>}
 
       {connected && (
         <div className="space-y-4 rounded-2xl border bg-background p-4 sm:p-5">
