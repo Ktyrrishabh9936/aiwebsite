@@ -66,10 +66,17 @@ HTTP and explicit stream errors now propagate rather than becoming empty replies
 Request logs contain provider, actual model, start/finish, latency and error type;
 they do not include prompts, response bodies, transcripts, headers or credentials.
 
-OpenRouter registrations and credentials remain available. Existing non-streaming
-fallback still retries the configured default on failure, which is now Mantle.
-No new Mantle-to-OpenRouter failover was introduced. Streaming still has no model
-failover. Existing generated-by metadata still records requested model IDs.
+Update 2026-11-20: OpenRouter, NVIDIA and OpenAI were removed. The only AI
+providers are Amazon Bedrock (Mantle and Converse) and the Claude API
+(`ANTHROPIC_API_KEY`; models `claude-opus-5-5`, `claude-sonnet-5-5`,
+`claude-haiku-5-5`), which serves every path Bedrock does: text/JSON generation
+(Brain, roadmap, qualification, daily plan), Manager streaming, Agent Mode tool
+calls and the coding agent. A workspace saved with a removed model ID runs on
+the default. Live check: `.\.venv\Scripts\python.exe scripts/verify-claude.py`.
+
+Existing non-streaming fallback still retries the configured default on failure,
+which is Mantle. Streaming still has no model failover. Existing generated-by
+metadata still records requested model IDs.
 
 ## Verification commands
 

@@ -30,7 +30,7 @@ export default function Projects() {
   const [loading, setLoading] = useState(true);
   const [projectOpen, setProjectOpen] = useState(false);
   const [name, setName] = useState("");
-  const [projectModelId, setProjectModelId] = useState("gpt-4o");
+  const [projectModelId, setProjectModelId] = useState("bedrock-claude-sonnet");
   const [template, setTemplate] = useState("react-vite");
   const [source, setSource] = useState("template");
   const [repoUrl, setRepoUrl] = useState("");

@@ -69,8 +69,8 @@ class TestModels:
         data = r.json()
         assert "models" in data and "default" in data
         ids = [m["id"] for m in data["models"]]
-        assert len(ids) >= 3, f"expected visible non-Bedrock models, got {len(ids)}: {ids}"
-        for expected in ["gemini-3-flash-preview", "deepseek/deepseek-chat", "meta-llama/llama-3.3-70b-instruct"]:
+        assert len(ids) >= 3, f"expected Bedrock Mantle and Claude models, got {len(ids)}: {ids}"
+        for expected in ["openai.gpt-oss-120b", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]:
             assert expected in ids, f"model {expected} missing"
         assert "bedrock" not in data.get("providers", {})
         assert not any(m.get("provider") == "bedrock" for m in data["models"])
@@ -94,11 +94,11 @@ class TestWorkspaceBrain:
         assert brain["business_profile"].get("company_name"), "empty company_name"
 
     def test_patch_workspace_model(self, auth_client, workspace):
-        r = auth_client.patch(f"{API}/workspaces/{workspace['id']}", json={"model_id": "deepseek/deepseek-chat"})
+        r = auth_client.patch(f"{API}/workspaces/{workspace['id']}", json={"model_id": "claude-sonnet-5-5"})
         assert r.status_code == 200
-        assert r.json()["model_id"] == "deepseek/deepseek-chat"
+        assert r.json()["model_id"] == "claude-sonnet-5-5"
         # revert
-        auth_client.patch(f"{API}/workspaces/{workspace['id']}", json={"model_id": "gemini-3-flash-preview"})
+        auth_client.patch(f"{API}/workspaces/{workspace['id']}", json={"model_id": "openai.gpt-oss-120b"})
 
     def test_edit_brain(self, auth_client, workspace):
         brain = dict(workspace["brain"])
@@ -191,7 +191,7 @@ class TestManagerChat:
         # Ask arithmetic question so we can validate real LLM output
         payload = {"message": "What is 17 + 26? Reply with just the number, nothing else.",
                    "history": [],
-                   "model_id": workspace.get("model_id", "gemini-3-flash-preview")}
+                   "model_id": workspace.get("model_id", "openai.gpt-oss-120b")}
         url = f"{API}/workspaces/{workspace['id']}/chat"
         with requests.post(url, json=payload, headers=auth_client.headers, stream=True, timeout=90) as r:
             assert r.status_code == 200

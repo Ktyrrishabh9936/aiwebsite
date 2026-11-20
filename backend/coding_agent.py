@@ -5,7 +5,6 @@ import logging
 import asyncio
 import base64
 import difflib
-from openai import AsyncOpenAI
 
 logger = logging.getLogger("coding_agent")
 
@@ -13,28 +12,18 @@ logger = logging.getLogger("coding_agent")
 CODING_MODELS = [
     {"id": "bedrock-claude-sonnet", "label": "Bedrock Claude Sonnet", "real": os.environ.get("BEDROCK_CODE_MODEL_ID") or "us.anthropic.claude-sonnet-4-6", "provider": "bedrock", "tier": "premium", "capabilities": ["coding", "reasoning", "design"]},
     {"id": "bedrock-vision", "label": "Bedrock Vision", "real": os.environ.get("BEDROCK_VISION_MODEL_ID") or os.environ.get("BEDROCK_CODE_MODEL_ID") or "us.anthropic.claude-sonnet-4-6", "provider": "bedrock", "tier": "premium", "capabilities": ["coding", "design", "vision"], "vision": True},
-    {"id": "gpt-5.6-terra", "label": "GPT-4o Terra", "real": "gpt-4o", "provider": "openai", "tier": "premium", "capabilities": ["coding", "design", "terminal", "vision"], "vision": True},
-    {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6", "real": "anthropic/claude-sonnet-4.5", "provider": "openrouter", "tier": "premium", "capabilities": ["coding", "reasoning", "design", "vision"], "vision": True},
-    {"id": "deepseek-v3", "label": "DeepSeek V3", "real": "deepseek/deepseek-chat", "provider": "openrouter", "tier": "fast", "capabilities": ["coding", "cheap"]},
-    {"id": "gpt-4o-mini", "label": "GPT-4o mini", "real": "gpt-4o-mini", "provider": "openai", "tier": "fast", "capabilities": ["coding", "cheap"]},
-    {"id": "minimax-m1", "label": "MiniMax M1", "real": "minimax/minimax-m1", "provider": "openrouter", "tier": "cheap", "capabilities": ["coding", "cheap"]},
+    {"id": "claude-opus-5-5", "label": "Claude Opus 5.5 — Anthropic", "real": "claude-opus-5-5", "provider": "anthropic", "tier": "premium", "capabilities": ["coding", "reasoning", "design", "vision"], "vision": True},
+    {"id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5 — Anthropic", "real": "claude-sonnet-5-5", "provider": "anthropic", "tier": "fast", "capabilities": ["coding", "reasoning", "design", "vision"], "vision": True},
+    {"id": "claude-haiku-5-5", "label": "Claude Haiku 5.5 — Anthropic", "real": "claude-haiku-5-5", "provider": "anthropic", "tier": "cheap", "capabilities": ["coding", "cheap", "vision"], "vision": True},
 ]
 CODING_MODEL_MAP = {m["id"]: m for m in CODING_MODELS}
-DEFAULT_CODING_MODEL = "gpt-5.6-terra"
+DEFAULT_CODING_MODEL = "bedrock-claude-sonnet"
 AWS_REGION = os.environ.get("AWS_REGION") or "us-east-1"
 TREE_HINT_FILES = {
     "package.json", "vite.config.js", "vite.config.ts", "next.config.js", "next.config.mjs",
     "src/App.jsx", "src/App.tsx", "src/main.jsx", "src/main.tsx", "src/index.js",
     "app/page.tsx", "pages/index.js", "pages/index.tsx", "index.html", "README.md",
 }
-
-
-def _client(provider):
-    if provider == "openrouter":
-        return AsyncOpenAI(api_key=os.environ["OPENROUTER_API_KEY"], base_url="https://openrouter.ai/api/v1")
-    if provider == "nvidia":
-        return AsyncOpenAI(api_key=os.environ["NVIDIA_NIM_API_KEY"], base_url="https://integrate.api.nvidia.com/v1")
-    return AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 
 def _bedrock_client():
@@ -71,6 +60,12 @@ BEDROCK_TOOLS = [
     for t in TOOLS
 ]
 
+ANTHROPIC_TOOLS = [
+    {"name": t["function"]["name"], "description": t["function"]["description"],
+     "input_schema": t["function"]["parameters"], "eager_input_streaming": True}
+    for t in TOOLS
+]
+
 SYSTEM = """You are Arevei Coding Agent, an expert full-stack engineer working inside a live Daytona Linux sandbox.
 The project lives at the project root (all paths are relative to it). It may be ANY language or framework — inspect the files first to learn the stack. A dev/web server, when relevant, listens on port 5173.
 
@@ -84,16 +79,6 @@ Rules:
 - Keep changes focused on the user's request while still delivering a complete product-quality surface.
 - Do NOT start a long-running dev server yourself (the platform manages it). You may run install commands.
 - When completely done, end with a SHORT summary (2-4 markdown bullets) of exactly what you changed."""
-
-
-def _openai_user_content(user_message, attachments):
-    content = [{"type": "text", "text": user_message}]
-    for item in attachments or []:
-        mime = item.get("mime_type") or ""
-        data = item.get("data_base64") or ""
-        if mime.startswith("image/") and data:
-            content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}})
-    return content if len(content) > 1 else user_message
 
 
 def _bedrock_user_content(user_message, attachments):
@@ -124,39 +109,6 @@ class AgentTurnState:
         self.file_tree_listed = False
         self.file_tree_summary = ""
         self.file_count = 0
-
-
-def _collect_bedrock_stream(client, **kwargs):
-    response = client.converse_stream(**kwargs)
-    message = {"role": "assistant", "content": []}
-    text_parts = []
-    tool_parts = {}
-    stop_reason = None
-    for event in response.get("stream", []):
-        if "contentBlockStart" in event:
-            start = event["contentBlockStart"].get("start", {})
-            if "toolUse" in start:
-                idx = event["contentBlockStart"]["contentBlockIndex"]
-                tool_parts[idx] = {"toolUseId": start["toolUse"]["toolUseId"], "name": start["toolUse"]["name"], "input": ""}
-        elif "contentBlockDelta" in event:
-            idx = event["contentBlockDelta"]["contentBlockIndex"]
-            delta = event["contentBlockDelta"].get("delta", {})
-            if delta.get("text"):
-                text_parts.append(delta["text"])
-            if delta.get("toolUse", {}).get("input") is not None:
-                tool_parts.setdefault(idx, {})["input"] = tool_parts.setdefault(idx, {}).get("input", "") + delta["toolUse"]["input"]
-        elif "messageStop" in event:
-            stop_reason = event["messageStop"].get("stopReason")
-    if text_parts:
-        message["content"].append({"text": "".join(text_parts)})
-    for idx in sorted(tool_parts):
-        tool = tool_parts[idx]
-        try:
-            parsed = json.loads(tool.get("input") or "{}")
-        except Exception:
-            parsed = {}
-        message["content"].append({"toolUse": {"toolUseId": tool.get("toolUseId"), "name": tool.get("name"), "input": parsed}})
-    return message, stop_reason
 
 
 async def _run_bedrock_agent(ops, m, history, user_message, attachments, extra_system_context=""):
@@ -240,89 +192,96 @@ async def _run_bedrock_agent(ops, m, history, user_message, attachments, extra_s
     yield {"type": "done", "steps": steps, "summary": final["text"], "changed_files": final["changed_files"]}
 
 
-async def run_agent(ops, model_id, history, user_message, attachments=None, extra_system_context=""):
-    """Async generator yielding SSE event dicts with token-level streaming."""
-    m = CODING_MODEL_MAP.get(model_id) or CODING_MODEL_MAP[DEFAULT_CODING_MODEL]
-    if m["provider"] == "bedrock":
-        async for ev in _run_bedrock_agent(ops, m, history, user_message, attachments or [], extra_system_context):
-            yield ev
-        return
-    client = _client(m["provider"])
-
-    messages = [{"role": "system", "content": SYSTEM + (extra_system_context or "")}]
+def _anthropic_messages(history, user_message, attachments):
+    messages = []
     for h in history[-8:]:
-        messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": _openai_user_content(user_message, attachments or [])})
+        role = "assistant" if h["role"] == "assistant" else "user"
+        # Claude needs a user message first and rejects empty text.
+        if h.get("content") and (messages or role == "user"):
+            messages.append({"role": role, "content": h["content"]})
+    content = [{"type": "text", "text": user_message}]
+    for item in attachments or []:
+        mime = item.get("mime_type") or ""
+        data = item.get("data_base64") or ""
+        if mime in {"image/png", "image/jpeg", "image/webp", "image/gif"} and data:
+            content.append({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}})
+    messages.append({"role": "user", "content": content})
+    return messages
 
+
+def _valid_tool_input(name, args):
+    # Tool inputs stream in as they are written, so a cut-off call can arrive as a partial object.
+    required = next((t["function"]["parameters"].get("required", []) for t in TOOLS if t["function"]["name"] == name), [])
+    return isinstance(args, dict) and all(isinstance(args.get(key), str) for key in required)
+
+
+async def _run_anthropic_agent(ops, m, history, user_message, attachments, extra_system_context=""):
+    import anthropic
+    import llm_service as llm
+    messages = _anthropic_messages(history, user_message, attachments)
+    params = llm.anthropic_params(m["real"], SYSTEM + (extra_system_context or ""), 32000,
+                                  effort=os.environ.get("ANTHROPIC_CODE_EFFORT") or "high", replay_thinking=True)
     steps = []
     changed_files = {}
     summary = ""
     state = AgentTurnState()
     try:
-        for _ in range(14):
-            stream = await client.chat.completions.create(
-                model=m["real"], messages=messages, tools=TOOLS, tool_choice="auto",
-                temperature=0.2, stream=True, max_tokens=8000,
-            )
-            content_buf = ""
-            tool_calls = {}
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                if getattr(delta, "content", None):
-                    content_buf += delta.content
-                    yield {"type": "assistant_delta", "text": delta.content}
-                if getattr(delta, "tool_calls", None):
-                    for tc in delta.tool_calls:
-                        slot = tool_calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
-                        if tc.id:
-                            slot["id"] = tc.id
-                        if tc.function and tc.function.name:
-                            slot["name"] = tc.function.name
-                        if tc.function and tc.function.arguments:
-                            slot["args"] += tc.function.arguments
-
-            if not tool_calls:
-                summary = content_buf or "Done."
-                break
-
-            messages.append({
-                "role": "assistant", "content": content_buf or "",
-                "tool_calls": [{"id": s["id"] or f"call_{i}", "type": "function",
-                                "function": {"name": s["name"], "arguments": s["args"] or "{}"}}
-                               for i, s in sorted(tool_calls.items())],
-            })
-            for i, s in sorted(tool_calls.items()):
-                name = s["name"]
-                try:
-                    args = json.loads(s["args"] or "{}")
-                except Exception:
-                    args = {}
-                result, extra = await _execute(ops, name, args, state)
-                if extra:
-                    steps.append(extra)
-                    if extra["type"] == "file_changed":
-                        changed_files[extra["path"]] = extra
-                    yield extra
-                messages.append({"role": "tool", "tool_call_id": s["id"] or f"call_{i}", "content": result[:20000]})
-        else:
-            summary = "Reached step limit. Partial changes applied."
+        async with llm.anthropic_client() as client:
+            for _ in range(14):
+                async with client.beta.messages.stream(**params, tools=ANTHROPIC_TOOLS, messages=messages) as stream:
+                    async for event in stream:
+                        if event.type == "text":
+                            yield {"type": "assistant_delta", "text": event.text}
+                    response = await stream.get_final_message()
+                text = "".join(block.text for block in response.content if block.type == "text")
+                if text:
+                    summary = text
+                if response.stop_reason == "refusal":
+                    summary = "Claude declined this request."
+                    break
+                tool_uses = [block for block in response.content if block.type == "tool_use"]
+                if not tool_uses:
+                    break
+                # The whole reply goes back unchanged so Claude keeps its reasoning between steps.
+                messages.append({"role": "assistant", "content": response.content})
+                results = []
+                for tool_use in tool_uses:
+                    if response.stop_reason == "max_tokens" or not _valid_tool_input(tool_use.name, tool_use.input):
+                        results.append({"type": "tool_result", "tool_use_id": tool_use.id, "is_error": True,
+                                        "content": "This tool call was cut off or incomplete and was not run. Retry it, writing smaller files if needed."})
+                        continue
+                    result, extra = await _execute(ops, tool_use.name, tool_use.input, state)
+                    if extra:
+                        steps.append(extra)
+                        if extra["type"] == "file_changed":
+                            changed_files[extra["path"]] = extra
+                        yield extra
+                    results.append({"type": "tool_result", "tool_use_id": tool_use.id, "content": result[:20000]})
+                messages.append({"role": "user", "content": results})
+            else:
+                summary = "Reached step limit. Partial changes applied."
     except Exception as e:
-        logger.exception("agent failed")
-        raw = str(e)
-        if "402" in raw or "more credits" in raw or "insufficient" in raw.lower():
-            msg = f"The model '{m['label']}' needs OpenRouter credits (your OpenRouter account balance is too low). Add credits at openrouter.ai/settings/credits, or switch to an OpenAI-backed model like GPT-4o Terra or GPT-4o mini."
-        elif "401" in raw or "invalid api key" in raw.lower():
-            msg = f"Auth failed for '{m['label']}'. Check the provider API key."
+        logger.exception("claude agent failed")
+        if isinstance(e, anthropic.AuthenticationError):
+            msg = f"Auth failed for '{m['label']}'. Check ANTHROPIC_API_KEY."
+        elif isinstance(e, anthropic.RateLimitError):
+            msg = f"'{m['label']}' is rate limited right now. Try again shortly or switch to a Bedrock model."
         else:
-            msg = raw[:300]
+            msg = str(e)[:300]
         yield {"type": "error", "message": msg}
         summary = summary or f"Could not complete: {msg}"
 
-    final = {"type": "final_summary", "text": summary, "changed_files": list(changed_files.values())}
+    final = {"type": "final_summary", "text": summary or "Done.", "changed_files": list(changed_files.values())}
     yield final
-    yield {"type": "done", "steps": steps, "summary": summary, "changed_files": final["changed_files"]}
+    yield {"type": "done", "steps": steps, "summary": final["text"], "changed_files": final["changed_files"]}
+
+
+async def run_agent(ops, model_id, history, user_message, attachments=None, extra_system_context=""):
+    """Async generator yielding SSE event dicts with token-level streaming."""
+    m = CODING_MODEL_MAP.get(model_id) or CODING_MODEL_MAP[DEFAULT_CODING_MODEL]
+    runner = _run_anthropic_agent if m["provider"] == "anthropic" else _run_bedrock_agent
+    async for ev in runner(ops, m, history, user_message, attachments or [], extra_system_context):
+        yield ev
 
 
 async def _execute(ops, name, args, state=None):

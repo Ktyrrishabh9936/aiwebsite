@@ -70,20 +70,20 @@ def test_stream_http_failure_is_visible(monkeypatch):
         asyncio.run(run())
 
 
-def test_openrouter_request_and_existing_default_fallback(monkeypatch):
+def test_removed_and_failing_models_use_the_default(monkeypatch):
     calls = []
 
     def handler(request):
-        body = json.loads(request.content)
-        calls.append(body["model"])
-        if request.url.host == "openrouter.ai":
-            assert "max_tokens" in body
-            return httpx.Response(503)
+        calls.append(json.loads(request.content)["model"])
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
     mock_http(monkeypatch, handler)
+    # Workspaces saved with a model from a removed provider keep working on the default.
     assert asyncio.run(llm.generate_text("deepseek/deepseek-chat", "system", "prompt")) == "ok"
-    assert calls == ["deepseek/deepseek-chat", "openai.gpt-oss-120b"]
+    # A Claude call that fails (here: no key configured) is retried on the default.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert asyncio.run(llm.generate_text("claude-opus-5-5", "system", "prompt")) == "ok"
+    assert calls == ["openai.gpt-oss-120b", "openai.gpt-oss-120b"]
 
 
 def test_missing_mantle_key(monkeypatch):
@@ -103,8 +103,8 @@ def test_qualification_uses_selected_model_without_changing_result(monkeypatch):
 
     monkeypatch.setattr(plivo_calls, "generate_json", generate)
     config = {"is_enabled": True, "passing_score": 70, "criteria": []}
-    for selected in (None, "deepseek/deepseek-chat"):
+    for selected in (None, "claude-opus-5-5"):
         result = asyncio.run(plivo_calls.run_ai_qualification("Synthetic transcript", config, model_id=selected))
         assert result["status"] == "qualified"
         assert result["score"] == 80
-    assert calls == [llm.DEFAULT_MODEL, "deepseek/deepseek-chat"]
+    assert calls == [llm.DEFAULT_MODEL, "claude-opus-5-5"]

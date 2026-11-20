@@ -14,7 +14,7 @@ from workspace_access import member_context
 router = APIRouter(prefix="/workspaces/{ws_id}/billing", tags=["Billing"])
 CENT = Decimal("0.01")
 MILLION = Decimal("1000000")
-BEDROCK_PROVIDERS = {"bedrock", "bedrock_mantle"}
+PRICED_PROVIDERS = {"bedrock", "bedrock_mantle", "anthropic"}
 
 
 def usd(value):
@@ -54,11 +54,11 @@ def rate_card():
 
 
 def price_event(event, rates):
-    """Return a dollar estimate only when a metered Bedrock call has a valid rate."""
+    """Return a dollar estimate only when a metered Bedrock or Claude call has a valid rate."""
     if not event.get("metered"):
         return None
     provider = event.get("provider") or ""
-    if provider not in BEDROCK_PROVIDERS:
+    if provider not in PRICED_PROVIDERS:
         return None
     key = f"{provider}::{event.get('model') or ''}"
     if key not in rates:
@@ -72,7 +72,7 @@ def price_event(event, rates):
     cache_write_rate = cache_rates[1] if len(cache_rates) > 1 else None
     if (cache_read and cache_read_rate is None) or (cache_write and cache_write_rate is None):
         return None
-    # OpenAI-compatible usage includes cached input in prompt_tokens; Converse reports it separately.
+    # OpenAI-compatible usage includes cached input in prompt_tokens; Converse and Claude report it separately.
     if provider == "bedrock_mantle":
         input_tokens = max(0, input_tokens - cache_read - cache_write)
     return (Decimal(input_tokens) * input_rate + Decimal(output_tokens) * output_rate

@@ -30,10 +30,3 @@ def test_list_files_is_summarized_and_duplicate_is_hidden():
     assert "src/App.jsx" in result
     assert "package.json" in result
     assert "do not call list_files again" in result
-
-
-def test_terra_label_matches_real_model_family():
-    model = coding_agent.CODING_MODEL_MAP["gpt-5.6-terra"]
-
-    assert model["real"] == "gpt-4o"
-    assert model["label"] == "GPT-4o Terra"

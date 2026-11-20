@@ -4,7 +4,7 @@ import { AlertCircle, CheckCircle2, Loader2, Radio } from "lucide-react";
 import api, { API } from "../lib/api";
 import { streamManagerAgent } from "../lib/managerAgent";
 
-export const providerName = (provider) => ({ bedrock_mantle: "Amazon Bedrock", bedrock: "Amazon Bedrock", openrouter: "OpenRouter", openai: "OpenAI", nvidia: "NVIDIA" }[provider] || provider || "Unknown provider");
+export const providerName = (provider) => ({ bedrock_mantle: "Amazon Bedrock", bedrock: "Amazon Bedrock", anthropic: "Claude (Anthropic)" }[provider] || provider || "Unknown provider");
 
 export function aiErrorMessage(error) {
   if (error?.managerMessage) return String(error.message);

@@ -24,17 +24,6 @@ async def main():
     print("QUALIFICATION", "PASS" if ok else "FAIL structured qualification")
     if not ok:
         raise RuntimeError("Qualification verification failed")
-    try:
-        # Direct adapter call prevents a fallback from masquerading as OpenRouter success.
-        r = await llm._openai_compatible(llm.OPENROUTER_URL, llm.OPENROUTER_KEY, "google/gemini-2.5-flash", "Follow instructions.", "Reply with exactly OPENROUTER_OK", 0.2, 128)
-        print("OPENROUTER", "PASS" if r.strip() == "OPENROUTER_OK" else "FAIL unexpected response")
-    except httpx.HTTPStatusError as exc:
-        print("OPENROUTER FAIL HTTP", exc.response.status_code)
-        try:
-            err = exc.response.json().get("error", {})
-            print("OPENROUTER_ERROR", str(err.get("message", ""))[:300])
-        except ValueError:
-            pass
     frontend = dotenv_values(ROOT / "frontend" / ".env")
     backend = dotenv_values(ROOT / "backend" / ".env")
     base = frontend.get("REACT_APP_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")

@@ -230,22 +230,19 @@ async def list_models():
             elif not has_creds:
                 reason = "AWS_BEARER_TOKEN_BEDROCK or AWS_ACCESS_KEY_ID is missing"
             return {"configured": has_boto3 and has_creds, "reason": reason}
-        if provider == "openrouter":
-            ok = bool(os.environ.get("OPENROUTER_API_KEY"))
-            return {"configured": ok, "reason": "" if ok else "OPENROUTER_API_KEY is missing"}
-        if provider == "nvidia":
-            ok = bool(os.environ.get("NVIDIA_NIM_API_KEY"))
-            return {"configured": ok, "reason": "" if ok else "NVIDIA_NIM_API_KEY is missing"}
+        if provider == "anthropic":
+            has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+            has_sdk = has_python_package("anthropic")
+            reason = "" if has_key and has_sdk else "ANTHROPIC_API_KEY is missing" if has_sdk else "anthropic is missing in the backend Python environment"
+            return {"configured": has_key and has_sdk, "reason": reason}
         return {"configured": False, "reason": "Unknown provider"}
 
     visible_models = [m for m in llm_service.MODELS if m.get("provider") != "bedrock"]
-    statuses = {provider: provider_status(provider) for provider in ("openrouter", "nvidia")}
     models = [{**m, **provider_status(m.get("provider"))} for m in visible_models]
     return {"models": models, "default": llm_service.DEFAULT_MODEL,
             "providers": {
                 "bedrock_mantle": {**provider_status("bedrock_mantle"), "env": "BEDROCK_MANTLE_API_KEY (or AWS_BEARER_TOKEN_BEDROCK)"},
-                "openrouter": {**statuses["openrouter"], "env": "OPENROUTER_API_KEY"},
-                "nvidia": {**statuses["nvidia"], "env": "NVIDIA_NIM_API_KEY"},
+                "anthropic": {**provider_status("anthropic"), "env": "ANTHROPIC_API_KEY"},
             }}
 
 

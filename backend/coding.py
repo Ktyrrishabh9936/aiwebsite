@@ -299,15 +299,11 @@ def build_coding_router(db):
     @router.get("/models")
     async def models():
         def provider_status(provider):
-            if provider == "openai":
-                ok = bool(os.environ.get("OPENAI_API_KEY"))
-                return {"configured": ok, "reason": "" if ok else "OPENAI_API_KEY is missing"}
-            if provider == "openrouter":
-                ok = bool(os.environ.get("OPENROUTER_API_KEY"))
-                return {"configured": ok, "reason": "" if ok else "OPENROUTER_API_KEY is missing"}
-            if provider == "nvidia":
-                ok = bool(os.environ.get("NVIDIA_NIM_API_KEY"))
-                return {"configured": ok, "reason": "" if ok else "NVIDIA_NIM_API_KEY is missing"}
+            if provider == "anthropic":
+                has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+                has_sdk = has_python_package("anthropic")
+                reason = "" if has_key and has_sdk else "ANTHROPIC_API_KEY is missing" if has_sdk else "anthropic is missing in the backend Python environment"
+                return {"configured": has_key and has_sdk, "reason": reason}
             if provider == "bedrock":
                 has_creds = bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or os.environ.get("AWS_ACCESS_KEY_ID"))
                 has_boto3 = has_python_package("boto3")
@@ -320,14 +316,11 @@ def build_coding_router(db):
             return {"configured": False, "reason": "Unknown provider"}
 
         coding_agent = _coding_agent()
-        statuses = {provider: provider_status(provider) for provider in ("bedrock", "openai", "openrouter", "nvidia")}
         models = [{**m, **provider_status(m.get("provider"))} for m in coding_agent.CODING_MODELS]
         return {"models": models, "default": coding_agent.DEFAULT_CODING_MODEL,
                 "providers": {
-                    "bedrock": {**statuses["bedrock"], "env": "AWS_BEARER_TOKEN_BEDROCK (or AWS_ACCESS_KEY_ID)"},
-                    "openai": {**statuses["openai"], "env": "OPENAI_API_KEY"},
-                    "openrouter": {**statuses["openrouter"], "env": "OPENROUTER_API_KEY"},
-                    "nvidia": {**statuses["nvidia"], "env": "NVIDIA_NIM_API_KEY"},
+                    "bedrock": {**provider_status("bedrock"), "env": "AWS_BEARER_TOKEN_BEDROCK (or AWS_ACCESS_KEY_ID)"},
+                    "anthropic": {**provider_status("anthropic"), "env": "ANTHROPIC_API_KEY"},
                     "github": {"configured": bool(os.environ.get("GITHUB_TOKEN")), "env": "GITHUB_TOKEN"},
                     "skills": {"configured": True, "env": "Built-in coding, design, terminal, file, and testing skills"},
                 },

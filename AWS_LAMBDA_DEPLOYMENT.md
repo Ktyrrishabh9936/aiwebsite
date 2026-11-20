@@ -48,13 +48,13 @@ In Lambda **Configuration** > **Environment variables**, add the values used by
 the production backend. Copy the active production values one-by-one from
 `backend/.env` or the old backend host; do not upload the `.env` file itself.
 
+AI runs on Amazon Bedrock and the Claude API only. Add `ANTHROPIC_API_KEY` if any
+workspace or coding project uses a Claude model.
+
 These unused integrations do not need to be copied:
 
 ```text
 EMERGENT_LLM_KEY
-OPENROUTER_API_KEY
-NVIDIA_NIM_API_KEY
-OPENAI_API_KEY
 DAYTONA_API_KEY
 DAYTONA_TARGET
 VERCEL_CLIENT_ID

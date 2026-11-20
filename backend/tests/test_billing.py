@@ -41,6 +41,7 @@ def test_missing_or_non_bedrock_rates_are_never_silently_zero(monkeypatch):
     rates = rate_card()
     assert price_event({"provider": "bedrock", "model": "model-a", "metered": True, "input_tokens": 1_000_000}, rates) == Decimal("3")
     assert price_event({"provider": "openrouter", "model": "model-a", "metered": True, "input_tokens": 1_000_000}, rates) is None
+    assert price_event({"provider": "anthropic", "model": "claude-opus-5-5", "metered": True, "input_tokens": 1_000_000}, {"anthropic::claude-opus-5-5": (Decimal("4"), Decimal("20"))}) == Decimal("4")
     assert price_event({"provider": "bedrock", "model": "unknown", "metered": True, "input_tokens": 1_000_000}, rates) is None
 
 
